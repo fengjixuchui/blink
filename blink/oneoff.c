@@ -17,9 +17,21 @@
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
-#include "blink/machine.h"
+#include "blink/macros.h"
+#include "blink/timespec.h"
+#include "blink/types.h"
+#include "blink/util.h"
 
 int main(int argc, char *argv[]) {
-  printf("%zu\n", sizeof(struct Machine));
+  u8 A[] = {20, 20, 0, 0, 20, 20, 0, 0, 20, 20};
+  int i, n = Magikarp(A, ARRAYLEN(A));
+  for (i = 0; i < n; ++i) {
+    if (i) printf(", ");
+    printf("%d", A[i]);
+  }
+  printf("\n");
 }

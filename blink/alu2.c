@@ -23,116 +23,88 @@
 #include "blink/assert.h"
 #include "blink/endian.h"
 #include "blink/flags.h"
+#include "blink/lock.h"
+#include "blink/log.h"
+#include "blink/machine.h"
 #include "blink/modrm.h"
+#include "blink/mop.h"
 #include "blink/swap.h"
 
-static void Alub(struct Machine *m, u32 rde, aluop_f op) {
+void OpAlub(P) {
   u8 *p, *q;
-  p = GetModrmRegisterBytePointerWrite(m, rde);
+  aluop_f f;
+  f = kAlu[(Opcode(rde) & 070) >> 3][0];
+  p = GetModrmRegisterBytePointerWrite1(A);
   q = ByteRexrReg(m, rde);
-  if (!Lock(rde)) {
-    Write8(p, op(Read8(p), Read8(q), &m->flags));
-  } else {
-#if !defined(__riscv) && !defined(__MICROBLAZE__)
-    u8 x, y, z;
-    x = Read8(p);
-    y = Read8(q);
-    do {
-      z = op(x, y, &m->flags);
-    } while (!atomic_compare_exchange_weak_explicit(
-        (atomic_uchar *)p, &x, z, memory_order_release, memory_order_relaxed));
-#else
-    OpUd(m, rde);
-#endif
-  }
+  if (Lock(rde)) LOCK(&m->system->lock_lock);
+  Write8(p, f(m, Load8(p), Get8(q)));
+  if (Lock(rde)) UNLOCK(&m->system->lock_lock);
 }
 
-void OpAlubAdd(struct Machine *m, u32 rde) {
-  Alub(m, rde, Add8);
-}
-
-void OpAlubOr(struct Machine *m, u32 rde) {
-  Alub(m, rde, Or8);
-}
-
-void OpAlubAdc(struct Machine *m, u32 rde) {
-  Alub(m, rde, Adc8);
-}
-
-void OpAlubSbb(struct Machine *m, u32 rde) {
-  Alub(m, rde, Sbb8);
-}
-
-void OpAlubAnd(struct Machine *m, u32 rde) {
-  Alub(m, rde, And8);
-}
-
-void OpAlubSub(struct Machine *m, u32 rde) {
-  Alub(m, rde, Sub8);
-}
-
-void OpAlubXor(struct Machine *m, u32 rde) {
-  Alub(m, rde, Xor8);
-}
-
-void OpAluw(struct Machine *m, u32 rde) {
+void OpAluw(P) {
   u8 *p, *q;
+  aluop_f f;
   q = RegRexrReg(m, rde);
+  f = kAlu[(Opcode(rde) & 070) >> 3][RegLog2(rde)];
   if (Rexw(rde)) {
-    p = GetModrmRegisterWordPointerWrite(m, rde, 8);
-    if (Lock(rde) && !((intptr_t)p & 7)) {
+    p = GetModrmRegisterWordPointerWrite8(A);
 #if LONG_BIT == 64
+    if (Lock(rde) && !((intptr_t)p & 7)) {
       u64 x, y, z;
-      x = atomic_load_explicit((_Atomic(u64) *)p, memory_order_relaxed);
+      x = atomic_load_explicit((_Atomic(u64) *)p, memory_order_acquire);
       y = atomic_load_explicit((_Atomic(u64) *)q, memory_order_relaxed);
-      y = SWAP64LE(y);
+      y = Little64(y);
       do {
-        z = kAlu[(m->xedd->op.opcode & 070) >> 3][ALU_INT64](SWAP64LE(x), y,
-                                                             &m->flags);
-        z = SWAP64LE(z);
+        z = Little64(f(m, Little64(x), y));
       } while (!atomic_compare_exchange_weak_explicit((_Atomic(u64) *)p, &x, z,
                                                       memory_order_release,
                                                       memory_order_relaxed));
-#else
-      OpUd(m, rde);
-#endif
-    } else {
-      u64 x, y, z;
-      x = Read64(p);
-      y = Read64(q);
-      z = kAlu[(m->xedd->op.opcode & 070) >> 3][ALU_INT64](x, y, &m->flags);
-      Write64(p, z);
+      return;
     }
+#endif
+    u64 x, y, z;
+    x = Load64(p);
+    y = Get64(q);
+    z = f(m, x, y);
+    Store64(p, z);
   } else if (!Osz(rde)) {
     u32 x, y, z;
-    p = GetModrmRegisterWordPointerWrite(m, rde, 4);
+    p = GetModrmRegisterWordPointerWrite4(A);
+    if (IsModrmRegister(rde)) {
+      Put32(p + 4, 0);
+    }
     if (Lock(rde) && !((intptr_t)p & 3)) {
-      x = atomic_load_explicit((_Atomic(u32) *)p, memory_order_relaxed);
+      x = atomic_load_explicit((_Atomic(u32) *)p, memory_order_acquire);
       y = atomic_load_explicit((_Atomic(u32) *)q, memory_order_relaxed);
-      y = SWAP32LE(y);
+      y = Little32(y);
       do {
-        z = kAlu[(m->xedd->op.opcode & 070) >> 3][ALU_INT32](SWAP32LE(x), y,
-                                                             &m->flags);
-        z = SWAP32LE(z);
+        z = Little32(f(m, Little32(x), y));
       } while (!atomic_compare_exchange_weak_explicit((_Atomic(u32) *)p, &x, z,
                                                       memory_order_release,
                                                       memory_order_relaxed));
     } else {
-      x = Read32(p);
-      y = Read32(q);
-      z = kAlu[(m->xedd->op.opcode & 070) >> 3][ALU_INT32](x, y, &m->flags);
-      Write32(p, z);
-    }
-    if (IsModrmRegister(rde)) {
-      Write32(p + 4, 0);
+      x = Load32(p);
+      y = Get32(q);
+      z = f(m, x, y);
+      Store32(p, z);
     }
   } else {
     u16 x, y, z;
-    unassert(!Lock(rde));
-    p = GetModrmRegisterWordPointerWrite(m, rde, 2);
-    x = Read16(p);
-    y = Read16(q);
-    z = kAlu[(m->xedd->op.opcode & 070) >> 3][ALU_INT16](x, y, &m->flags);
-    Write16(p, z);
+    if (Lock(rde)) LOCK(&m->system->lock_lock);
+    p = GetModrmRegisterWordPointerWrite2(A);
+    x = Load16(p);
+    y = Get16(q);
+    z = f(m, x, y);
+    Store16(p, z);
+    if (Lock(rde)) UNLOCK(&m->system->lock_lock);
+  }
+  if (m->path.jb && !Lock(rde)) {
+    Jitter(A, "B r0s1= A r0a2= s1a1=");
+    if (CanSkipFlags(m, CF | ZF | SF | OF | AF | PF)) {
+      if (GetFlagDeps(rde)) Jitter(A, "s0a0=");
+      Jitter(A, "m r0 D", kJustAlu[(Opcode(rde) & 070) >> 3]);
+    } else {
+      Jitter(A, "s0a0= c r0 D", f);
+    }
   }
 }

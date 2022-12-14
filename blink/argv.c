@@ -20,11 +20,12 @@
 #include <string.h>
 
 #include "blink/endian.h"
+#include "blink/linux.h"
 #include "blink/machine.h"
-#include "blink/memory.h"
+#include "blink/random.h"
+#include "blink/syscall.h"
 
-#define STACKALIGN      16
-#define LINUX_AT_EXECFN 31
+#define STACKALIGN 16
 
 static size_t GetArgListLen(char **p) {
   size_t n;
@@ -32,22 +33,28 @@ static size_t GetArgListLen(char **p) {
   return n;
 }
 
-static i64 PushString(struct Machine *m, char *s) {
-  size_t n;
-  i64 sp;
-  n = strlen(s) + 1;
-  sp = Read64(m->sp);
-  sp -= n;
-  Write64(m->sp, sp);
-  VirtualRecv(m, sp, s, n);
+static i64 PushBuffer(struct Machine *m, void *s, size_t n) {
+  i64 sp = Get64(m->sp) - n;
+  Put64(m->sp, sp);
+  CopyToUser(m, sp, s, n);
   return sp;
+}
+
+static i64 PushString(struct Machine *m, char *s) {
+  if (s) {
+    return PushBuffer(m, s, strlen(s) + 1);
+  } else {
+    return 0;
+  }
 }
 
 void LoadArgv(struct Machine *m, char *prog, char **args, char **vars) {
   u8 *bytes;
+  char rng[16];
   i64 sp, *p, *bloc;
   size_t i, narg, nenv, naux, nall;
-  naux = 1;
+  GetRandom(rng, 16);
+  naux = 2;
   nenv = GetArgListLen(vars);
   narg = GetArgListLen(args);
   nall = 1 + narg + 1 + nenv + 1 + (naux + 1) * 2;
@@ -55,8 +62,10 @@ void LoadArgv(struct Machine *m, char *prog, char **args, char **vars) {
   p = bloc + nall;
   *--p = 0;
   *--p = 0;
-  *--p = PushString(m, prog);
-  *--p = LINUX_AT_EXECFN;
+  *--p = PushBuffer(m, rng, 16);
+  *--p = AT_RANDOM_LINUX;
+  *--p = PushString(m, g_blink_path);
+  *--p = AT_EXECFN_LINUX;
   for (*--p = 0, i = nenv; i--;) *--p = PushString(m, vars[i]);
   for (*--p = 0, i = narg; i--;) *--p = PushString(m, args[i]);
   *--p = narg;
@@ -69,7 +78,7 @@ void LoadArgv(struct Machine *m, char *prog, char **args, char **vars) {
   for (i = 0; i < nall; ++i) {
     Write64(bytes + i * 8, bloc[i]);
   }
-  VirtualRecv(m, sp, bytes, nall * 8);
+  CopyToUser(m, sp, bytes, nall * 8);
   free(bytes);
   free(bloc);
 }

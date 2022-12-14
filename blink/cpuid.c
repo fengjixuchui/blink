@@ -16,73 +16,72 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/assert.h"
 #include "blink/endian.h"
 #include "blink/machine.h"
 
-void OpCpuid(struct Machine *m, u32 rde) {
+void OpCpuid(P) {
   u32 ax, bx, cx, dx;
-  ax = 0;
-  bx = 0;
-  cx = 0;
-  dx = 0;
-  switch (Read32(m->ax)) {
+  ax = bx = cx = dx = 0;
+  switch (Get32(m->ax)) {
     case 0:
     case 0x80000000:
+      unassert(m->system->brand);
       ax = 7;
-      bx = 'G' | 'e' << 8 | 'n' << 16 | 'u' << 24;
-      dx = 'i' | 'n' << 8 | 'e' << 16 | 'C' << 24;
-      cx = 'o' | 's' << 8 | 'm' << 16 | 'o' << 24;
+      bx = Read32((u8 *)(m->system->brand + 0));
+      dx = Read32((u8 *)(m->system->brand + 4));
+      cx = Read32((u8 *)(m->system->brand + 8));
       break;
     case 1:
-      cx |= 1 << 0;  /* sse3 */
-      cx |= 1 << 1;  /* pclmulqdq */
-      cx |= 1 << 9;  /* ssse3 */
-      cx |= 1 << 23; /* popcnt */
-      cx |= 1 << 30; /* rdrnd */
-      cx |= 0 << 25; /* aes */
-      cx |= 1 << 13; /* cmpxchg16b */
-      dx |= 1 << 0;  /* fpu */
-      dx |= 1 << 4;  /* tsc */
-      dx |= 1 << 6;  /* pae */
-      dx |= 1 << 8;  /* cmpxchg8b */
-      dx |= 1 << 15; /* cmov */
-      dx |= 1 << 19; /* clflush */
-      dx |= 1 << 23; /* mmx */
-      dx |= 1 << 24; /* fxsave */
-      dx |= 1 << 25; /* sse */
-      dx |= 1 << 26; /* sse2 */
+      cx |= 1 << 0;   // sse3
+      cx |= 1 << 1;   // pclmulqdq
+      cx |= 1 << 9;   // ssse3
+      cx |= 1 << 23;  // popcnt
+      cx |= 1 << 30;  // rdrnd
+      cx |= 0 << 25;  // aes
+      cx |= 1 << 13;  // cmpxchg16b
+      dx |= 1 << 0;   // fpu
+      dx |= 1 << 4;   // tsc
+      dx |= 1 << 6;   // pae
+      dx |= 1 << 8;   // cmpxchg8b
+      dx |= 1 << 15;  // cmov
+      dx |= 1 << 19;  // clflush
+      dx |= 1 << 23;  // mmx
+      dx |= 1 << 24;  // fxsave
+      dx |= 1 << 25;  // sse
+      dx |= 1 << 26;  // sse2
       break;
     case 7:
-      switch (Read32(m->cx)) {
+      switch (Get32(m->cx)) {
         case 0:
-          bx |= 1 << 0;  /* fsgsbase */
-          bx |= 1 << 9;  /* erms */
-          bx |= 1 << 18; /* rdseed */
-          cx |= 1 << 22; /* rdpid */
+          bx |= 1 << 0;   // fsgsbase
+          bx |= 1 << 9;   // erms
+          bx |= 1 << 18;  // rdseed
+          cx |= 1 << 22;  // rdpid
           break;
         default:
           break;
       }
       break;
     case 0x80000001:
-      cx |= 1 << 0;  /* lahf */
-      dx |= 1 << 0;  /* fpu */
-      dx |= 1 << 8;  /* cmpxchg8b */
-      dx |= 1 << 11; /* syscall */
-      dx |= 1 << 15; /* cmov */
-      dx |= 1 << 23; /* mmx */
-      dx |= 1 << 24; /* fxsave */
-      dx |= 1 << 27; /* rdtscp */
-      dx |= 1 << 29; /* long */
+      cx |= 1 << 0;   // lahf
+      dx |= 1 << 0;   // fpu
+      dx |= 1 << 8;   // cmpxchg8b
+      dx |= 1 << 11;  // syscall
+      dx |= 1 << 15;  // cmov
+      dx |= 1 << 23;  // mmx
+      dx |= 1 << 24;  // fxsave
+      dx |= 1 << 27;  // rdtscp
+      dx |= 1 << 29;  // long
       break;
     case 0x80000007:
-      dx |= 1 << 8; /* invtsc */
+      dx |= 1 << 8;  // invtsc
       break;
     default:
       break;
   }
-  Write64(m->ax, ax);
-  Write64(m->bx, bx);
-  Write64(m->cx, cx);
-  Write64(m->dx, dx);
+  Put64(m->ax, ax);
+  Put64(m->bx, bx);
+  Put64(m->cx, cx);
+  Put64(m->dx, dx);
 }

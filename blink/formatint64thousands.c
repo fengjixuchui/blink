@@ -1,7 +1,7 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
 │vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
 ╞══════════════════════════════════════════════════════════════════════════════╡
-│ Copyright 2022 Justine Alexandra Roberts Tunney                              │
+│ Copyright 2021 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
 │ Permission to use, copy, modify, and/or distribute this software for         │
 │ any purpose with or without fee is hereby granted, provided that the         │
@@ -16,22 +16,39 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
-#include <alloca.h>
+#include "blink/builtin.h"
+#include "blink/util.h"
 
-#include "blink/machine.h"
-#include "blink/signal.h"
-
-_Thread_local struct Machine *g_machine;
-
-void Actor(struct Machine *m) {
-  int sig;
-  void *volatile lol = alloca(256);
-  (void)lol;
-  for (g_machine = m;;) {
-    LoadInstruction(m);
-    ExecuteInstruction(m);
-    if (__builtin_expect(m->signals, 0) && (sig = ConsumeSignal(m))) {
-      TerminateSignal(m, sig);
-    }
+/**
+ * Converts unsigned 64-bit integer to string w/ commas.
+ *
+ * @param p needs at least 27 bytes
+ * @return pointer to nul byte
+ */
+dontinline char *FormatUint64Thousands(char *p, uint64_t x) {
+  size_t i;
+  char m[26];
+  i = 0;
+  do {
+    m[i++] = x % 10 + '0';
+    x = x / 10;
+  } while (x);
+  for (;;) {
+    *p++ = m[--i];
+    if (!i) break;
+    if (!(i % 3)) *p++ = ',';
   }
+  *p = '\0';
+  return p;
+}
+
+/**
+ * Converts 64-bit integer to string w/ commas.
+ *
+ * @param p needs at least 27 bytes
+ * @return pointer to nul byte
+ */
+char *FormatInt64Thousands(char *p, int64_t x) {
+  if (x < 0) *p++ = '-', x = -(uint64_t)x;
+  return FormatUint64Thousands(p, x);
 }

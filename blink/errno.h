@@ -9,7 +9,9 @@ long einval(void);
 long enfile(void);
 long enomem(void);
 long enosys(void);
+long enotsup(void);
 long eoverflow(void);
+long eperm(void);
 long esrch(void);
 
 #endif /* BLINK_ERRNO_H_ */

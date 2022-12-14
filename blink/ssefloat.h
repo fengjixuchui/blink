@@ -2,29 +2,30 @@
 #define BLINK_SSEFLOAT_H_
 #include "blink/machine.h"
 
-void OpUnpcklpsd(struct Machine *, u32);
-void OpUnpckhpsd(struct Machine *, u32);
-void OpPextrwGdqpUdqIb(struct Machine *, u32);
-void OpPinsrwVdqEwIb(struct Machine *, u32);
-void OpShuffle(struct Machine *, u32);
-void OpShufpsd(struct Machine *, u32);
-void OpSqrtpsd(struct Machine *, u32);
-void OpRsqrtps(struct Machine *, u32);
-void OpRcpps(struct Machine *, u32);
-void OpComissVsWs(struct Machine *, u32);
-void OpAddpsd(struct Machine *, u32);
-void OpMulpsd(struct Machine *, u32);
-void OpSubpsd(struct Machine *, u32);
-void OpDivpsd(struct Machine *, u32);
-void OpMinpsd(struct Machine *, u32);
-void OpMaxpsd(struct Machine *, u32);
-void OpCmppsd(struct Machine *, u32);
-void OpAndpsd(struct Machine *, u32);
-void OpAndnpsd(struct Machine *, u32);
-void OpOrpsd(struct Machine *, u32);
-void OpXorpsd(struct Machine *, u32);
-void OpHaddpsd(struct Machine *, u32);
-void OpHsubpsd(struct Machine *, u32);
-void OpAddsubpsd(struct Machine *, u32);
+void OpUnpcklpsd(P);
+void OpUnpckhpsd(P);
+void OpPextrwGdqpUdqIb(P);
+void OpPinsrwVdqEwIb(P);
+void OpShuffle(P);
+void OpShufpsd(P);
+void OpSqrtpsd(P);
+void OpRsqrtps(P);
+void OpRcpps(P);
+void OpComissVsWs(P);
+void OpAddpsd(P);
+void OpMulpsd(P);
+void OpSubpsd(P);
+void OpDivpsd(P);
+void OpMinpsd(P);
+void OpMaxpsd(P);
+void OpCmppsd(P);
+void OpAndpsd(P);
+void OpAndnpsd(P);
+void OpOrpsd(P);
+void OpXorpsd(P);
+void OpHaddpsd(P);
+void OpHsubpsd(P);
+void OpAddsubpsd(P);
+void OpMovmskpsd(P);
 
 #endif /* BLINK_SSEFLOAT_H_ */

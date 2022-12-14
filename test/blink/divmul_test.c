@@ -31,13 +31,13 @@ struct Machine m[1];
 
 struct {
   const char *name;
-  void (*f)(struct Machine *, uint32_t);
-  uint32_t rde;
-  uint64_t ax;
-  uint64_t cx;
-  uint64_t dx;
-  uint64_t out_ax;
-  uint64_t out_dx;
+  void (*f)(P);
+  u64 rde;
+  u64 ax;
+  u64 cx;
+  u64 dx;
+  u64 out_ax;
+  u64 out_dx;
   bool out_cf;
   bool out_of;
 } kVector[] = {
@@ -59,7 +59,7 @@ TEST(divmul, test) {
     Write64(m->ax, kVector[i].ax);
     Write64(m->cx, kVector[i].cx);
     Write64(m->dx, kVector[i].dx);
-    kVector[i].f(m, kVector[i].rde);
+    kVector[i].f(m, kVector[i].rde, 0, 0);
     ASSERT_EQ(kVector[i].out_ax, Read64(m->ax), "%d: %s", i, kVector[i].name);
     ASSERT_EQ(kVector[i].out_dx, Read64(m->dx), "%d: %s", i, kVector[i].name);
     ASSERT_EQ(kVector[i].out_cf, GetFlag(m->flags, FLAGS_CF), "%d: %s", i,

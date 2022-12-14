@@ -2,9 +2,9 @@
 #define BLINK_TIME_H_
 #include "blink/machine.h"
 
-void OpPause(struct Machine *, u32);
-void OpRdtsc(struct Machine *, u32);
-void OpRdtscp(struct Machine *, u32);
-void OpRdpid(struct Machine *, u32);
+void OpPause(P);
+void OpRdtsc(P);
+void OpRdtscp(P);
+void OpRdpid(P);
 
 #endif /* BLINK_TIME_H_ */

@@ -16,11 +16,13 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include <fcntl.h>
 #include <limits.h>
 #include <stdatomic.h>
 #include <unistd.h>
 
 #include "blink/assert.h"
+#include "blink/debug.h"
 #include "blink/dll.h"
 #include "blink/errno.h"
 #include "blink/fds.h"
@@ -34,7 +36,7 @@ static int CloseFd(struct System *s, struct Fd *fd) {
     if (fd->dirstream) {
       rc = closedir(fd->dirstream);
     } else {
-      rc = fd->cb->close(sf);
+      rc = IB(fd->cb->close)(sf);
     }
     FreeFd(&s->fds, fd);
   } else {
@@ -43,7 +45,7 @@ static int CloseFd(struct System *s, struct Fd *fd) {
   return rc;
 }
 
-int OpClose(struct System *s, i32 fildes) {
+int SysClose(struct System *s, i32 fildes) {
   int rc;
   struct Fd *fd;
   LockFds(&s->fds);
@@ -56,11 +58,11 @@ int OpClose(struct System *s, i32 fildes) {
   return rc;
 }
 
-int OpCloseRange(struct System *s, u32 first, u32 last, u32 flags) {
+int SysCloseRange(struct System *s, u32 first, u32 last, u32 flags) {
   int rc;
   struct Fd *fd;
-  dll_element *e, *e2;
-  if (flags || last > INT_MAX || first > INT_MAX || first > last) {
+  struct Dll *e, *e2;
+  if (flags || first > last) {
     return einval();
   }
   LockFds(&s->fds);
@@ -73,4 +75,18 @@ int OpCloseRange(struct System *s, u32 first, u32 last, u32 flags) {
   }
   UnlockFds(&s->fds);
   return rc;
+}
+
+void SysCloseExec(struct System *s) {
+  struct Fd *fd;
+  struct Dll *e, *e2;
+  LockFds(&s->fds);
+  for (e = dll_first(s->fds.list); e; e = e2) {
+    fd = FD_CONTAINER(e);
+    e2 = dll_next(s->fds.list, e);
+    if (fd->cloexec) {
+      CloseFd(s, fd);
+    }
+  }
+  UnlockFds(&s->fds);
 }

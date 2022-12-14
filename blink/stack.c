@@ -21,212 +21,194 @@
 #include "blink/address.h"
 #include "blink/builtin.h"
 #include "blink/endian.h"
+#include "blink/log.h"
 #include "blink/macros.h"
-#include "blink/memory.h"
 #include "blink/modrm.h"
+#include "blink/mop.h"
 #include "blink/tsan.h"
+#include "blink/x86.h"
 
-static const u8 kStackOsz[2][3] = {
-    {
-        2,  // kStackOsz[0][XED_MODE_REAL]
-        4,  // kStackOsz[0][XED_MODE_LEGACY]
-        8,  // kStackOsz[0][XED_MODE_LONG]
-    },
-    {
-        4,  // kStackOsz[1][XED_MODE_REAL]
-        2,  // kStackOsz[1][XED_MODE_LEGACY]
-        2,  // kStackOsz[1][XED_MODE_LONG]
-    },
-};
+static const u8 kStackOsz[2][3] = {{4, 4, 8}, {2, 2, 2}};
+static const u8 kCallOsz[2][3] = {{4, 4, 8}, {2, 2, 8}};
 
-static const u8 kCallOsz[2][3] = {
-    {
-        2,  // kCallOsz[0][XED_MODE_REAL]
-        4,  // kCallOsz[0][XED_MODE_LEGACY]
-        8,  // kCallOsz[0][XED_MODE_LONG]
-    },
-    {
-        4,  // kCallOsz[1][XED_MODE_REAL]
-        2,  // kCallOsz[1][XED_MODE_LEGACY]
-        8,  // kCallOsz[1][XED_MODE_LONG]
-    },
-};
-
-static void WriteStackWord(u8 *p, u32 rde, u32 osz, u64 x) {
-  IGNORE_RACES_START();
+static void WriteStackWord(u8 *p, u64 rde, u32 osz, u64 x) {
   if (osz == 8) {
-    Write64(p, x);
+    Store64(p, x);
   } else if (osz == 2) {
-    Write16(p, x);
+    Store16(p, x);
   } else {
-    Write32(p, x);
+    Store32(p, x);
   }
-  IGNORE_RACES_END();
 }
 
 static u64 ReadStackWord(u8 *p, u32 osz) {
   u64 x;
-  IGNORE_RACES_START();
   if (osz == 8) {
-    x = Read64(p);
+    x = Load64(p);
   } else if (osz == 2) {
-    x = Read16(p);
+    x = Load16(p);
   } else {
-    x = Read32(p);
+    x = Load32(p);
   }
-  IGNORE_RACES_END();
   return x;
 }
 
-static void PushN(struct Machine *m, u32 rde, u64 x, unsigned mode,
-                  unsigned osz) {
+static void PushN(P, u64 x, unsigned mode, unsigned osz) {
   u8 *w;
   u64 v;
-  void *p[2];
   u8 b[8];
+  void *p[2];
   switch (mode) {
     case XED_MODE_REAL:
-      v = (Read32(m->sp) - osz) & 0xffff;
-      Write16(m->sp, v);
-      v += Read64(m->ss);
+      v = (Get32(m->sp) - osz) & 0xffff;
+      Put16(m->sp, v);
+      v += m->ss;
       break;
     case XED_MODE_LEGACY:
-      v = (Read32(m->sp) - osz) & 0xffffffff;
-      Write64(m->sp, v);
-      v += Read64(m->ss);
+      v = (Get32(m->sp) - osz) & 0xffffffff;
+      Put64(m->sp, v);
+      v += m->ss;
       break;
     case XED_MODE_LONG:
-      v = (Read64(m->sp) - osz) & 0xffffffffffffffff;
-      Write64(m->sp, v);
+      v = (Get64(m->sp) - osz) & 0xffffffffffffffff;
+      Put64(m->sp, v);
       break;
     default:
       __builtin_unreachable();
   }
-  w = (u8 *)AccessRam(m, v, osz, p, b, false);
-  IGNORE_RACES_START();
+  w = AccessRam(m, v, osz, p, b, false);
   WriteStackWord(w, rde, osz, x);
   EndStore(m, v, osz, p, b);
-  IGNORE_RACES_END();
 }
 
-void Push(struct Machine *m, u32 rde, u64 x) {
-  PushN(m, rde, x, Eamode(rde), kStackOsz[Osz(rde)][Mode(rde)]);
+void Push(P, u64 x) {
+  PushN(A, x, Eamode(rde), kStackOsz[Osz(rde)][Mode(rde)]);
 }
 
-void OpPushZvq(struct Machine *m, u32 rde) {
-  unsigned osz = kStackOsz[Osz(rde)][Mode(rde)];
-  PushN(m, rde, ReadStackWord(RegRexbSrm(m, rde), osz), Eamode(rde), osz);
+void OpPushZvq(P) {
+  int osz = kStackOsz[Osz(rde)][Mode(rde)];
+  PushN(A, ReadStackWord(RegRexbSrm(m, rde), osz), Eamode(rde), osz);
+  if (HasLinearMapping(m) && !Osz(rde)) {
+    Jitter(A, "a1i m", RexbSrm(rde), FastPush);
+  }
 }
 
-static u64 PopN(struct Machine *m, u32 rde, u16 extra,
-                     unsigned osz) {
+static u64 PopN(P, u16 extra, unsigned osz) {
   u64 v;
-  void *p[2];
   u8 b[8];
+  void *p[2];
   switch (Eamode(rde)) {
     case XED_MODE_LONG:
-      v = Read64(m->sp);
-      Write64(m->sp, v + osz + extra);
+      v = Get64(m->sp);
+      Put64(m->sp, v + osz + extra);
       break;
     case XED_MODE_LEGACY:
-      v = Read32(m->sp);
-      Write64(m->sp, (v + osz + extra) & 0xffffffff);
-      v += Read64(m->ss);
+      v = Get32(m->sp);
+      Put64(m->sp, (v + osz + extra) & 0xffffffff);
+      v += m->ss;
       break;
     case XED_MODE_REAL:
-      v = Read32(m->sp);
-      Write16(m->sp, v + osz + extra);
-      v += Read64(m->ss);
+      v = Get16(m->sp);
+      Put16(m->sp, v + osz + extra);
+      v += m->ss;
       break;
     default:
       __builtin_unreachable();
   }
-  return ReadStackWord((u8 *)AccessRam(m, v, osz, p, b, true), osz);
+  return ReadStackWord(AccessRam(m, v, osz, p, b, true), osz);
 }
 
-u64 Pop(struct Machine *m, u32 rde, u16 extra) {
-  return PopN(m, rde, extra, kStackOsz[Osz(rde)][Mode(rde)]);
+u64 Pop(P, u16 extra) {
+  return PopN(A, extra, kStackOsz[Osz(rde)][Mode(rde)]);
 }
 
-void OpPopZvq(struct Machine *m, u32 rde) {
+void OpPopZvq(P) {
   u64 x;
-  unsigned osz;
+  int osz;
   osz = kStackOsz[Osz(rde)][Mode(rde)];
-  x = PopN(m, rde, 0, osz);
+  x = PopN(A, 0, osz);
   switch (osz) {
     case 8:
     case 4:
-      Write64(RegRexbSrm(m, rde), x);
+      Put64(RegRexbSrm(m, rde), x);
       break;
     case 2:
-      Write16(RegRexbSrm(m, rde), x);
+      Put16(RegRexbSrm(m, rde), x);
       break;
     default:
       __builtin_unreachable();
   }
+  if (HasLinearMapping(m) && !Osz(rde)) {
+    Jitter(A, "a1i m", RexbSrm(rde), FastPop);
+  }
 }
 
-static void OpCall(struct Machine *m, u32 rde, u64 func) {
-  PushN(m, rde, m->ip, Mode(rde), kCallOsz[Osz(rde)][Mode(rde)]);
+static void OpCall(P, u64 func) {
+  PushN(A, m->ip, Mode(rde), kCallOsz[Osz(rde)][Mode(rde)]);
   m->ip = func;
 }
 
-void OpCallJvds(struct Machine *m, u32 rde) {
-  OpCall(m, rde, m->ip + m->xedd->op.disp);
+void OpCallJvds(P) {
+  OpCall(A, m->ip + disp);
+  if (HasLinearMapping(m) && !Osz(rde)) {
+    Jitter(A, "a1i m", disp, FastCall);
+  }
 }
 
-static u64 LoadAddressFromMemory(struct Machine *m, u32 rde) {
-  unsigned osz;
-  osz = kCallOsz[Osz(rde)][Mode(rde)];
-  return ReadStackWord(GetModrmRegisterWordPointerRead(m, rde, osz), osz);
+static u64 LoadAddressFromMemory(P) {
+  unsigned osz = kCallOsz[Osz(rde)][Mode(rde)];
+  return ReadStackWord(GetModrmRegisterWordPointerRead(A, osz), osz);
 }
 
-void OpCallEq(struct Machine *m, u32 rde) {
-  OpCall(m, rde, LoadAddressFromMemory(m, rde));
+void OpCallEq(P) {
+  OpCall(A, LoadAddressFromMemory(A));
 }
 
-void OpJmpEq(struct Machine *m, u32 rde) {
-  m->ip = LoadAddressFromMemory(m, rde);
+void OpJmpEq(P) {
+  m->ip = LoadAddressFromMemory(A);
 }
 
-void OpLeave(struct Machine *m, u32 rde) {
+void OpLeave(P) {
   switch (Eamode(rde)) {
     case XED_MODE_LONG:
-      Write64(m->sp, Read64(m->bp));
-      Write64(m->bp, Pop(m, rde, 0));
+      Put64(m->sp, Get64(m->bp));
+      Put64(m->bp, Pop(A, 0));
       break;
     case XED_MODE_LEGACY:
-      Write64(m->sp, Read32(m->bp));
-      Write64(m->bp, Pop(m, rde, 0));
+      Put64(m->sp, Get32(m->bp));
+      Put64(m->bp, Pop(A, 0));
       break;
     case XED_MODE_REAL:
-      Write16(m->sp, Read16(m->bp));
-      Write16(m->bp, Pop(m, rde, 0));
+      Put16(m->sp, Get16(m->bp));
+      Put16(m->bp, Pop(A, 0));
       break;
     default:
       __builtin_unreachable();
   }
 }
 
-void OpRet(struct Machine *m, u32 rde) {
-  m->ip = Pop(m, rde, m->xedd->op.uimm0);
+void OpRet(P) {
+  m->ip = Pop(A, 0);
+  if (HasLinearMapping(m) && !Osz(rde)) {
+    Jitter(A, "m", FastRet);
+  }
 }
 
-void OpPushEvq(struct Machine *m, u32 rde) {
-  unsigned osz;
-  osz = kStackOsz[Osz(rde)][Mode(rde)];
-  Push(m, rde,
-       ReadStackWord(GetModrmRegisterWordPointerRead(m, rde, osz), osz));
+relegated void OpRetIw(P) {
+  m->ip = Pop(A, uimm0);
 }
 
-void OpPopEvq(struct Machine *m, u32 rde) {
-  unsigned osz;
-  osz = kStackOsz[Osz(rde)][Mode(rde)];
-  WriteStackWord(GetModrmRegisterWordPointerWrite(m, rde, osz), rde, osz,
-                 Pop(m, rde, 0));
+void OpPushEvq(P) {
+  unsigned osz = kStackOsz[Osz(rde)][Mode(rde)];
+  Push(A, ReadStackWord(GetModrmRegisterWordPointerRead(A, osz), osz));
 }
 
-static void Pushaw(struct Machine *m, u32 rde) {
+void OpPopEvq(P) {
+  unsigned osz = kStackOsz[Osz(rde)][Mode(rde)];
+  WriteStackWord(GetModrmRegisterWordPointerWrite(A, osz), rde, osz, Pop(A, 0));
+}
+
+static relegated void Pushaw(P) {
   u16 v;
   u8 b[8][2];
   memcpy(b[0], m->di, 2);
@@ -237,11 +219,11 @@ static void Pushaw(struct Machine *m, u32 rde) {
   memcpy(b[5], m->dx, 2);
   memcpy(b[6], m->cx, 2);
   memcpy(b[7], m->ax, 2);
-  Write16(m->sp, (v = (Read16(m->sp) - sizeof(b)) & 0xffff));
-  VirtualRecv(m, Read64(m->ss) + v, b, sizeof(b));
+  Put16(m->sp, (v = (Read16(m->sp) - sizeof(b)) & 0xffff));
+  CopyToUser(m, m->ss + v, b, sizeof(b));
 }
 
-static void Pushad(struct Machine *m, u32 rde) {
+static relegated void Pushad(P) {
   u32 v;
   u8 b[8][4];
   memcpy(b[0], m->di, 4);
@@ -252,14 +234,14 @@ static void Pushad(struct Machine *m, u32 rde) {
   memcpy(b[5], m->dx, 4);
   memcpy(b[6], m->cx, 4);
   memcpy(b[7], m->ax, 4);
-  Write64(m->sp, (v = (Read32(m->sp) - sizeof(b)) & 0xffffffff));
-  VirtualRecv(m, Read64(m->ss) + v, b, sizeof(b));
+  Put64(m->sp, (v = (Get32(m->sp) - sizeof(b)) & 0xffffffff));
+  CopyToUser(m, m->ss + v, b, sizeof(b));
 }
 
-static void Popaw(struct Machine *m, u32 rde) {
+static relegated void Popaw(P) {
   u8 b[8][2];
-  VirtualSend(m, b, Read64(m->ss) + Read16(m->sp), sizeof(b));
-  Write16(m->sp, (Read32(m->sp) + sizeof(b)) & 0xffff);
+  CopyFromUser(m, b, m->ss + Read16(m->sp), sizeof(b));
+  Put16(m->sp, (Get32(m->sp) + sizeof(b)) & 0xffff);
   memcpy(m->di, b[0], 2);
   memcpy(m->si, b[1], 2);
   memcpy(m->bp, b[2], 2);
@@ -270,10 +252,10 @@ static void Popaw(struct Machine *m, u32 rde) {
   memcpy(m->ax, b[7], 2);
 }
 
-static void Popad(struct Machine *m, u32 rde) {
+static relegated void Popad(P) {
   u8 b[8][4];
-  VirtualSend(m, b, Read64(m->ss) + Read32(m->sp), sizeof(b));
-  Write64(m->sp, (Read32(m->sp) + sizeof(b)) & 0xffffffff);
+  CopyFromUser(m, b, m->ss + Get32(m->sp), sizeof(b));
+  Put64(m->sp, (Get32(m->sp) + sizeof(b)) & 0xffffffff);
   memcpy(m->di, b[0], 4);
   memcpy(m->si, b[1], 4);
   memcpy(m->bp, b[2], 4);
@@ -284,49 +266,49 @@ static void Popad(struct Machine *m, u32 rde) {
   memcpy(m->ax, b[7], 4);
 }
 
-void OpPusha(struct Machine *m, u32 rde) {
+relegated void OpPusha(P) {
   switch (Eamode(rde)) {
     case XED_MODE_REAL:
-      Pushaw(m, rde);
+      Pushaw(A);
       break;
     case XED_MODE_LEGACY:
-      Pushad(m, rde);
+      Pushad(A);
       break;
     case XED_MODE_LONG:
-      OpUd(m, rde);
+      OpUdImpl(m);
     default:
       __builtin_unreachable();
   }
 }
 
-void OpPopa(struct Machine *m, u32 rde) {
+relegated void OpPopa(P) {
   switch (Eamode(rde)) {
     case XED_MODE_REAL:
-      Popaw(m, rde);
+      Popaw(A);
       break;
     case XED_MODE_LEGACY:
-      Popad(m, rde);
+      Popad(A);
       break;
     case XED_MODE_LONG:
-      OpUd(m, rde);
+      OpUdImpl(m);
     default:
       __builtin_unreachable();
   }
 }
 
-void OpCallf(struct Machine *m, u32 rde) {
-  Push(m, rde, Read64(m->cs) >> 4);
-  Push(m, rde, m->ip);
-  Write64(m->cs, m->xedd->op.uimm0 << 4);
-  m->ip = m->xedd->op.disp & (Osz(rde) ? 0xffff : 0xffffffff);
+relegated void OpCallf(P) {
+  Push(A, m->cs >> 4);
+  Push(A, m->ip);
+  m->cs = uimm0 << 4;
+  m->ip = disp & (Osz(rde) ? 0xffff : 0xffffffff);
   if (m->system->onlongbranch) {
     m->system->onlongbranch(m);
   }
 }
 
-void OpRetf(struct Machine *m, u32 rde) {
-  m->ip = Pop(m, rde, 0);
-  Write64(m->cs, Pop(m, rde, m->xedd->op.uimm0) << 4);
+relegated void OpRetf(P) {
+  m->ip = Pop(A, 0);
+  m->cs = Pop(A, uimm0) << 4;
   if (m->system->onlongbranch) {
     m->system->onlongbranch(m);
   }

@@ -21,7 +21,6 @@
 #include "blink/address.h"
 #include "blink/builtin.h"
 #include "blink/endian.h"
-#include "blink/memory.h"
 #include "blink/modrm.h"
 #include "blink/ssemov.h"
 
@@ -33,492 +32,461 @@ static u32 pmovmskb(const u8 p[16]) {
   return m;
 }
 
-static void MovdquVdqWdq(struct Machine *m, u32 rde) {
-  memcpy(XmmRexrReg(m, rde), GetModrmRegisterXmmPointerRead16(m, rde), 16);
+static void MovdquVdqWdq(P) {
+  memcpy(XmmRexrReg(m, rde), GetModrmRegisterXmmPointerRead16(A), 16);
 }
 
-static void MovdquWdqVdq(struct Machine *m, u32 rde) {
-  memcpy(GetModrmRegisterXmmPointerWrite16(m, rde), XmmRexrReg(m, rde), 16);
+static void MovdquWdqVdq(P) {
+  memcpy(GetModrmRegisterXmmPointerWrite16(A), XmmRexrReg(m, rde), 16);
 }
 
-static void MovupsVpsWps(struct Machine *m, u32 rde) {
-  MovdquVdqWdq(m, rde);
+static void MovupsVpsWps(P) {
+  MovdquVdqWdq(A);
 }
 
-static void MovupsWpsVps(struct Machine *m, u32 rde) {
-  MovdquWdqVdq(m, rde);
+static void MovupsWpsVps(P) {
+  MovdquWdqVdq(A);
 }
 
-static void MovupdVpsWps(struct Machine *m, u32 rde) {
-  MovdquVdqWdq(m, rde);
+static void MovupdVpsWps(P) {
+  MovdquVdqWdq(A);
 }
 
-static void MovupdWpsVps(struct Machine *m, u32 rde) {
-  MovdquWdqVdq(m, rde);
+static void MovupdWpsVps(P) {
+  MovdquWdqVdq(A);
 }
 
-void OpLddquVdqMdq(struct Machine *m, u32 rde) {
-  MovdquVdqWdq(m, rde);
+void OpLddquVdqMdq(P) {
+  MovdquVdqWdq(A);
 }
 
-void OpMovntiMdqpGdqp(struct Machine *m, u32 rde) {
+void OpMovntiMdqpGdqp(P) {
   if (Rexw(rde)) {
-    memcpy(ComputeReserveAddressWrite8(m, rde), XmmRexrReg(m, rde), 8);
+    memcpy(ComputeReserveAddressWrite8(A), XmmRexrReg(m, rde), 8);
   } else {
-    memcpy(ComputeReserveAddressWrite4(m, rde), XmmRexrReg(m, rde), 4);
+    memcpy(ComputeReserveAddressWrite4(A), XmmRexrReg(m, rde), 4);
   }
 }
 
-static void MovdqaVdqMdq(struct Machine *m, u32 rde) {
-  i64 v;
-  u8 *p;
-  v = ComputeAddress(m, rde);
-  SetReadAddr(m, v, 16);
-  if ((v & 15) || !(p = (u8 *)FindReal(m, v))) {
-    ThrowSegmentationFault(m, v);
-  }
-  memcpy(XmmRexrReg(m, rde), p, 16);
+static void MovdqaVdqWdq(P) {
+  memcpy(XmmRexrReg(m, rde), GetXmmAddress(A), 16);
 }
 
-static void MovdqaMdqVdq(struct Machine *m, u32 rde) {
-  i64 v;
-  u8 *p;
-  v = ComputeAddress(m, rde);
-  SetWriteAddr(m, v, 16);
-  if ((v & 15) || !(p = (u8 *)FindReal(m, v))) {
-    ThrowSegmentationFault(m, v);
-  }
-  memcpy(p, XmmRexrReg(m, rde), 16);
+static void MovdqaWdqVdq(P) {
+  memcpy(GetXmmAddress(A), XmmRexrReg(m, rde), 16);
 }
 
-static void MovdqaVdqWdq(struct Machine *m, u32 rde) {
-  if (IsModrmRegister(rde)) {
-    memcpy(XmmRexrReg(m, rde), XmmRexbRm(m, rde), 16);
-  } else {
-    MovdqaVdqMdq(m, rde);
-  }
+static void MovntdqMdqVdq(P) {
+  MovdqaWdqVdq(A);
 }
 
-static void MovdqaWdqVdq(struct Machine *m, u32 rde) {
-  if (IsModrmRegister(rde)) {
-    memcpy(XmmRexbRm(m, rde), XmmRexrReg(m, rde), 16);
-  } else {
-    MovdqaMdqVdq(m, rde);
-  }
+static void MovntpsMpsVps(P) {
+  MovdqaWdqVdq(A);
 }
 
-static void MovntdqMdqVdq(struct Machine *m, u32 rde) {
-  MovdqaMdqVdq(m, rde);
+static void MovntpdMpdVpd(P) {
+  MovdqaWdqVdq(A);
 }
 
-static void MovntpsMpsVps(struct Machine *m, u32 rde) {
-  MovdqaMdqVdq(m, rde);
+void OpMovntdqaVdqMdq(P) {
+  MovdqaVdqWdq(A);
 }
 
-static void MovntpdMpdVpd(struct Machine *m, u32 rde) {
-  MovdqaMdqVdq(m, rde);
+static void MovqPqQq(P) {
+  memcpy(MmReg(m, rde), GetModrmRegisterMmPointerRead8(A), 8);
 }
 
-void OpMovntdqaVdqMdq(struct Machine *m, u32 rde) {
-  MovdqaVdqMdq(m, rde);
+static void MovqQqPq(P) {
+  memcpy(GetModrmRegisterMmPointerWrite8(A), MmReg(m, rde), 8);
 }
 
-static void MovqPqQq(struct Machine *m, u32 rde) {
-  memcpy(MmReg(m, rde), GetModrmRegisterMmPointerRead8(m, rde), 8);
-}
-
-static void MovqQqPq(struct Machine *m, u32 rde) {
-  memcpy(GetModrmRegisterMmPointerWrite8(m, rde), MmReg(m, rde), 8);
-}
-
-static void MovqVdqEqp(struct Machine *m, u32 rde) {
-  memcpy(XmmRexrReg(m, rde), GetModrmRegisterWordPointerRead8(m, rde), 8);
+static void MovqVdqEqp(P) {
+  memcpy(XmmRexrReg(m, rde), GetModrmRegisterWordPointerRead8(A), 8);
   memset(XmmRexrReg(m, rde) + 8, 0, 8);
 }
 
-static void MovdVdqEd(struct Machine *m, u32 rde) {
+static void MovdVdqEd(P) {
   memset(XmmRexrReg(m, rde), 0, 16);
-  memcpy(XmmRexrReg(m, rde), GetModrmRegisterWordPointerRead4(m, rde), 4);
+  memcpy(XmmRexrReg(m, rde), GetModrmRegisterWordPointerRead4(A), 4);
 }
 
-static void MovqPqEqp(struct Machine *m, u32 rde) {
-  memcpy(MmReg(m, rde), GetModrmRegisterWordPointerRead8(m, rde), 8);
+static void MovqPqEqp(P) {
+  memcpy(MmReg(m, rde), GetModrmRegisterWordPointerRead8(A), 8);
 }
 
-static void MovdPqEd(struct Machine *m, u32 rde) {
-  memcpy(MmReg(m, rde), GetModrmRegisterWordPointerRead4(m, rde), 4);
+static void MovdPqEd(P) {
+  memcpy(MmReg(m, rde), GetModrmRegisterWordPointerRead4(A), 4);
   memset(MmReg(m, rde) + 4, 0, 4);
 }
 
-static void MovdEdVdq(struct Machine *m, u32 rde) {
+static void MovdEdVdq(P) {
   if (IsModrmRegister(rde)) {
-    Write64(RegRexbRm(m, rde), Read32(XmmRexrReg(m, rde)));
+    Put64(RegRexbRm(m, rde), Read32(XmmRexrReg(m, rde)));
   } else {
-    memcpy(ComputeReserveAddressWrite4(m, rde), XmmRexrReg(m, rde), 4);
+    memcpy(ComputeReserveAddressWrite4(A), XmmRexrReg(m, rde), 4);
   }
 }
 
-static void MovqEqpVdq(struct Machine *m, u32 rde) {
-  memcpy(GetModrmRegisterWordPointerWrite8(m, rde), XmmRexrReg(m, rde), 8);
+static void MovqEqpVdq(P) {
+  memcpy(GetModrmRegisterWordPointerWrite8(A), XmmRexrReg(m, rde), 8);
 }
 
-static void MovdEdPq(struct Machine *m, u32 rde) {
+static void MovdEdPq(P) {
   if (IsModrmRegister(rde)) {
-    Write64(RegRexbRm(m, rde), Read32(MmReg(m, rde)));
+    Put64(RegRexbRm(m, rde), Read32(MmReg(m, rde)));
   } else {
-    memcpy(ComputeReserveAddressWrite4(m, rde), MmReg(m, rde), 4);
+    memcpy(ComputeReserveAddressWrite4(A), MmReg(m, rde), 4);
   }
 }
 
-static void MovqEqpPq(struct Machine *m, u32 rde) {
-  memcpy(GetModrmRegisterWordPointerWrite(m, rde, 8), MmReg(m, rde), 8);
+static void MovqEqpPq(P) {
+  memcpy(GetModrmRegisterWordPointerWrite8(A), MmReg(m, rde), 8);
 }
 
-static void MovntqMqPq(struct Machine *m, u32 rde) {
-  memcpy(ComputeReserveAddressWrite8(m, rde), MmReg(m, rde), 8);
+static void MovntqMqPq(P) {
+  memcpy(ComputeReserveAddressWrite8(A), MmReg(m, rde), 8);
 }
 
-static void MovqVqWq(struct Machine *m, u32 rde) {
-  memcpy(XmmRexrReg(m, rde), GetModrmRegisterXmmPointerRead8(m, rde), 8);
+static void MovqVqWq(P) {
+  memcpy(XmmRexrReg(m, rde), GetModrmRegisterXmmPointerRead8(A), 8);
   memset(XmmRexrReg(m, rde) + 8, 0, 8);
 }
 
-static void MovssVpsWps(struct Machine *m, u32 rde) {
+static void MovssVpsWps(P) {
   if (IsModrmRegister(rde)) {
     memcpy(XmmRexrReg(m, rde), XmmRexbRm(m, rde), 4);
   } else {
-    memcpy(XmmRexrReg(m, rde), ComputeReserveAddressRead4(m, rde), 4);
+    memcpy(XmmRexrReg(m, rde), ComputeReserveAddressRead4(A), 4);
     memset(XmmRexrReg(m, rde) + 4, 0, 12);
   }
 }
 
-static void MovssWpsVps(struct Machine *m, u32 rde) {
-  memcpy(GetModrmRegisterXmmPointerWrite4(m, rde), XmmRexrReg(m, rde), 4);
+static void MovssWpsVps(P) {
+  memcpy(GetModrmRegisterXmmPointerWrite4(A), XmmRexrReg(m, rde), 4);
 }
 
-static void MovsdVpsWps(struct Machine *m, u32 rde) {
+static void MovsdVpsWps(P) {
   if (IsModrmRegister(rde)) {
     memcpy(XmmRexrReg(m, rde), XmmRexbRm(m, rde), 8);
   } else {
-    memcpy(XmmRexrReg(m, rde), ComputeReserveAddressRead8(m, rde), 8);
+    memcpy(XmmRexrReg(m, rde), ComputeReserveAddressRead8(A), 8);
     memset(XmmRexrReg(m, rde) + 8, 0, 8);
   }
 }
 
-static void MovsdWpsVps(struct Machine *m, u32 rde) {
-  memcpy(GetModrmRegisterXmmPointerWrite8(m, rde), XmmRexrReg(m, rde), 8);
+static void MovsdWpsVps(P) {
+  memcpy(GetModrmRegisterXmmPointerWrite8(A), XmmRexrReg(m, rde), 8);
 }
 
-static void MovhlpsVqUq(struct Machine *m, u32 rde) {
+static void MovhlpsVqUq(P) {
   memcpy(XmmRexrReg(m, rde), XmmRexbRm(m, rde) + 8, 8);
 }
 
-static void MovlpsVqMq(struct Machine *m, u32 rde) {
-  memcpy(XmmRexrReg(m, rde), ComputeReserveAddressRead8(m, rde), 8);
+static void MovlpsVqMq(P) {
+  memcpy(XmmRexrReg(m, rde), ComputeReserveAddressRead8(A), 8);
 }
 
-static void MovlpdVqMq(struct Machine *m, u32 rde) {
-  memcpy(XmmRexrReg(m, rde), ComputeReserveAddressRead8(m, rde), 8);
+static void MovlpdVqMq(P) {
+  memcpy(XmmRexrReg(m, rde), ComputeReserveAddressRead8(A), 8);
 }
 
-static void MovddupVqWq(struct Machine *m, u32 rde) {
-  u8 *src;
-  src = GetModrmRegisterXmmPointerRead8(m, rde);
+static void MovddupVqWq(P) {
+  u8 *src = GetModrmRegisterXmmPointerRead8(A);
   memcpy(XmmRexrReg(m, rde) + 0, src, 8);
   memcpy(XmmRexrReg(m, rde) + 8, src, 8);
 }
 
-static void MovsldupVqWq(struct Machine *m, u32 rde) {
+static void MovsldupVqWq(P) {
   u8 *dst, *src;
   dst = XmmRexrReg(m, rde);
-  src = GetModrmRegisterXmmPointerRead16(m, rde);
+  src = GetModrmRegisterXmmPointerRead16(A);
   memcpy(dst + 0 + 0, src + 0, 4);
   memcpy(dst + 0 + 4, src + 0, 4);
   memcpy(dst + 8 + 0, src + 8, 4);
   memcpy(dst + 8 + 4, src + 8, 4);
 }
 
-static void MovlpsMqVq(struct Machine *m, u32 rde) {
-  memcpy(ComputeReserveAddressWrite8(m, rde), XmmRexrReg(m, rde), 8);
+static void MovlpsMqVq(P) {
+  memcpy(ComputeReserveAddressWrite8(A), XmmRexrReg(m, rde), 8);
 }
 
-static void MovlpdMqVq(struct Machine *m, u32 rde) {
-  memcpy(ComputeReserveAddressWrite8(m, rde), XmmRexrReg(m, rde), 8);
+static void MovlpdMqVq(P) {
+  memcpy(ComputeReserveAddressWrite8(A), XmmRexrReg(m, rde), 8);
 }
 
-static void MovlhpsVqUq(struct Machine *m, u32 rde) {
+static void MovlhpsVqUq(P) {
   memcpy(XmmRexrReg(m, rde) + 8, XmmRexbRm(m, rde), 8);
 }
 
-static void MovhpsVqMq(struct Machine *m, u32 rde) {
-  memcpy(XmmRexrReg(m, rde) + 8, ComputeReserveAddressRead8(m, rde), 8);
+static void MovhpsVqMq(P) {
+  memcpy(XmmRexrReg(m, rde) + 8, ComputeReserveAddressRead8(A), 8);
 }
 
-static void MovhpdVqMq(struct Machine *m, u32 rde) {
-  memcpy(XmmRexrReg(m, rde) + 8, ComputeReserveAddressRead8(m, rde), 8);
+static void MovhpdVqMq(P) {
+  memcpy(XmmRexrReg(m, rde) + 8, ComputeReserveAddressRead8(A), 8);
 }
 
-static void MovshdupVqWq(struct Machine *m, u32 rde) {
+static void MovshdupVqWq(P) {
   u8 *dst, *src;
   dst = XmmRexrReg(m, rde);
-  src = GetModrmRegisterXmmPointerRead16(m, rde);
+  src = GetModrmRegisterXmmPointerRead16(A);
   memcpy(dst + 0 + 0, src + 04, 4);
   memcpy(dst + 0 + 4, src + 04, 4);
   memcpy(dst + 8 + 0, src + 12, 4);
   memcpy(dst + 8 + 4, src + 12, 4);
 }
 
-static void MovhpsMqVq(struct Machine *m, u32 rde) {
-  memcpy(ComputeReserveAddressWrite8(m, rde), XmmRexrReg(m, rde) + 8, 8);
+static void MovhpsMqVq(P) {
+  memcpy(ComputeReserveAddressWrite8(A), XmmRexrReg(m, rde) + 8, 8);
 }
 
-static void MovhpdMqVq(struct Machine *m, u32 rde) {
-  memcpy(ComputeReserveAddressWrite8(m, rde), XmmRexrReg(m, rde) + 8, 8);
+static void MovhpdMqVq(P) {
+  memcpy(ComputeReserveAddressWrite8(A), XmmRexrReg(m, rde) + 8, 8);
 }
 
-static void MovqWqVq(struct Machine *m, u32 rde) {
+static void MovqWqVq(P) {
   if (IsModrmRegister(rde)) {
     memcpy(XmmRexbRm(m, rde), XmmRexrReg(m, rde), 8);
     memset(XmmRexbRm(m, rde) + 8, 0, 8);
   } else {
-    memcpy(ComputeReserveAddressWrite8(m, rde), XmmRexrReg(m, rde), 8);
+    memcpy(ComputeReserveAddressWrite8(A), XmmRexrReg(m, rde), 8);
   }
 }
 
-static void Movq2dqVdqNq(struct Machine *m, u32 rde) {
+static void Movq2dqVdqNq(P) {
   memcpy(XmmRexrReg(m, rde), MmRm(m, rde), 8);
   memset(XmmRexrReg(m, rde) + 8, 0, 8);
 }
 
-static void Movdq2qPqUq(struct Machine *m, u32 rde) {
+static void Movdq2qPqUq(P) {
   memcpy(MmReg(m, rde), XmmRexbRm(m, rde), 8);
 }
 
-static void MovapsVpsWps(struct Machine *m, u32 rde) {
-  MovdqaVdqWdq(m, rde);
+static void MovapsVpsWps(P) {
+  MovdqaVdqWdq(A);
 }
 
-static void MovapdVpdWpd(struct Machine *m, u32 rde) {
-  MovdqaVdqWdq(m, rde);
+static void MovapdVpdWpd(P) {
+  MovdqaVdqWdq(A);
 }
 
-static void MovapsWpsVps(struct Machine *m, u32 rde) {
-  MovdqaWdqVdq(m, rde);
+static void MovapsWpsVps(P) {
+  MovdqaWdqVdq(A);
 }
 
-static void MovapdWpdVpd(struct Machine *m, u32 rde) {
-  MovdqaWdqVdq(m, rde);
+static void MovapdWpdVpd(P) {
+  MovdqaWdqVdq(A);
 }
 
-void OpMovWpsVps(struct Machine *m, u32 rde) {
-  switch (m->xedd->op.rep | Osz(rde)) {
+void OpMovWpsVps(P) {
+  switch (Rep(rde) | Osz(rde)) {
     case 0:
-      MovupsWpsVps(m, rde);
+      MovupsWpsVps(A);
       break;
     case 1:
-      MovupdWpsVps(m, rde);
+      MovupdWpsVps(A);
       break;
     case 2:
-      MovsdWpsVps(m, rde);
+      MovsdWpsVps(A);
       break;
     case 3:
-      MovssWpsVps(m, rde);
+      MovssWpsVps(A);
       break;
     default:
       __builtin_unreachable();
   }
 }
 
-void OpMov0f28(struct Machine *m, u32 rde) {
+void OpMov0f28(P) {
   if (!Osz(rde)) {
-    MovapsVpsWps(m, rde);
+    MovapsVpsWps(A);
   } else {
-    MovapdVpdWpd(m, rde);
+    MovapdVpdWpd(A);
   }
 }
 
-void OpMov0f6e(struct Machine *m, u32 rde) {
+void OpMov0f6e(P) {
   if (Osz(rde)) {
     if (Rexw(rde)) {
-      MovqVdqEqp(m, rde);
+      MovqVdqEqp(A);
     } else {
-      MovdVdqEd(m, rde);
+      MovdVdqEd(A);
     }
   } else {
     if (Rexw(rde)) {
-      MovqPqEqp(m, rde);
+      MovqPqEqp(A);
     } else {
-      MovdPqEd(m, rde);
+      MovdPqEd(A);
     }
   }
 }
 
-void OpMov0f6f(struct Machine *m, u32 rde) {
+void OpMov0f6f(P) {
   if (Osz(rde)) {
-    MovdqaVdqWdq(m, rde);
-  } else if (m->xedd->op.rep == 3) {
-    MovdquVdqWdq(m, rde);
+    MovdqaVdqWdq(A);
+  } else if (Rep(rde) == 3) {
+    MovdquVdqWdq(A);
   } else {
-    MovqPqQq(m, rde);
+    MovqPqQq(A);
   }
 }
 
-void OpMov0fE7(struct Machine *m, u32 rde) {
+void OpMov0fE7(P) {
   if (!Osz(rde)) {
-    MovntqMqPq(m, rde);
+    MovntqMqPq(A);
   } else {
-    MovntdqMdqVdq(m, rde);
+    MovntdqMdqVdq(A);
   }
 }
 
-void OpMov0f7e(struct Machine *m, u32 rde) {
-  if (m->xedd->op.rep == 3) {
-    MovqVqWq(m, rde);
+void OpMov0f7e(P) {
+  if (Rep(rde) == 3) {
+    MovqVqWq(A);
   } else if (Osz(rde)) {
     if (Rexw(rde)) {
-      MovqEqpVdq(m, rde);
+      MovqEqpVdq(A);
     } else {
-      MovdEdVdq(m, rde);
+      MovdEdVdq(A);
     }
   } else {
     if (Rexw(rde)) {
-      MovqEqpPq(m, rde);
+      MovqEqpPq(A);
     } else {
-      MovdEdPq(m, rde);
+      MovdEdPq(A);
     }
   }
 }
 
-void OpMov0f7f(struct Machine *m, u32 rde) {
-  if (m->xedd->op.rep == 3) {
-    MovdquWdqVdq(m, rde);
+void OpMov0f7f(P) {
+  if (Rep(rde) == 3) {
+    MovdquWdqVdq(A);
   } else if (Osz(rde)) {
-    MovdqaWdqVdq(m, rde);
+    MovdqaWdqVdq(A);
   } else {
-    MovqQqPq(m, rde);
+    MovqQqPq(A);
   }
 }
 
-void OpMov0f10(struct Machine *m, u32 rde) {
-  switch (m->xedd->op.rep | Osz(rde)) {
+void OpMov0f10(P) {
+  switch (Rep(rde) | Osz(rde)) {
     case 0:
-      MovupsVpsWps(m, rde);
+      MovupsVpsWps(A);
       break;
     case 1:
-      MovupdVpsWps(m, rde);
+      MovupdVpsWps(A);
       break;
     case 2:
-      MovsdVpsWps(m, rde);
+      MovsdVpsWps(A);
       break;
     case 3:
-      MovssVpsWps(m, rde);
+      MovssVpsWps(A);
       break;
     default:
       __builtin_unreachable();
   }
 }
 
-void OpMov0f29(struct Machine *m, u32 rde) {
+void OpMov0f29(P) {
   if (!Osz(rde)) {
-    MovapsWpsVps(m, rde);
+    MovapsWpsVps(A);
   } else {
-    MovapdWpdVpd(m, rde);
+    MovapdWpdVpd(A);
   }
 }
 
-void OpMov0f2b(struct Machine *m, u32 rde) {
+void OpMov0f2b(P) {
   if (!Osz(rde)) {
-    MovntpsMpsVps(m, rde);
+    MovntpsMpsVps(A);
   } else {
-    MovntpdMpdVpd(m, rde);
+    MovntpdMpdVpd(A);
   }
 }
 
-void OpMov0f12(struct Machine *m, u32 rde) {
-  switch (m->xedd->op.rep | Osz(rde)) {
+void OpMov0f12(P) {
+  switch (Rep(rde) | Osz(rde)) {
     case 0:
       if (IsModrmRegister(rde)) {
-        MovhlpsVqUq(m, rde);
+        MovhlpsVqUq(A);
       } else {
-        MovlpsVqMq(m, rde);
+        MovlpsVqMq(A);
       }
       break;
     case 1:
-      MovlpdVqMq(m, rde);
+      MovlpdVqMq(A);
       break;
     case 2:
-      MovddupVqWq(m, rde);
+      MovddupVqWq(A);
       break;
     case 3:
-      MovsldupVqWq(m, rde);
+      MovsldupVqWq(A);
       break;
     default:
       __builtin_unreachable();
   }
 }
 
-void OpMov0f13(struct Machine *m, u32 rde) {
+void OpMov0f13(P) {
   if (Osz(rde)) {
-    MovlpdMqVq(m, rde);
+    MovlpdMqVq(A);
   } else {
-    MovlpsMqVq(m, rde);
+    MovlpsMqVq(A);
   }
 }
 
-void OpMov0f16(struct Machine *m, u32 rde) {
-  switch (m->xedd->op.rep | Osz(rde)) {
+void OpMov0f16(P) {
+  switch (Rep(rde) | Osz(rde)) {
     case 0:
       if (IsModrmRegister(rde)) {
-        MovlhpsVqUq(m, rde);
+        MovlhpsVqUq(A);
       } else {
-        MovhpsVqMq(m, rde);
+        MovhpsVqMq(A);
       }
       break;
     case 1:
-      MovhpdVqMq(m, rde);
+      MovhpdVqMq(A);
       break;
     case 3:
-      MovshdupVqWq(m, rde);
+      MovshdupVqWq(A);
       break;
     default:
-      OpUd(m, rde);
+      OpUdImpl(m);
       break;
   }
 }
 
-void OpMov0f17(struct Machine *m, u32 rde) {
+void OpMov0f17(P) {
   if (Osz(rde)) {
-    MovhpdMqVq(m, rde);
+    MovhpdMqVq(A);
   } else {
-    MovhpsMqVq(m, rde);
+    MovhpsMqVq(A);
   }
 }
 
-void OpMov0fD6(struct Machine *m, u32 rde) {
-  if (m->xedd->op.rep == 3) {
-    Movq2dqVdqNq(m, rde);
-  } else if (m->xedd->op.rep == 2) {
-    Movdq2qPqUq(m, rde);
+void OpMov0fD6(P) {
+  if (Rep(rde) == 3) {
+    Movq2dqVdqNq(A);
+  } else if (Rep(rde) == 2) {
+    Movdq2qPqUq(A);
   } else if (Osz(rde)) {
-    MovqWqVq(m, rde);
+    MovqWqVq(A);
   } else {
-    OpUd(m, rde);
+    OpUdImpl(m);
   }
 }
 
-void OpPmovmskbGdqpNqUdq(struct Machine *m, u32 rde) {
-  Write64(RegRexrReg(m, rde),
-          pmovmskb(XmmRexbRm(m, rde)) & (Osz(rde) ? 0xffff : 0xff));
+void OpPmovmskbGdqpNqUdq(P) {
+  Put64(RegRexrReg(m, rde),
+        pmovmskb(XmmRexbRm(m, rde)) & (Osz(rde) ? 0xffff : 0xff));
 }
 
-void OpMaskMovDiXmmRegXmmRm(struct Machine *m, u32 rde) {
+void OpMaskMovDiXmmRegXmmRm(P) {
   void *p[2];
   u64 v;
   unsigned i, n;
   u8 *mem, b[16];
-  v = AddressDi(m, rde);
+  v = AddressDi(A);
   n = Osz(rde) ? 16 : 8;
-  mem = (u8 *)BeginStore(m, v, n, p, b);
+  mem = BeginStore(m, v, n, p, b);
   for (i = 0; i < n; ++i) {
     if (XmmRexbRm(m, rde)[i] & 0x80) {
       mem[i] = XmmRexrReg(m, rde)[i];

@@ -21,22 +21,35 @@
 
 #include "blink/high.h"
 
-struct High g_high;
+struct High g_high = {
+    .enabled = true,
+    .active = true,
+    .keyword = 155,
+    .reg = 215,
+    .literal = 182,
+    .label = 221,
+    .comment = 112,
+    .quote = 215,
+};
 
 char *HighStart(char *p, int h) {
-  if (h) {
-    p = stpcpy(p, "\033[38;5;");
-    p += snprintf(p, 12, "%u", h);
-    p = stpcpy(p, "m");
-    g_high.active = true;
+  if (g_high.enabled) {
+    if (h) {
+      p = stpcpy(p, "\033[38;5;");
+      p += snprintf(p, 12, "%u", h);
+      p = stpcpy(p, "m");
+      g_high.active = true;
+    }
   }
   return p;
 }
 
 char *HighEnd(char *p) {
-  if (g_high.active) {
-    p = stpcpy(p, "\033[39m");
-    g_high.active = false;
+  if (g_high.enabled) {
+    if (g_high.active) {
+      p = stpcpy(p, "\033[39m");
+      g_high.active = false;
+    }
   }
   return p;
 }

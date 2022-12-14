@@ -17,53 +17,98 @@
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <inttypes.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "blink/address.h"
+#include "blink/assert.h"
+#include "blink/debug.h"
 #include "blink/endian.h"
+#include "blink/linux.h"
 #include "blink/log.h"
+#include "blink/path.h"
+#include "blink/signal.h"
 
-static bool IsHaltingInitialized(struct Machine *m) {
-  jmp_buf zb;
-  memset(zb, 0, sizeof(zb));
-  return memcmp(m->onhalt, zb, sizeof(m->onhalt)) != 0;
+void RestoreIp(struct Machine *m) {
+  if (m->oldip != -1) {
+    m->ip = m->oldip;
+    m->oldip = -1;
+  }
+}
+
+void DeliverSignalToUser(struct Machine *m, int sig) {
+  EnqueueSignal(m, sig);
+  if (ConsumeSignal(m)) {
+    TerminateSignal(m, sig);
+  }
 }
 
 void HaltMachine(struct Machine *m, int code) {
-  if (!IsHaltingInitialized(m)) abort();
+  SIG_LOGF("HaltMachine(%d)", code);
+  if (m->path.jb) {
+    AbandonPath(m);
+  }
+  switch (code) {
+    case kMachineDivideError:
+    case kMachineFpuException:
+    case kMachineSimdException:
+      RestoreIp(m);
+      DeliverSignalToUser(m, SIGFPE_LINUX);
+      break;
+    case kMachineHalt:
+      // TODO(jart): We should do something for real mode.
+    case kMachineDecodeError:
+    case kMachineUndefinedInstruction:
+      RestoreIp(m);
+      DeliverSignalToUser(m, SIGILL_LINUX);
+      break;
+    case kMachineProtectionFault:
+    case kMachineSegmentationFault:
+      RestoreIp(m);
+      DeliverSignalToUser(m, SIGSEGV_LINUX);
+      break;
+    case 1:
+    case 3:
+      DeliverSignalToUser(m, SIGTRAP_LINUX);
+      break;
+    default:
+      if (code > 0) {
+        break;
+      } else {
+        unassert(!"not possible");
+      }
+  }
+  unassert(m->canhalt);
   longjmp(m->onhalt, code);
 }
 
-void ThrowDivideError(struct Machine *m) {
+void RaiseDivideError(struct Machine *m) {
   HaltMachine(m, kMachineDivideError);
-}
-
-void ThrowSegmentationFault(struct Machine *m, i64 va) {
-  m->faultaddr = va;
-  if (m->xedd) m->ip -= m->xedd->length;
-  LOGF("SEGMENTATION FAULT ADDR %" PRIx64 " IP %" PRIx64 " AX %" PRIx64
-       " CX %" PRIx64 " DX %" PRIx64 " BX %" PRIx64 " SP %" PRIx64 " "
-       "BP %" PRIx64 " SI %" PRIx64 " DI %" PRIx64 " R8 %" PRIx64 " R9 %" PRIx64
-       " R10 %" PRIx64 " R11 %" PRIx64 " R12 %" PRIx64 " "
-       "R13 %" PRIx64 " R14 %" PRIx64 " R15 %" PRIx64,
-       va, m->ip, Read64(m->ax), Read64(m->cx), Read64(m->dx), Read64(m->bx),
-       Read64(m->sp), Read64(m->bp), Read64(m->si), Read64(m->di),
-       Read64(m->r8), Read64(m->r9), Read64(m->r10), Read64(m->r11),
-       Read64(m->r12), Read64(m->r13), Read64(m->r14), Read64(m->r15));
-  HaltMachine(m, kMachineSegmentationFault);
 }
 
 void ThrowProtectionFault(struct Machine *m) {
   HaltMachine(m, kMachineProtectionFault);
 }
 
-void OpUd(struct Machine *m, u32 rde) {
-  if (m->xedd) m->ip -= m->xedd->length;
+void ThrowSegmentationFault(struct Machine *m, i64 va) {
+  RestoreIp(m);
+  m->faultaddr = va;
+  LOGF("SEGMENTATION FAULT AT ADDRESS %" PRIx64 "\n\t%s", va, GetBacktrace(m));
+  HaltMachine(m, kMachineSegmentationFault);
+}
+
+void OpUdImpl(struct Machine *m) {
+  RestoreIp(m);
+  LOGF("UNDEFINED INSTRUCTION\n\t%s", GetBacktrace(m));
   HaltMachine(m, kMachineUndefinedInstruction);
 }
 
-void OpHlt(struct Machine *m, u32 rde) {
+void OpUd(P) {
+  OpUdImpl(m);
+}
+
+void OpHlt(P) {
   HaltMachine(m, kMachineHalt);
 }

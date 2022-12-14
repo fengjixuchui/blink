@@ -16,6 +16,7 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -26,8 +27,8 @@
 #include "blink/flags.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
-#include "blink/memory.h"
 #include "blink/modrm.h"
+#include "blink/mop.h"
 #include "blink/string.h"
 
 static u64 ReadInt(u8 p[8], unsigned long w) {
@@ -54,7 +55,7 @@ static void WriteInt(u8 p[8], u64 x, unsigned long w) {
       Write16(p, x);
       break;
     case 2:
-      Write64(p, x & 0xffffffff);
+      Write32(p, x);
       break;
     case 3:
       Write64(p, x);
@@ -64,213 +65,224 @@ static void WriteInt(u8 p[8], u64 x, unsigned long w) {
   }
 }
 
-static void AddDi(struct Machine *m, u32 rde, u64 x) {
+static u64 AddDi(P, u64 x) {
+  u64 res;
   switch (Eamode(rde)) {
     case XED_MODE_LONG:
-      Write64(m->di, Read64(m->di) + x);
-      return;
+      Put64(m->di, (res = Get64(m->di) + x));
+      break;
     case XED_MODE_LEGACY:
-      Write64(m->di, (Read32(m->di) + x) & 0xffffffff);
-      return;
+      Put64(m->di, (res = (Get32(m->di) + x) & 0xffffffff));
+      break;
     case XED_MODE_REAL:
-      Write16(m->di, Read16(m->di) + x);
-      return;
+      Put16(m->di, (res = Get16(m->di) + x));
+      break;
+    default:
+      __builtin_unreachable();
+  }
+  return res;
+}
+
+static u64 AddSi(P, u64 x) {
+  u64 res;
+  switch (Eamode(rde)) {
+    case XED_MODE_LONG:
+      Put64(m->si, (res = Get64(m->si) + x));
+      break;
+    case XED_MODE_LEGACY:
+      Put64(m->si, ((res = Get32(m->si) + x) & 0xffffffff));
+      break;
+    case XED_MODE_REAL:
+      Put16(m->si, (res = Get16(m->si) + x));
+      break;
+    default:
+      __builtin_unreachable();
+  }
+  return res;
+}
+
+static u64 ReadCx(P) {
+  switch (Eamode(rde)) {
+    case XED_MODE_LONG:
+      return Get64(m->cx);
+    case XED_MODE_LEGACY:
+      return Get32(m->cx);
+    case XED_MODE_REAL:
+      return Get16(m->cx);
     default:
       __builtin_unreachable();
   }
 }
 
-static void AddSi(struct Machine *m, u32 rde, u64 x) {
-  switch (Eamode(rde)) {
-    case XED_MODE_LONG:
-      Write64(m->si, Read64(m->si) + x);
-      return;
-    case XED_MODE_LEGACY:
-      Write64(m->si, (Read32(m->si) + x) & 0xffffffff);
-      return;
-    case XED_MODE_REAL:
-      Write16(m->si, Read16(m->si) + x);
-      return;
-    default:
-      __builtin_unreachable();
-  }
-}
-
-static u64 ReadCx(struct Machine *m, u32 rde) {
-  switch (Eamode(rde)) {
-    case XED_MODE_LONG:
-      return Read64(m->cx);
-    case XED_MODE_LEGACY:
-      return Read32(m->cx);
-    case XED_MODE_REAL:
-      return Read16(m->cx);
-    default:
-      __builtin_unreachable();
-  }
-}
-
-static u64 SubtractCx(struct Machine *m, u32 rde, u64 x) {
-  u64 cx;
-  cx = Read64(m->cx) - x;
+static u64 SubtractCx(P, u64 x) {
+  u64 cx = Get64(m->cx) - x;
   if (Eamode(rde) != XED_MODE_REAL) {
     if (Eamode(rde) == XED_MODE_LEGACY) {
       cx &= 0xffffffff;
     }
-    Write64(m->cx, cx);
+    Put64(m->cx, cx);
   } else {
     cx &= 0xffff;
-    Write16(m->cx, cx);
+    Put16(m->cx, cx);
   }
   return cx;
 }
 
-static void StringOp(struct Machine *m, u32 rde, int op) {
+static void StringOp(P, int op) {
   bool stop;
-  void *p[2];
   unsigned n;
   i64 sgn, v;
+  void *p[2];
   u8 s[3][8];
   stop = false;
   n = 1 << RegLog2(rde);
   sgn = GetFlag(m->flags, FLAGS_DF) ? -1 : 1;
+  atomic_thread_fence(memory_order_acquire);
   do {
-    if (m->xedd->op.rep && !ReadCx(m, rde)) break;
+    if (Rep(rde) && !ReadCx(A)) break;
     switch (op) {
       case STRING_CMPS:
         kAlu[ALU_SUB][RegLog2(rde)](
-            ReadInt(Load(m, AddressSi(m, rde), n, s[2]), RegLog2(rde)),
-            ReadInt(Load(m, AddressDi(m, rde), n, s[1]), RegLog2(rde)),
-            &m->flags);
-        AddDi(m, rde, sgn * n);
-        AddSi(m, rde, sgn * n);
-        stop = (m->xedd->op.rep == 2 && GetFlag(m->flags, FLAGS_ZF)) ||
-               (m->xedd->op.rep == 3 && !GetFlag(m->flags, FLAGS_ZF));
+            m, ReadInt(Load(m, AddressSi(A), n, s[2]), RegLog2(rde)),
+            ReadInt(Load(m, AddressDi(A), n, s[1]), RegLog2(rde)));
+        AddDi(A, sgn * n);
+        AddSi(A, sgn * n);
+        stop = (Rep(rde) == 2 && GetFlag(m->flags, FLAGS_ZF)) ||
+               (Rep(rde) == 3 && !GetFlag(m->flags, FLAGS_ZF));
         break;
       case STRING_MOVS:
-        memcpy(BeginStore(m, (v = AddressDi(m, rde)), n, p, s[0]),
-               Load(m, AddressSi(m, rde), n, s[1]), n);
-        AddDi(m, rde, sgn * n);
-        AddSi(m, rde, sgn * n);
+        memcpy(BeginStore(m, (v = AddressDi(A)), n, p, s[0]),
+               Load(m, AddressSi(A), n, s[1]), n);
+        AddDi(A, sgn * n);
+        AddSi(A, sgn * n);
         EndStore(m, v, n, p, s[0]);
         break;
       case STRING_STOS:
-        memcpy(BeginStore(m, (v = AddressDi(m, rde)), n, p, s[0]), m->ax, n);
-        AddDi(m, rde, sgn * n);
+        memcpy(BeginStore(m, (v = AddressDi(A)), n, p, s[0]), m->ax, n);
+        AddDi(A, sgn * n);
         EndStore(m, v, n, p, s[0]);
         break;
       case STRING_LODS:
-        memcpy(m->ax, Load(m, AddressSi(m, rde), n, s[1]), n);
-        AddSi(m, rde, sgn * n);
+        memcpy(m->ax, Load(m, AddressSi(A), n, s[1]), n);
+        AddSi(A, sgn * n);
         break;
       case STRING_SCAS:
         kAlu[ALU_SUB][RegLog2(rde)](
-            ReadInt(Load(m, AddressDi(m, rde), n, s[1]), RegLog2(rde)),
-            ReadInt(m->ax, RegLog2(rde)), &m->flags);
-        AddDi(m, rde, sgn * n);
-        stop = (m->xedd->op.rep == 2 && GetFlag(m->flags, FLAGS_ZF)) ||
-               (m->xedd->op.rep == 3 && !GetFlag(m->flags, FLAGS_ZF));
+            m, ReadInt(Load(m, AddressDi(A), n, s[1]), RegLog2(rde)),
+            ReadInt(m->ax, RegLog2(rde)));
+        AddDi(A, sgn * n);
+        stop = (Rep(rde) == 2 && GetFlag(m->flags, FLAGS_ZF)) ||
+               (Rep(rde) == 3 && !GetFlag(m->flags, FLAGS_ZF));
         break;
       case STRING_OUTS:
-        OpOut(m, Read16(m->dx),
-              ReadInt(Load(m, AddressSi(m, rde), n, s[1]), RegLog2(rde)));
-        AddSi(m, rde, sgn * n);
+        OpOut(m, Get16(m->dx),
+              ReadInt(Load(m, AddressSi(A), n, s[1]), RegLog2(rde)));
+        AddSi(A, sgn * n);
         break;
       case STRING_INS:
-        WriteInt((u8 *)BeginStore(m, (v = AddressDi(m, rde)), n, p, s[0]),
-                 OpIn(m, Read16(m->dx)), RegLog2(rde));
-        AddDi(m, rde, sgn * n);
+        WriteInt((u8 *)BeginStore(m, (v = AddressDi(A)), n, p, s[0]),
+                 OpIn(m, Get16(m->dx)), RegLog2(rde));
+        AddDi(A, sgn * n);
         EndStore(m, v, n, p, s[0]);
         break;
       default:
         abort();
     }
-    if (m->xedd->op.rep) {
-      SubtractCx(m, rde, 1);
+    if (Rep(rde)) {
+      SubtractCx(A, 1);
     } else {
       break;
     }
   } while (!stop);
+  atomic_thread_fence(memory_order_release);
 }
 
-static void RepMovsbEnhanced(struct Machine *m, u32 rde) {
+static void RepMovsbEnhanced(P) {
   u8 *direal, *sireal;
   u64 diactual, siactual, cx;
   unsigned diremain, siremain, i, n;
-  if ((cx = ReadCx(m, rde))) {
-    do {
-      diactual = AddressDi(m, rde);
-      siactual = AddressSi(m, rde);
+  if ((cx = ReadCx(A))) {
+    diactual = AddressDi(A);
+    siactual = AddressSi(A);
+    if (diactual != siactual) {
       SetWriteAddr(m, diactual, cx);
       SetReadAddr(m, siactual, cx);
-      direal = (u8 *)ResolveAddress(m, diactual);
-      sireal = (u8 *)ResolveAddress(m, siactual);
-      diremain = 0x1000 - (diactual & 0xfff);
-      siremain = 0x1000 - (siactual & 0xfff);
-      n = MIN(cx, MIN(diremain, siremain));
-      for (i = 0; i < n; ++i) direal[i] = sireal[i];
-      AddDi(m, rde, n);
-      AddSi(m, rde, n);
-    } while ((cx = SubtractCx(m, rde, n)));
+      atomic_thread_fence(memory_order_acquire);
+      do {
+        direal = ResolveAddress(m, diactual);
+        sireal = ResolveAddress(m, siactual);
+        diremain = 4096 - (diactual & 4095);
+        siremain = 4096 - (siactual & 4095);
+        n = MIN(cx, MIN(diremain, siremain));
+        for (i = 0; i < n; ++i) {
+          direal[i] = sireal[i];
+        }
+        diactual = AddDi(A, n);
+        siactual = AddSi(A, n);
+      } while ((cx = SubtractCx(A, n)));
+      atomic_thread_fence(memory_order_release);
+    }
   }
 }
 
-static void RepStosbEnhanced(struct Machine *m, u32 rde) {
+static void RepStosbEnhanced(P) {
   u8 *direal;
-  unsigned diremain, n;
   u64 diactual, cx;
-  if ((cx = ReadCx(m, rde))) {
+  unsigned diremain, n;
+  if ((cx = ReadCx(A))) {
+    diactual = AddressDi(A);
+    SetWriteAddr(m, diactual, cx);
     do {
-      diactual = AddressDi(m, rde);
-      SetWriteAddr(m, diactual, cx);
-      direal = (u8 *)ResolveAddress(m, diactual);
-      diremain = 0x1000 - (diactual & 0xfff);
+      direal = ResolveAddress(m, diactual);
+      diremain = 4096 - (diactual & 4095);
       n = MIN(cx, diremain);
-      memset(direal, Read8(m->ax), n);
-      AddDi(m, rde, n);
-    } while ((cx = SubtractCx(m, rde, n)));
+      memset(direal, m->al, n);
+      diactual = AddDi(A, n);
+    } while ((cx = SubtractCx(A, n)));
+    atomic_thread_fence(memory_order_release);
   }
 }
 
-void OpMovs(struct Machine *m, u32 rde) {
-  StringOp(m, rde, STRING_MOVS);
+void OpMovs(P) {
+  StringOp(A, STRING_MOVS);
 }
 
-void OpCmps(struct Machine *m, u32 rde) {
-  StringOp(m, rde, STRING_CMPS);
+void OpCmps(P) {
+  StringOp(A, STRING_CMPS);
 }
 
-void OpStos(struct Machine *m, u32 rde) {
-  StringOp(m, rde, STRING_STOS);
+void OpStos(P) {
+  StringOp(A, STRING_STOS);
 }
 
-void OpLods(struct Machine *m, u32 rde) {
-  StringOp(m, rde, STRING_LODS);
+void OpLods(P) {
+  StringOp(A, STRING_LODS);
 }
 
-void OpScas(struct Machine *m, u32 rde) {
-  StringOp(m, rde, STRING_SCAS);
+void OpScas(P) {
+  StringOp(A, STRING_SCAS);
 }
 
-void OpIns(struct Machine *m, u32 rde) {
-  StringOp(m, rde, STRING_INS);
+void OpIns(P) {
+  StringOp(A, STRING_INS);
 }
 
-void OpOuts(struct Machine *m, u32 rde) {
-  StringOp(m, rde, STRING_OUTS);
+void OpOuts(P) {
+  StringOp(A, STRING_OUTS);
 }
 
-void OpMovsb(struct Machine *m, u32 rde) {
-  if (m->xedd->op.rep && !GetFlag(m->flags, FLAGS_DF)) {
-    RepMovsbEnhanced(m, rde);
+void OpMovsb(P) {
+  if (Rep(rde) && !GetFlag(m->flags, FLAGS_DF)) {
+    RepMovsbEnhanced(A);
   } else {
-    OpMovs(m, rde);
+    OpMovs(A);
   }
 }
 
-void OpStosb(struct Machine *m, u32 rde) {
-  if (m->xedd->op.rep && !GetFlag(m->flags, FLAGS_DF)) {
-    RepStosbEnhanced(m, rde);
+void OpStosb(P) {
+  if (Rep(rde) && !GetFlag(m->flags, FLAGS_DF)) {
+    RepStosbEnhanced(A);
   } else {
-    OpStos(m, rde);
+    OpStos(A);
   }
 }

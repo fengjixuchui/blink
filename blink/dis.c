@@ -17,19 +17,21 @@
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <limits.h>
-#include "blink/types.h"
 #include <stdlib.h>
 #include <string.h>
 
 #include "blink/assert.h"
 #include "blink/cp437.h"
+#include "blink/debug.h"
 #include "blink/dis.h"
 #include "blink/endian.h"
 #include "blink/high.h"
+#include "blink/log.h"
+#include "blink/machine.h"
 #include "blink/macros.h"
-#include "blink/memory.h"
 #include "blink/modrm.h"
 #include "blink/tpenc.h"
+#include "blink/types.h"
 #include "blink/util.h"
 
 #define ADDRLEN 8
@@ -75,13 +77,13 @@ static char *DisByte(char *p, const u8 *d, size_t n) {
   return p;
 }
 
-static char *DisError(struct Dis *d, char *p) {
+static char *DisError(struct Dis *d, char *p, int err) {
   p = DisColumn(DisByte(p, d->xedd->bytes, MIN(15, d->xedd->length)), p,
                 CODELEN);
   p = HighStart(p, g_high.comment);
   *p++ = '#';
   *p++ = ' ';
-  p = stpcpy(p, doublenul(kXedErrorNames, d->xedd->op.error));
+  p = stpcpy(p, "error");
   p = HighEnd(p);
   *p = '\0';
   return p;
@@ -97,7 +99,9 @@ static size_t uint64toarray_fixed16(u64 x, char b[17], u8 k) {
 
 static char *DisAddr(struct Dis *d, char *p) {
   i64 x = d->addr;
-  if (INT_MIN <= x && x <= INT_MAX) {
+  if (0 <= x && x < 0x10fff0) {
+    return p + uint64toarray_fixed16(x, p, 24);
+  } else if (INT_MIN <= x && x <= INT_MAX) {
     return p + uint64toarray_fixed16(x, p, 32);
   } else {
     return p + uint64toarray_fixed16(x, p, 48);
@@ -106,7 +110,13 @@ static char *DisAddr(struct Dis *d, char *p) {
 
 static char *DisRaw(struct Dis *d, char *p) {
   long i;
-  for (i = 0; i < PFIXLEN - MIN(PFIXLEN, d->xedd->op.PIVOTOP); ++i) {
+  int plen;
+  if (0 <= d->addr && d->addr < 0x10fff0) {
+    plen = 2;
+  } else {
+    plen = PFIXLEN;
+  }
+  for (i = 0; i < plen - MIN(plen, d->xedd->op.PIVOTOP); ++i) {
     *p++ = ' ';
     *p++ = ' ';
   }
@@ -119,26 +129,52 @@ static char *DisRaw(struct Dis *d, char *p) {
   return p;
 }
 
-static char *DisCode(struct Dis *d, char *p) {
+static char *DisCode(struct Dis *d, char *p, int err) {
   char optspecbuf[128];
-  if (!d->xedd->op.error) {
+  if (!err) {
     return DisInst(d, p, DisSpec(d->xedd, optspecbuf));
   } else {
-    return DisError(d, p);
+    return DisError(d, p, err);
   }
 }
 
-static char *DisLineCode(struct Dis *d, char *p) {
+static char *DisLineCode(struct Dis *d, char *p, int err) {
+  int blen, plen;
+  if (0 <= d->addr && d->addr < 0x10fff0) {
+    plen = 2;
+    blen = 6;
+  } else {
+    blen = BYTELEN;
+    plen = PFIXLEN;
+  }
   p = DisColumn(DisAddr(d, p), p, ADDRLEN);
-  p = DisColumn(DisRaw(d, p), p, PFIXLEN * 2 + 1 + BYTELEN * 2);
-  p = DisCode(d, p);
+  if (d->m && !IsJitDisabled(&d->m->system->jit)) {
+    if (HasHook(d->m, d->addr)) {
+      if (GetHook(d->m, d->addr) == GeneralDispatch) {
+        *p++ = ' ';  // no hook
+      } else if (GetHook(d->m, d->addr) == JitlessDispatch) {
+        *p++ = 'S';  // staging hook
+      } else {
+        *p++ = '*';  // committed jit hook
+      }
+    } else {
+      *p++ = '!';
+    }
+  }
+  if (!d->noraw) {
+    p = DisColumn(DisRaw(d, p), p, plen * 2 + 1 + blen * 2);
+  } else {
+    *p++ = ' ';
+    *p++ = ' ';
+  }
+  p = DisCode(d, p, err);
   return p;
 }
 
 static char *DisLabel(struct Dis *d, char *p, const char *name) {
   p = DisColumn(DisAddr(d, p), p, ADDRLEN);
   p = HighStart(p, g_high.label);
-  p = stpcpy(p, name);
+  p = Demangle(p, name, DIS_MAX_SYMBOL_LENGTH);
   p = HighEnd(p);
   *p++ = ':';
   *p = '\0';
@@ -163,14 +199,14 @@ long DisFind(struct Dis *d, i64 addr) {
 }
 
 static long DisAppendOpLines(struct Dis *d, struct Machine *m, i64 addr) {
-  void *r;
+  u8 *r;
   i64 ip;
   unsigned k;
-  struct DisOp op;
-  long n, symbol;
   u8 *p, b[15];
+  long n, symbol;
+  struct DisOp op;
   n = 15;
-  ip = addr - Read64(m->cs);
+  ip = addr - m->cs;
   if ((symbol = DisFindSym(d, ip)) != -1) {
     if (d->syms.p[symbol].addr <= ip &&
         ip < d->syms.p[symbol].addr + d->syms.p[symbol].size) {
@@ -192,22 +228,21 @@ static long DisAppendOpLines(struct Dis *d, struct Machine *m, i64 addr) {
     }
   }
   n = MAX(1, MIN(15, n));
-  if (!(r = FindReal(m, addr))) return -1;
+  if (!(r = LookupAddress(m, addr))) return -1;
   k = 0x1000 - (addr & 0xfff);
   if (n <= k) {
     p = (u8 *)r;
   } else {
     p = b;
     memcpy(b, r, k);
-    if ((r = FindReal(m, addr + k))) {
+    if ((r = LookupAddress(m, addr + k))) {
       memcpy(b + k, r, n - k);
     } else {
       n = k;
     }
   }
-  InitializeInstruction(d->xedd, m->mode);
-  DecodeInstruction(d->xedd, p, n);
-  n = d->xedd->op.error ? 1 : d->xedd->length;
+  DecodeInstruction(d->xedd, p, n, m->mode);
+  n = d->xedd->length;
   op.addr = addr;
   op.size = n;
   op.active = true;
@@ -220,8 +255,7 @@ static long DisAppendOpLines(struct Dis *d, struct Machine *m, i64 addr) {
   return n;
 }
 
-long Dis(struct Dis *d, struct Machine *m, i64 addr, i64 ip,
-         int lines) {
+long Dis(struct Dis *d, struct Machine *m, i64 addr, i64 ip, int lines) {
   i64 i, j, symbol;
   DisFreeOps(&d->ops);
   if ((symbol = DisFindSym(d, addr)) != -1 &&
@@ -238,18 +272,14 @@ long Dis(struct Dis *d, struct Machine *m, i64 addr, i64 ip,
 }
 
 const char *DisGetLine(struct Dis *d, struct Machine *m, int i) {
-  void *r[2];
-  u8 b[15];
+  int err;
   if (i >= d->ops.i) return "";
   if (d->ops.p[i].s) return d->ops.p[i].s;
   unassert(d->ops.p[i].size <= 15);
-  InitializeInstruction(d->xedd, m->mode);
-  DecodeInstruction(
-      d->xedd, AccessRam(m, d->ops.p[i].addr, d->ops.p[i].size, r, b, true),
-      d->ops.p[i].size);
+  err = GetInstruction(m, d->ops.p[i].addr, d->xedd);
   d->m = m;
   d->addr = d->ops.p[i].addr;
-  if (DisLineCode(d, d->buf) - d->buf >= (int)sizeof(d->buf)) abort();
+  if (DisLineCode(d, d->buf, err) - d->buf >= (int)sizeof(d->buf)) abort();
   return d->buf;
 }
 

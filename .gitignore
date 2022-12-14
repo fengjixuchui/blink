@@ -1,8 +1,11 @@
 # -*- conf -*-
 *.xz
 /o
+/core*
 /HTAGS
 /TAGS
+/*.dump
+/gmon.out
 /perf.data
 /perf.data.old
 /third_party/cosmo/*.gz

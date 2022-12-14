@@ -16,32 +16,27 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
-#include "blink/timespec.h"
+#include "blink/log.h"
+#include "blink/stats.h"
 
-int timespec_cmp(struct timespec a, struct timespec b) {
-  int cmp;
-  if (!(cmp = (a.tv_sec > b.tv_sec) - (a.tv_sec < b.tv_sec))) {
-    cmp = (a.tv_nsec > b.tv_nsec) - (a.tv_nsec < b.tv_nsec);
-  }
-  return cmp;
-}
+#define DEFINE_AVERAGE(S) struct Average S;
+#define DEFINE_COUNTER(S) long S;
+#include "blink/stats.inc"
+#undef DEFINE_AVERAGE
+#undef DEFINE_COUNTER
 
-struct timespec timespec_add(struct timespec x, struct timespec y) {
-  x.tv_sec += y.tv_sec;
-  x.tv_nsec += y.tv_nsec;
-  if (x.tv_nsec >= 1000000000) {
-    x.tv_nsec -= 1000000000;
-    x.tv_sec += 1;
-  }
-  return x;
-}
+#define APPEND(...) o += snprintf(b + o, n - o, __VA_ARGS__)
 
-struct timespec timespec_sub(struct timespec a, struct timespec b) {
-  a.tv_sec -= b.tv_sec;
-  if (a.tv_nsec < b.tv_nsec) {
-    a.tv_nsec += 1000000000;
-    a.tv_sec--;
-  }
-  a.tv_nsec -= b.tv_nsec;
-  return a;
+void PrintStats(void) {
+#ifndef NDEBUG
+  char b[2048];
+  int n = sizeof(b);
+  int o = 0;
+  b[0] = 0;
+#define DEFINE_COUNTER(S) APPEND("%-32s = %ld\n", #S, S);
+#define DEFINE_AVERAGE(S) APPEND("%-32s = %.6g\n", #S, S.a);
+#include "blink/stats.inc"
+#undef S
+  WriteErrorString(b);
+#endif
 }

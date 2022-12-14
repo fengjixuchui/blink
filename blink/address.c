@@ -17,63 +17,77 @@
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include "blink/address.h"
+#include "blink/assert.h"
 #include "blink/builtin.h"
 #include "blink/endian.h"
 #include "blink/modrm.h"
 #include "blink/x86.h"
 
-u64 AddressOb(struct Machine *m, u32 rde) {
-  return AddSegment(m, rde, m->xedd->op.disp, m->ds);
+i64 GetPc(struct Machine *m) {
+  return m->cs + GetIp(m);
 }
 
-u8 *(GetSegment)(struct Machine *m, u32 rde, int s) {
-  switch (s & 7) {
-    case 0:
-      return m->es;
-    case 1:
-      return m->cs;
-    case 2:
-      return m->ss;
-    case 3:
-      return m->ds;
-    case 4:
-      return m->fs;
-    case 5:
-      return m->gs;
-    case 6:
-    case 7:
-      OpUd(m, rde);
+i64 GetIp(struct Machine *m) {
+  return MaskAddress(m->mode, m->ip);
+}
+
+u64 MaskAddress(u32 mode, u64 x) {
+  if (mode != XED_MODE_LONG) {
+    if (mode == XED_MODE_REAL) {
+      x &= 0xffff;
+    } else {
+      x &= 0xffffffff;
+    }
+  }
+  return x;
+}
+
+i64 AddSegment(P, u64 i, u64 s) {
+  if (!Sego(rde)) {
+    return i + s;
+  } else {
+    return i + m->seg[Sego(rde) - 1];
+  }
+}
+
+u64 AddressOb(P) {
+  return AddSegment(A, disp, m->ds);
+}
+
+u64 *GetSegment(P, unsigned s) {
+  if (s < 6) {
+    return m->seg + s;
+  } else {
+    OpUdImpl(m);
+  }
+}
+
+i64 DataSegment(P, u64 i) {
+  return AddSegment(A, i, m->ds);
+}
+
+i64 AddressSi(P) {
+  switch (Eamode(rde)) {
+    case XED_MODE_LONG:
+      return DataSegment(A, Get64(m->si));
+    case XED_MODE_REAL:
+      return DataSegment(A, Get16(m->si));
+    case XED_MODE_LEGACY:
+      return DataSegment(A, Get32(m->si));
     default:
       __builtin_unreachable();
   }
 }
 
-u64 DataSegment(struct Machine *m, u32 rde, u64 i) {
-  return AddSegment(m, rde, i, m->ds);
-}
-
-u64 AddressSi(struct Machine *m, u32 rde) {
+u64 AddressDi(P) {
+  u64 i = m->es;
   switch (Eamode(rde)) {
     case XED_MODE_LONG:
-      return DataSegment(m, rde, Read64(m->si));
+      return i + Get64(m->di);
     case XED_MODE_REAL:
-      return DataSegment(m, rde, Read16(m->si));
+      return i + Get16(m->di);
     case XED_MODE_LEGACY:
-      return DataSegment(m, rde, Read32(m->si));
-    default:
-      __builtin_unreachable();
-  }
-}
-
-u64 AddressDi(struct Machine *m, u32 rde) {
-  u64 i = Read64(m->es);
-  switch (Eamode(rde)) {
-    case XED_MODE_LONG:
-      return i + Read64(m->di);
-    case XED_MODE_REAL:
-      return i + Read16(m->di);
-    case XED_MODE_LEGACY:
-      return i + Read32(m->di);
+      return i + Get32(m->di);
     default:
       __builtin_unreachable();
   }

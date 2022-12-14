@@ -52,31 +52,42 @@ static void ResetFpu(struct Machine *m) {
 }
 
 static void ResetSse(struct Machine *m) {
-  m->mxcsr = 0x1f80;
+  // SSE CONTROL AND STATUS REGISTER
+  // IE: Invalid Operation Flag ──────────────┐
+  // DE: Denormal Flag ──────────────────────┐│
+  // ZE: Divide-by-Zero Flag ───────────────┐││
+  // OE: Overflow Flag ────────────────────┐│││
+  // UE: Underflow Flag ──────────────────┐││││
+  // PE: Precision Flag ─────────────────┐│││││
+  // DAZ: Denormals Are Zeros ──────────┐││││││
+  // IM: Invalid Operation Mask ───────┐│││││││
+  // DM: Denormal Operation Mask ─────┐││││││││
+  // ZM: Divide-by-Zero Mask ────────┐│││││││││
+  // OM: Overflow Mask ─────────────┐││││││││││
+  // UM: Underflow Mask ───────────┐│││││││││││
+  // PM: Precision Mask ──────────┐││││││││││││
+  // RC: Rounding Control ───────┐│││││││││││││
+  //   {even, →-∞, →+∞, →0}      ││││││││││││││
+  //                            ┌┤│││││││││││││
+  //           ┌───────────────┐│││││││││││││││
+  //           │   reserved    ││││││││││││││││
+  m->mxcsr = 0b00000000000000000001111110000000;
   memset(m->xmm, 0, sizeof(m->xmm));
-}
-
-void ResetInstructionCache(struct Machine *m) {
-  memset(m->opcache->icache, -1, sizeof(m->opcache->icache));
 }
 
 void ResetCpu(struct Machine *m) {
   m->faultaddr = 0;
   m->opcache->stashsize = 0;
-  m->opcache->stashaddr = 0;
+  m->stashaddr = 0;
   m->writeaddr = 0;
   m->readaddr = 0;
   m->writesize = 0;
   m->readsize = 0;
-  m->flags = SetFlag(m->flags, FLAGS_DF, 0);
-  m->flags = SetFlag(m->flags, FLAGS_CF, 0);
-  m->flags = SetFlag(m->flags, FLAGS_ZF, 0);
-  m->flags = SetFlag(m->flags, FLAGS_SF, 0);
+  m->flags = 0;
   m->flags = SetFlag(m->flags, FLAGS_IF, 1);
-  m->flags = SetFlag(m->flags, FLAGS_F1, 1);
-  m->flags = SetFlag(m->flags, FLAGS_F0, 0);
+  m->flags = SetFlag(m->flags, FLAGS_VF, 1);
   m->flags = SetFlag(m->flags, FLAGS_IOPL, 3);
-  memset(m->reg, 0, sizeof(m->reg));
+  memset(m->beg, 0, sizeof(m->beg));
   memset(m->bofram, 0, sizeof(m->bofram));
   memset(&m->freelist, 0, sizeof(m->freelist));
   ResetSse(m);
@@ -86,6 +97,12 @@ void ResetCpu(struct Machine *m) {
 void ResetTlb(struct Machine *m) {
   m->tlbindex = 0;
   memset(m->tlb, 0, sizeof(m->tlb));
+  m->opcache->codevirt = 0;
+  m->opcache->codehost = 0;
+}
+
+void ResetInstructionCache(struct Machine *m) {
+  memset(m->opcache->icache, 0, sizeof(m->opcache->icache));
   m->opcache->codevirt = 0;
   m->opcache->codehost = 0;
 }

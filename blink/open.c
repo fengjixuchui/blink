@@ -23,15 +23,15 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include "blink/debug.h"
 #include "blink/errno.h"
 #include "blink/fds.h"
 #include "blink/log.h"
-#include "blink/memory.h"
 #include "blink/syscall.h"
 #include "blink/xlat.h"
 
-int OpOpenat(struct Machine *m, i32 dirfildes, i64 pathaddr, i32 oflags,
-             i32 mode) {
+int SysOpenat(struct Machine *m, i32 dirfildes, i64 pathaddr, i32 oflags,
+              i32 mode) {
   const char *path;
   struct Fd *fd, *dirfd;
   int rc, sf, fildes, sysdirfd;
@@ -56,7 +56,7 @@ int OpOpenat(struct Machine *m, i32 dirfildes, i64 pathaddr, i32 oflags,
       atomic_store_explicit(&fd->systemfd, sf, memory_order_release);
       fildes = fd->fildes;
     } else {
-      LOGF("%s failed: %s", "openat", strerror(errno));
+      SYS_LOGF("%s(%s) failed: %s", "openat", path, strerror(errno));
       fildes = -1;
     }
   } else {

@@ -20,25 +20,23 @@
 
 #include "blink/endian.h"
 #include "blink/machine.h"
-#include "blink/memory.h"
 #include "blink/modrm.h"
-#include "blink/real.h"
+#include "blink/mop.h"
 #include "blink/time.h"
 
-static void StoreDescriptorTable(struct Machine *m, u32 rde,
-                                 u16 limit, u64 base) {
+static void StoreDescriptorTable(P, u16 limit, u64 base) {
   u64 l;
-  l = ComputeAddress(m, rde);
-  if (l + 10 <= GetRealMemorySize(m->system)) {
-    Write16(m->system->real.p + l, limit);
+  l = ComputeAddress(A);
+  if (l + 10 <= kRealSize) {
+    Write16(m->system->real + l, limit);
     if (Rexw(rde)) {
-      Write64(m->system->real.p + l + 2, base);
+      Write64(m->system->real + l + 2, base);
       SetWriteAddr(m, l, 10);
     } else if (!Osz(rde)) {
-      Write32(m->system->real.p + l + 2, base);
+      Write32(m->system->real + l + 2, base);
       SetWriteAddr(m, l, 6);
     } else {
-      Write16(m->system->real.p + l + 2, base);
+      Write16(m->system->real + l + 2, base);
       SetWriteAddr(m, l, 4);
     }
   } else {
@@ -46,24 +44,23 @@ static void StoreDescriptorTable(struct Machine *m, u32 rde,
   }
 }
 
-static void LoadDescriptorTable(struct Machine *m, u32 rde,
-                                u16 *out_limit, u64 *out_base) {
+static void LoadDescriptorTable(P, u16 *out_limit, u64 *out_base) {
   u16 limit;
   u64 l, base;
-  l = ComputeAddress(m, rde);
-  if (l + 10 <= GetRealMemorySize(m->system)) {
-    limit = Read16(m->system->real.p + l);
+  l = ComputeAddress(A);
+  if (l + 10 <= kRealSize) {
+    limit = Read16(m->system->real + l);
     if (Rexw(rde)) {
-      base = Read64(m->system->real.p + l + 2) & 0x00ffffff;
+      base = Read64(m->system->real + l + 2) & 0x00ffffff;
       SetReadAddr(m, l, 10);
     } else if (!Osz(rde)) {
-      base = Read32(m->system->real.p + l + 2);
+      base = Read32(m->system->real + l + 2);
       SetReadAddr(m, l, 6);
     } else {
-      base = Read16(m->system->real.p + l + 2);
+      base = Read16(m->system->real + l + 2);
       SetReadAddr(m, l, 4);
     }
-    if (base + limit <= GetRealMemorySize(m->system)) {
+    if (base + limit <= kRealSize) {
       *out_limit = limit;
       *out_base = base;
     } else {
@@ -74,142 +71,142 @@ static void LoadDescriptorTable(struct Machine *m, u32 rde,
   }
 }
 
-static void SgdtMs(struct Machine *m, u32 rde) {
-  StoreDescriptorTable(m, rde, m->system->gdt_limit, m->system->gdt_base);
+static void SgdtMs(P) {
+  StoreDescriptorTable(A, m->system->gdt_limit, m->system->gdt_base);
 }
 
-static void LgdtMs(struct Machine *m, u32 rde) {
-  LoadDescriptorTable(m, rde, &m->system->gdt_limit, &m->system->gdt_base);
+static void LgdtMs(P) {
+  LoadDescriptorTable(A, &m->system->gdt_limit, &m->system->gdt_base);
 }
 
-static void SidtMs(struct Machine *m, u32 rde) {
-  StoreDescriptorTable(m, rde, m->system->idt_limit, m->system->idt_base);
+static void SidtMs(P) {
+  StoreDescriptorTable(A, m->system->idt_limit, m->system->idt_base);
 }
 
-static void LidtMs(struct Machine *m, u32 rde) {
-  LoadDescriptorTable(m, rde, &m->system->idt_limit, &m->system->idt_base);
+static void LidtMs(P) {
+  LoadDescriptorTable(A, &m->system->idt_limit, &m->system->idt_base);
 }
 
-static void Monitor(struct Machine *m, u32 rde) {
+static void Monitor(P) {
 }
 
-static void Mwait(struct Machine *m, u32 rde) {
+static void Mwait(P) {
 }
 
-static void Swapgs(struct Machine *m, u32 rde) {
+static void Swapgs(P) {
 }
 
-static void Vmcall(struct Machine *m, u32 rde) {
+static void Vmcall(P) {
 }
 
-static void Vmlaunch(struct Machine *m, u32 rde) {
+static void Vmlaunch(P) {
 }
 
-static void Vmresume(struct Machine *m, u32 rde) {
+static void Vmresume(P) {
 }
 
-static void Vmxoff(struct Machine *m, u32 rde) {
+static void Vmxoff(P) {
 }
 
-static void InvlpgM(struct Machine *m, u32 rde) {
+static void InvlpgM(P) {
   ResetTlb(m);
 }
 
-static void Smsw(struct Machine *m, u32 rde, bool ismem) {
+static void Smsw(P, bool ismem) {
   if (ismem) {
-    Write16(GetModrmRegisterWordPointerWrite2(m, rde), m->system->cr0);
+    Store16(GetModrmRegisterWordPointerWrite2(A), m->system->cr0);
   } else if (Rexw(rde)) {
-    Write64(RegRexrReg(m, rde), m->system->cr0);
+    Put64(RegRexrReg(m, rde), m->system->cr0);
   } else if (!Osz(rde)) {
-    Write64(RegRexrReg(m, rde), m->system->cr0 & 0xffffffff);
+    Put64(RegRexrReg(m, rde), m->system->cr0 & 0xffffffff);
   } else {
-    Write16(RegRexrReg(m, rde), m->system->cr0);
+    Put16(RegRexrReg(m, rde), m->system->cr0);
   }
 }
 
-static void Lmsw(struct Machine *m, u32 rde) {
-  m->system->cr0 = Read16(GetModrmRegisterWordPointerRead2(m, rde));
+static void Lmsw(P) {
+  m->system->cr0 = Read16(GetModrmRegisterWordPointerRead2(A));
 }
 
-void Op101(struct Machine *m, u32 rde) {
+void Op101(P) {
   bool ismem;
   ismem = !IsModrmRegister(rde);
   switch (ModrmReg(rde)) {
     case 0:
       if (ismem) {
-        SgdtMs(m, rde);
+        SgdtMs(A);
       } else {
         switch (ModrmRm(rde)) {
           case 1:
-            Vmcall(m, rde);
+            Vmcall(A);
             break;
           case 2:
-            Vmlaunch(m, rde);
+            Vmlaunch(A);
             break;
           case 3:
-            Vmresume(m, rde);
+            Vmresume(A);
             break;
           case 4:
-            Vmxoff(m, rde);
+            Vmxoff(A);
             break;
           default:
-            OpUd(m, rde);
+            OpUdImpl(m);
         }
       }
       break;
     case 1:
       if (ismem) {
-        SidtMs(m, rde);
+        SidtMs(A);
       } else {
         switch (ModrmRm(rde)) {
           case 0:
-            Monitor(m, rde);
+            Monitor(A);
             break;
           case 1:
-            Mwait(m, rde);
+            Mwait(A);
             break;
           default:
-            OpUd(m, rde);
+            OpUdImpl(m);
         }
       }
       break;
     case 2:
       if (ismem) {
-        LgdtMs(m, rde);
+        LgdtMs(A);
       } else {
-        OpUd(m, rde);
+        OpUdImpl(m);
       }
       break;
     case 3:
       if (ismem) {
-        LidtMs(m, rde);
+        LidtMs(A);
       } else {
-        OpUd(m, rde);
+        OpUdImpl(m);
       }
       break;
     case 4:
-      Smsw(m, rde, ismem);
+      Smsw(A, ismem);
       break;
     case 6:
-      Lmsw(m, rde);
+      Lmsw(A);
       break;
     case 7:
       if (ismem) {
-        InvlpgM(m, rde);
+        InvlpgM(A);
       } else {
         switch (ModrmRm(rde)) {
           case 0:
-            Swapgs(m, rde);
+            Swapgs(A);
             break;
           case 1:
-            OpRdtscp(m, rde);
+            OpRdtscp(A);
             break;
           default:
-            OpUd(m, rde);
+            OpUdImpl(m);
         }
       }
       break;
     default:
-      OpUd(m, rde);
+      OpUdImpl(m);
   }
 }

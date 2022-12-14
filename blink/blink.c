@@ -27,79 +27,98 @@
 #include "blink/case.h"
 #include "blink/dll.h"
 #include "blink/endian.h"
+#include "blink/jit.h"
 #include "blink/loader.h"
+#include "blink/lock.h"
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/signal.h"
 #include "blink/sigwinch.h"
+#include "blink/stats.h"
 #include "blink/syscall.h"
+#include "blink/util.h"
 #include "blink/xlat.h"
 
-static void OnSignal(int sig, siginfo_t *si, void *uc) {
-  LOGF("%s", strsignal(sig));
-  EnqueueSignal(g_machine, sig);
-}
+#define OPTS "hjms"
+#define USAGE \
+  " [-" OPTS "] PROG [ARGS...]\n\
+  -h        help\n\
+  -j        disable jit\n\
+  -m        enable memory safety\n\
+  -s        print statistics on exit\n"
+
+static bool FLAG_nojit;
+static bool FLAG_nolinear;
 
 static int Exec(char *prog, char **argv, char **envp) {
-  int rc;
-  dll_element *e;
-  struct Elf elf;
-  struct System *s;
-  struct Machine *o = g_machine;
+  struct Machine *old;
+  if ((old = g_machine)) KillOtherThreads(old->system);
   unassert((g_machine = NewMachine(NewSystem(), 0)));
+  if (FLAG_nojit) DisableJit(&g_machine->system->jit);
+  SetMachineMode(g_machine, XED_MODE_LONG);
+  g_machine->system->brand = "GenuineBlink";
   g_machine->system->exec = Exec;
-  g_machine->mode = XED_MACHINE_MODE_LONG_64;
-  LoadProgram(g_machine, prog, argv, envp, &elf);
-  if (!o) {
+  g_machine->nolinear = FLAG_nolinear;
+  g_machine->system->nolinear = FLAG_nolinear;
+  if (!old) {
+    LoadProgram(g_machine, prog, argv, envp);
     AddStdFd(&g_machine->system->fds, 0);
     AddStdFd(&g_machine->system->fds, 1);
     AddStdFd(&g_machine->system->fds, 2);
   } else {
-    s = o->system;
-    unassert(!pthread_mutex_lock(&s->machines_lock));
-    while ((e = dll_first(s->machines))) {
-      if (MACHINE_CONTAINER(e)->isthread) {
-        pthread_kill(MACHINE_CONTAINER(e)->thread, SIGKILL);
-      }
-      FreeMachine(MACHINE_CONTAINER(e));
-    }
-    unassert(!pthread_mutex_unlock(&s->machines_lock));
-    unassert(!pthread_mutex_lock(&s->fds.lock));
-    g_machine->system->fds = s->fds;
-    memset(&s->fds, 0, sizeof(s->fds));
-    unassert(!pthread_mutex_unlock(&s->fds.lock));
-    FreeSystem(s);
+    LoadProgram(g_machine, prog, argv, envp);
+    LOCK(&old->system->fds.lock);
+    g_machine->system->fds.list = old->system->fds.list;
+    old->system->fds.list = 0;
+    UNLOCK(&old->system->fds.lock);
+    FreeMachine(old);
   }
-  if (!(rc = setjmp(g_machine->onhalt))) {
-    Actor(g_machine);
-  } else {
-    return rc;
+  for (;;) {
+    if (!setjmp(g_machine->onhalt)) {
+      g_machine->canhalt = true;
+      Actor(g_machine);
+    }
+  }
+}
+
+static void Print(int fd, const char *s) {
+  write(fd, s, strlen(s));
+}
+
+_Noreturn static void PrintUsage(int argc, char *argv[], int rc, int fd) {
+  Print(fd, "Usage: ");
+  Print(fd, argc > 0 && argv[0] ? argv[0] : "blink");
+  Print(fd, USAGE);
+  exit(rc);
+}
+
+static void GetOpts(int argc, char *argv[]) {
+  int opt;
+  FLAG_nolinear = !CanHaveLinearMemory();
+  while ((opt = getopt_(argc, argv, OPTS)) != -1) {
+    switch (opt) {
+      case 'j':
+        FLAG_nojit = true;
+        break;
+      case 'm':
+        FLAG_nolinear = true;
+        break;
+      case 's':
+        FLAG_statistics = true;
+        break;
+      case 'h':
+        PrintUsage(argc, argv, 0, 1);
+      default:
+        PrintUsage(argc, argv, 48, 2);
+    }
   }
 }
 
 int main(int argc, char *argv[], char **envp) {
-  struct sigaction sa;
+  g_blink_path = argc > 0 ? argv[0] : 0;
+  GetOpts(argc, argv);
+  if (optind_ == argc) PrintUsage(argc, argv, 48, 2);
   WriteErrorInit();
-  if (argc < 2) {
-    WriteErrorString("Usage: ");
-    WriteErrorString(argv[0]);
-    WriteErrorString(" PROG [ARGS...]\r\n");
-    return 48;
-  }
-  sigfillset(&sa.sa_mask);
-  sa.sa_flags |= 0;
-  sa.sa_sigaction = OnSignal;
-  unassert(!sigaction(SIGHUP, &sa, 0));
-  unassert(!sigaction(SIGINT, &sa, 0));
-  unassert(!sigaction(SIGQUIT, &sa, 0));
-  unassert(!sigaction(SIGABRT, &sa, 0));
-  unassert(!sigaction(SIGUSR1, &sa, 0));
-  unassert(!sigaction(SIGUSR2, &sa, 0));
-  unassert(!sigaction(SIGPIPE, &sa, 0));
-  unassert(!sigaction(SIGALRM, &sa, 0));
-  unassert(!sigaction(SIGTERM, &sa, 0));
-  unassert(!sigaction(SIGCHLD, &sa, 0));
-  unassert(!sigaction(SIGWINCH, &sa, 0));
-  return Exec(argv[1], argv + 1, envp);
+  return Exec(argv[optind_], argv + optind_, envp);
 }

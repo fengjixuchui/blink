@@ -3,11 +3,12 @@
 
 SHELL = /bin/sh
 MAKEFLAGS += --no-builtin-rules
+ARCHITECTURES = x86_64 i486 aarch64 arm mips s390x mipsel mips64 mips64el powerpc powerpc64le
 
 .SUFFIXES:
 .DELETE_ON_ERROR:
 .FEATURES: output-sync
-.PHONY: o all clean check test tags
+.PHONY: o all clean check check2 test tags
 
 ifneq ($(m),)
 ifeq ($(MODE),)
@@ -28,16 +29,25 @@ VM = build/bootstrap/blink-darwin-arm64
 endif
 endif
 
-o:	o/$(MODE)/blink			\
+o:	o/$(MODE)/blink
+
+test:	o				\
 	o/$(MODE)/test
 
-check:	o/$(MODE)/third_party/cosmo
+check:	test				\
+	o/$(MODE)/third_party/cosmo
+
+check2:	o/$(MODE)/test/sse		\
+	o/$(MODE)/test/lib		\
+	o/$(MODE)/test/sys		\
+	o/$(MODE)/test/asm		\
+	o/$(MODE)/test/asm/emulates
 
 emulates:				\
+	o/$(MODE)/test/asm		\
+	o/$(MODE)/test/flat		\
 	o/$(MODE)/test/emulates		\
 	o/$(MODE)/third_party/cosmo/emulates
-
-test: check
 
 tags: TAGS HTAGS
 
@@ -49,6 +59,7 @@ include build/rules.mk
 include blink/blink.mk
 include test/test.mk
 include test/asm/asm.mk
+include test/flat/flat.mk
 include test/blink/test.mk
 include third_party/gcc/gcc.mk
 include third_party/qemu/qemu.mk
@@ -69,7 +80,7 @@ o/$(MODE)/.x:
 o/$(MODE)/srcs.txt: o/$(MODE)/.x $(MAKEFILES) $(SRCS) $(call uniq,$(foreach x,$(SRCS),$(dir $(x))))
 	$(file >$@) $(foreach x,$(SRCS),$(file >>$@,$(x)))
 o/$(MODE)/hdrs.txt: o/$(MODE)/.x $(MAKEFILES) $(HDRS) $(call uniq,$(foreach x,$(HDRS) $(INCS),$(dir $(x))))
-	$(file >$@) $(foreach x,$(HDRS) $(INCS),$(file >>$@,$(x)))
+	$(file >$@) $(foreach x,blink/types.h $(HDRS) $(INCS),$(file >>$@,$(x)))
 
 DEPENDS =				\
 	o/$(MODE)/depend.host		\

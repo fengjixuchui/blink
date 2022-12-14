@@ -24,103 +24,109 @@
 #include "blink/endian.h"
 #include "blink/flags.h"
 #include "blink/modrm.h"
+#include "blink/mop.h"
+#include "blink/stats.h"
 #include "blink/swap.h"
 
-static void AluEb(struct Machine *m, u32 rde, aluop_f op) {
-  u8 *p;
-  p = GetModrmRegisterBytePointerWrite(m, rde);
-  if (!Lock(rde)) {
-    Write8(p, op(Read8(p), 0, &m->flags));
-  } else {
-#if !defined(__riscv) && !defined(__MICROBLAZE__)
+static void AluEb(P, aluop_f op) {
+  u8 *p = GetModrmRegisterBytePointerWrite1(A);
+  if (Lock(rde) && !((intptr_t)p & 1)) {
     u8 x, z;
-    x = Read8(p);
+    x = atomic_load_explicit((_Atomic(u8) *)p, memory_order_acquire);
     do {
-      z = op(x, 0, &m->flags);
+      z = Little8(op(m, Little8(x), 0));
     } while (!atomic_compare_exchange_weak_explicit(
-        (atomic_uchar *)p, &x, z, memory_order_release, memory_order_relaxed));
-#else
-    OpUd(m, rde);
-#endif
+        (_Atomic(u8) *)p, &x, z, memory_order_release, memory_order_relaxed));
+  } else {
+    Store8(p, op(m, Load8(p), 0));
   }
 }
 
-void OpNotEb(struct Machine *m, u32 rde) {
-  AluEb(m, rde, Not8);
+void OpNotEb(P) {
+  AluEb(A, Not8);
 }
 
-void OpNegEb(struct Machine *m, u32 rde) {
-  AluEb(m, rde, Neg8);
+void OpNegEb(P) {
+  AluEb(A, Neg8);
 }
 
-void Op0fe(struct Machine *m, u32 rde) {
+void Op0fe(P) {
   switch (ModrmReg(rde)) {
     case 0:
-      AluEb(m, rde, Inc8);
+      AluEb(A, Inc8);
       break;
     case 1:
-      AluEb(m, rde, Dec8);
+      AluEb(A, Dec8);
       break;
     default:
-      OpUd(m, rde);
+      OpUdImpl(m);
   }
 }
 
-static void AluEvqp(struct Machine *m, u32 rde, const aluop_f ops[4]) {
+static void AluEvqp(P, const aluop_f ops[4]) {
   u8 *p;
+  aluop_f f;
+  f = ops[RegLog2(rde)];
   if (Rexw(rde)) {
-    p = GetModrmRegisterWordPointerWrite(m, rde, 8);
-    if (Lock(rde) && !((intptr_t)p & 7)) {
-#if LONG_BIT == 64
-      unsigned long x, z;
-      x = atomic_load_explicit((atomic_ulong *)p, memory_order_relaxed);
+    p = GetModrmRegisterWordPointerWrite8(A);
+    if (LONG_BIT == 64 && Lock(rde) && !((intptr_t)p & 7)) {
+      u64 x, z;
+      x = atomic_load_explicit((_Atomic(u64) *)p, memory_order_acquire);
       do {
-        z = ops[ALU_INT64](SWAP64LE(x), 0, &m->flags);
-        z = SWAP64LE(z);
-      } while (!atomic_compare_exchange_weak_explicit((atomic_ulong *)p, &x, z,
+        z = Little64(f(m, Little64(x), 0));
+      } while (!atomic_compare_exchange_weak_explicit((_Atomic(u64) *)p, &x, z,
                                                       memory_order_release,
                                                       memory_order_relaxed));
-#else
-      OpUd(m, rde);
-#endif
     } else {
-      Write64(p, ops[ALU_INT64](Read64(p), 0, &m->flags));
+      Store64(p, f(m, Load64(p), 0));
     }
   } else if (!Osz(rde)) {
-    unsigned int x, z;
-    p = GetModrmRegisterWordPointerWrite(m, rde, 4);
+    u32 x, z;
+    p = GetModrmRegisterWordPointerWrite4(A);
     if (Lock(rde) && !((intptr_t)p & 3)) {
-      x = atomic_load_explicit((atomic_uint *)p, memory_order_relaxed);
+      x = atomic_load_explicit((_Atomic(u32) *)p, memory_order_acquire);
       do {
-        z = ops[ALU_INT32](SWAP32LE(x), 0, &m->flags);
-        z = SWAP32LE(z);
-      } while (!atomic_compare_exchange_weak_explicit(
-          (atomic_uint *)p, &x, z, memory_order_release, memory_order_relaxed));
+        z = Little32(f(m, Little32(x), 0));
+      } while (!atomic_compare_exchange_weak_explicit((_Atomic(u32) *)p, &x, z,
+                                                      memory_order_release,
+                                                      memory_order_relaxed));
     } else {
-      Write32(p, ops[ALU_INT32](Read32(p), 0, &m->flags));
+      Store32(p, f(m, Load32(p), 0));
     }
     if (IsModrmRegister(rde)) {
       Write32(p + 4, 0);
     }
   } else {
-    unassert(!Lock(rde));
-    p = GetModrmRegisterWordPointerWrite(m, rde, 2);
-    Write16(p, ops[ALU_INT16](Read16(p), 0, &m->flags));
+    p = GetModrmRegisterWordPointerWrite2(A);
+    if (Lock(rde) && !((intptr_t)p & 1)) {
+      u16 x, z;
+      x = atomic_load_explicit((_Atomic(u16) *)p, memory_order_acquire);
+      do {
+        z = Little16(f(m, Little16(x), 0));
+      } while (!atomic_compare_exchange_weak_explicit((_Atomic(u16) *)p, &x, z,
+                                                      memory_order_release,
+                                                      memory_order_relaxed));
+    } else {
+      Store16(p, f(m, Load16(p), 0));
+    }
+  }
+  if (m->path.jb && !Lock(rde)) {
+    Jitter(A, "B r0a1= s0a0= c r0 D", f);
   }
 }
 
-void OpNotEvqp(struct Machine *m, u32 rde) {
-  AluEvqp(m, rde, kAlu[ALU_NOT]);
+void OpNotEvqp(P) {
+  AluEvqp(A, kAlu[ALU_NOT]);
 }
 
-void OpNegEvqp(struct Machine *m, u32 rde) {
-  AluEvqp(m, rde, kAlu[ALU_NEG]);
+void OpNegEvqp(P) {
+  AluEvqp(A, kAlu[ALU_NEG]);
 }
 
-void OpIncEvqp(struct Machine *m, u32 rde) {
-  AluEvqp(m, rde, kAlu[ALU_INC]);
+void OpIncEvqp(P) {
+  AluEvqp(A, kAlu[ALU_INC]);
 }
 
-void OpDecEvqp(struct Machine *m, u32 rde) {
-  AluEvqp(m, rde, kAlu[ALU_DEC]);
+void OpDecEvqp(P) {
+  AluEvqp(A, kAlu[ALU_DEC]);
 }

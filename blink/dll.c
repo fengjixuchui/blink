@@ -18,78 +18,65 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include "blink/dll.h"
 
-void dll_init(dll_element *e) {
-  e->next = e;
-  e->prev = e;
+/**
+ * Makes `succ` and its successors come after `elem`.
+ *
+ * It's required that `elem` and `succ` aren't part of the same list.
+ */
+void dll_splice_after(struct Dll *elem, struct Dll *succ) {
+  struct Dll *tmp1, *tmp2;
+  tmp1 = elem->next;
+  tmp2 = succ->prev;
+  elem->next = succ;
+  succ->prev = elem;
+  tmp2->next = tmp1;
+  tmp1->prev = tmp2;
 }
 
-int dll_is_empty(dll_list list) {
-  return !list;
-}
-
-dll_list dll_remove(dll_list list, dll_element *e) {
-  if (list == e) {
-    if (list->prev == list) {
-      list = 0;
+/**
+ * Removes item from doubly-linked list.
+ *
+ * @param list is a doubly-linked list, where `!*list` means empty
+ */
+void dll_remove(struct Dll **list, struct Dll *elem) {
+  if (*list == elem) {
+    if ((*list)->prev == *list) {
+      *list = 0;
     } else {
-      list = list->prev;
+      *list = (*list)->prev;
     }
   }
-  e->next->prev = e->prev;
-  e->prev->next = e->next;
-  e->next = e;
-  e->prev = e;
-  return list;
+  elem->next->prev = elem->prev;
+  elem->prev->next = elem->next;
+  elem->next = elem;
+  elem->prev = elem;
 }
 
-void dll_splice_after(dll_element *p, dll_element *n) {
-  dll_element *p2;
-  dll_element *nl;
-  p2 = p->next;
-  nl = n->prev;
-  p->next = n;
-  n->prev = p;
-  nl->next = p2;
-  p2->prev = nl;
-}
-
-dll_list dll_make_first(dll_list list, dll_element *e) {
-  if (e) {
-    if (!list) {
-      list = e->prev;
+/**
+ * Inserts item into doubly-linked list, at the beginning.
+ *
+ * @param list is a doubly-linked list, where `!*list` means empty
+ * @param elem must not be a member of `list`, or null for no-op
+ */
+void dll_make_first(struct Dll **list, struct Dll *elem) {
+  if (elem) {
+    if (!*list) {
+      *list = elem->prev;
     } else {
-      dll_splice_after(list, e);
+      dll_splice_after(*list, elem);
     }
   }
-  return list;
 }
 
-dll_list dll_make_last(dll_list list, dll_element *e) {
-  if (e) {
-    dll_make_first(list, e->next);
-    list = e;
+/**
+ * Inserts item into doubly-linked list, at the end.
+ *
+ * @param list is a doubly-linked list, where `!*list` means empty
+ * @param elem must not be a member of `list`, or null for no-op
+ */
+void dll_make_last(struct Dll **list, struct Dll *elem) {
+  if (elem) {
+    dll_make_first(list, elem->next);
+    *list = elem;
   }
-  return list;
-}
-
-dll_element *dll_first(dll_list list) {
-  dll_element *first = 0;
-  if (list) first = list->next;
-  return first;
-}
-
-dll_element *dll_last(dll_list list) {
-  return list;
-}
-
-dll_element *dll_next(dll_list list, dll_element *e) {
-  dll_element *next = 0;
-  if (e != list) next = e->next;
-  return next;
-}
-
-dll_element *dll_prev(dll_list list, dll_element *e) {
-  dll_element *prev = 0;
-  if (e != list->next) prev = e->prev;
-  return prev;
 }

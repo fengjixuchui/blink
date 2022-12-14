@@ -2,6 +2,100 @@
 #define BLINK_LINUX_H_
 #include "blink/types.h"
 
+#define ENOSYS_LINUX          38
+#define EPERM_LINUX           1
+#define ENOENT_LINUX          2
+#define ESRCH_LINUX           3
+#define EINTR_LINUX           4
+#define EIO_LINUX             5
+#define ENXIO_LINUX           6
+#define E2BIG_LINUX           7
+#define ENOEXEC_LINUX         8
+#define EBADF_LINUX           9
+#define ECHILD_LINUX          10
+#define EAGAIN_LINUX          11
+#define ENOMEM_LINUX          12
+#define EACCES_LINUX          13
+#define EFAULT_LINUX          14
+#define ENOTBLK_LINUX         15
+#define EBUSY_LINUX           16
+#define EEXIST_LINUX          17
+#define EXDEV_LINUX           18
+#define ENODEV_LINUX          19
+#define ENOTDIR_LINUX         20
+#define EISDIR_LINUX          21
+#define EINVAL_LINUX          22
+#define ENFILE_LINUX          23
+#define EMFILE_LINUX          24
+#define ENOTTY_LINUX          25
+#define ETXTBSY_LINUX         26
+#define EFBIG_LINUX           27
+#define ENOSPC_LINUX          28
+#define EDQUOT_LINUX          122
+#define ESPIPE_LINUX          29
+#define EROFS_LINUX           30
+#define EMLINK_LINUX          31
+#define EPIPE_LINUX           32
+#define EDOM_LINUX            33
+#define ERANGE_LINUX          34
+#define EDEADLK_LINUX         35
+#define ENAMETOOLONG_LINUX    36
+#define ENOLCK_LINUX          37
+#define ENOTEMPTY_LINUX       39
+#define ELOOP_LINUX           40
+#define ENOMSG_LINUX          42
+#define EIDRM_LINUX           43
+#define EPROTO_LINUX          71
+#define EOVERFLOW_LINUX       75
+#define EILSEQ_LINUX          84
+#define EUSERS_LINUX          87
+#define ENOTSOCK_LINUX        88
+#define EDESTADDRREQ_LINUX    89
+#define EMSGSIZE_LINUX        90
+#define EPROTOTYPE_LINUX      91
+#define ENOPROTOOPT_LINUX     92
+#define EPROTONOSUPPORT_LINUX 93
+#define ESOCKTNOSUPPORT_LINUX 94
+#define ENOTSUP_LINUX         95
+#define EOPNOTSUPP_LINUX      95
+#define EPFNOSUPPORT_LINUX    96
+#define EAFNOSUPPORT_LINUX    97
+#define EADDRINUSE_LINUX      98
+#define EADDRNOTAVAIL_LINUX   99
+#define ENETDOWN_LINUX        100
+#define ENETUNREACH_LINUX     101
+#define ENETRESET_LINUX       102
+#define ECONNABORTED_LINUX    103
+#define ECONNRESET_LINUX      104
+#define ENOBUFS_LINUX         105
+#define EISCONN_LINUX         106
+#define ENOTCONN_LINUX        107
+#define ESHUTDOWN_LINUX       108
+#define ETOOMANYREFS_LINUX    109
+#define ETIMEDOUT_LINUX       110
+#define ETIME_LINUX           62
+#define ECONNREFUSED_LINUX    111
+#define EHOSTDOWN_LINUX       112
+#define EHOSTUNREACH_LINUX    113
+#define EALREADY_LINUX        114
+#define EINPROGRESS_LINUX     115
+#define ESTALE_LINUX          116
+#define EREMOTE_LINUX         66
+#define EBADMSG_LINUX         74
+#define ECANCELED_LINUX       125
+#define EOWNERDEAD_LINUX      130
+#define ENOTRECOVERABLE_LINUX 131
+#define ENONET_LINUX          64
+#define ERESTART_LINUX        85
+#define ENODATA_LINUX         61
+#define ENOSR_LINUX           63
+#define ENOSTR_LINUX          60
+#define EMULTIHOP_LINUX       72
+#define ENOLINK_LINUX         67
+#define ENOMEDIUM_LINUX       123
+#define EMEDIUMTYPE_LINUX     124
+#define EBADFD_LINUX          77
+
 #define AT_FDCWD_LINUX -100
 
 #define O_RDONLY_LINUX  0
@@ -22,6 +116,8 @@
 #define O_ASYNC_LINUX     0x002000
 #define O_NOATIME_LINUX   0x040000
 #define O_DSYNC_LINUX     0x001000
+#define O_PATH_LINUX      0x200000
+#define O_LARGEFILE_LINUX 0x008000
 
 #define F_DUPFD_LINUX         0
 #define F_DUPFD_CLOEXEC_LINUX 0x0406
@@ -43,7 +139,6 @@
 #define ARCH_SET_FS_LINUX   0x1002
 #define ARCH_GET_FS_LINUX   0x1003
 #define ARCH_GET_GS_LINUX   0x1004
-#define MAP_GROWSDOWN_LINUX 0x0100
 #define O_CLOEXEC_LINUX     0x080000
 #define POLLIN_LINUX        0x01
 #define POLLPRI_LINUX       0x02
@@ -53,15 +148,33 @@
 #define POLLNVAL_LINUX      0x20
 #define TIMER_ABSTIME_LINUX 0x01
 
-#define CLONE_VM_             0x00000100
-#define CLONE_THREAD_         0x00010000
-#define CLONE_FS_             0x00000200
-#define CLONE_FILES_          0x00000400
-#define CLONE_SIGHAND_        0x00000800
-#define CLONE_SETTLS_         0x00080000
-#define CLONE_PARENT_SETTID_  0x00100000
-#define CLONE_CHILD_CLEARTID_ 0x00200000
-#define CLONE_CHILD_SETTID_   0x01000000
+#define MAP_SHARED_LINUX          0x00000001
+#define MAP_PRIVATE_LINUX         0x00000002
+#define MAP_FIXED_LINUX           0x00000010
+#define MAP_FIXED_NOREPLACE_LINUX 0x08000000
+#define MAP_ANONYMOUS_LINUX       0x00000020
+#define MAP_GROWSDOWN_LINUX       0x00000100
+#define MAP_STACK_LINUX           0x00020000
+#define MAP_NORESERVE_LINUX       0x00004000
+#define MAP_POPULATE_LINUX        0x00008000
+
+#define CLONE_VM_LINUX             0x00000100
+#define CLONE_THREAD_LINUX         0x00010000
+#define CLONE_FS_LINUX             0x00000200
+#define CLONE_FILES_LINUX          0x00000400
+#define CLONE_SIGHAND_LINUX        0x00000800
+#define CLONE_VFORK_LINUX          0x00004000
+#define CLONE_SYSVSEM_LINUX        0x00040000
+#define CLONE_SETTLS_LINUX         0x00080000
+#define CLONE_PARENT_SETTID_LINUX  0x00100000
+#define CLONE_CHILD_CLEARTID_LINUX 0x00200000
+#define CLONE_CHILD_SETTID_LINUX   0x01000000
+
+#define FUTEX_WAIT_LINUX           0
+#define FUTEX_WAKE_LINUX           1
+#define FUTEX_WAIT_BITSET_LINUX    9
+#define FUTEX_PRIVATE_FLAG_LINUX   128
+#define FUTEX_CLOCK_REALTIME_LINUX 256
 
 #define DT_UNKNOWN_LINUX 0
 #define DT_FIFO_LINUX    1
@@ -85,10 +198,88 @@
 #define SHUT_WR_LINUX   1
 #define SHUT_RDWR_LINUX 2
 
-#define SIG_IGN_LINUX  1
-#define SIGCHLD_LINUX  17
-#define SIGURG_LINUX   23
-#define SIGWINCH_LINUX 28
+#define SIG_DFL_LINUX 0
+#define SIG_IGN_LINUX 1
+
+#define SIG_BLOCK_LINUX   0
+#define SIG_UNBLOCK_LINUX 1
+#define SIG_SETMASK_LINUX 2
+
+#define SIGHUP_LINUX    1
+#define SIGINT_LINUX    2
+#define SIGQUIT_LINUX   3
+#define SIGILL_LINUX    4
+#define SIGTRAP_LINUX   5
+#define SIGABRT_LINUX   6
+#define SIGBUS_LINUX    7
+#define SIGFPE_LINUX    8
+#define SIGKILL_LINUX   9
+#define SIGUSR1_LINUX   10
+#define SIGSEGV_LINUX   11
+#define SIGUSR2_LINUX   12
+#define SIGPIPE_LINUX   13
+#define SIGALRM_LINUX   14
+#define SIGTERM_LINUX   15
+#define SIGSTKFLT_LINUX 16
+#define SIGCHLD_LINUX   17
+#define SIGCONT_LINUX   18
+#define SIGSTOP_LINUX   19
+#define SIGTSTP_LINUX   20
+#define SIGTTIN_LINUX   21
+#define SIGTTOU_LINUX   22
+#define SIGURG_LINUX    23
+#define SIGXCPU_LINUX   24
+#define SIGXFSZ_LINUX   25
+#define SIGVTALRM_LINUX 26
+#define SIGPROF_LINUX   27
+#define SIGWINCH_LINUX  28
+#define SIGIO_LINUX     29
+#define SIGSYS_LINUX    31
+#define SIGINFO_LINUX   63
+#define SIGEMT_LINUX    64
+#define SIGPWR_LINUX    30
+#define SIGTHR_LINUX    32
+#define SIGRTMIN_LINUX  32
+#define SIGRTMAX_LINUX  64
+
+#define AT_RANDOM_LINUX 25
+#define AT_EXECFN_LINUX 31
+
+#define IFNAMSIZ_LINUX 16
+
+#define SIOCGIFCONF_LINUX 0x8912
+
+#define AF_UNSPEC_LINUX 0
+#define AF_UNIX_LINUX   1
+#define AF_INET_LINUX   2
+
+#define SOL_SOCKET_LINUX 1
+#define SOL_TCP_LINUX    6
+#define SOL_UDP_LINUX    17
+
+#define F_SETLK_LINUX  6
+#define F_SETLKW_LINUX 7
+#define F_GETLK_LINUX  5
+
+#define F_RDLCK_LINUX 0
+#define F_WRLCK_LINUX 1
+#define F_UNLCK_LINUX 2
+
+#define SA_NOCLDSTOP_LINUX 1
+#define SA_NOCLDWAIT_LINUX 2
+#define SA_SIGINFO_LINUX   4
+#define SA_RESTORER_LINUX  0x04000000
+#define SA_ONSTACK_LINUX   0x08000000
+#define SA_RESTART_LINUX   0x10000000
+#define SA_NODEFER_LINUX   0x40000000
+#define SA_RESETHAND_LINUX 0x80000000
+
+#define SCHED_OTHER_LINUX    0
+#define SCHED_FIFO_LINUX     1
+#define SCHED_RR_LINUX       2
+#define SCHED_BATCH_LINUX    3
+#define SCHED_IDLE_LINUX     5
+#define SCHED_DEADLINE_LINUX 6
 
 struct iovec_linux {
   u8 iov_base[8];
@@ -268,6 +459,33 @@ struct dirent_linux {
   u8 d_reclen[2];    // byte length of this whole struct and string
   u8 d_type[1];      // DT_REG, DT_DIR, DT_UNKNOWN, DT_BLK, etc.
   char d_name[256];  // NUL-terminated basename
+};
+
+struct ifconf_linux {
+  u8 len[8];
+  u8 buf[8];
+};
+
+struct ifreq_linux {
+  u8 name[IFNAMSIZ_LINUX];
+  union {
+    struct sockaddr_in_linux addr;
+    struct sockaddr_in_linux dstaddr;
+    struct sockaddr_in_linux netmask;
+    struct sockaddr_in_linux broadaddr;
+    u8 flags[2];
+    u8 pad[24];
+  };
+};
+
+struct flock_linux {
+  u8 l_type[2];
+  u8 l_whence[2];
+  u8 pad1_[4];
+  u8 l_start[8];
+  u8 l_len[8];
+  u8 l_pid[4];
+  u8 pad2_[4];
 };
 
 #endif /* BLINK_LINUX_H_ */

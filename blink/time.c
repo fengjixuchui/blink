@@ -23,19 +23,35 @@
 #include "blink/modrm.h"
 #include "blink/time.h"
 
-void OpPause(struct Machine *m, u32 rde) {
+void OpPause(P) {
+#if defined(__GNUC__) && defined(__aarch64__)
+  __asm__ volatile("yield");
+#elif defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+  __asm__ volatile("pause");
+#else
   sched_yield();
+#endif
 }
 
-void OpRdtsc(struct Machine *m, u32 rde) {
-  i64 c;
+void OpRdtsc(P) {
+  u64 c;
+#if defined(__GNUC__) && defined(__aarch64__)
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(c));
+  c *= 48;  // the fudge factor
+#elif defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+  u32 ax, dx;
+  __asm__ volatile("rdtsc" : "=a"(ax), "=d"(dx));
+  c = (u64)dx << 32 | ax;
+#else
   struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
+  unassert(!clock_gettime(CLOCK_MONOTONIC, &ts));
   c = ts.tv_sec;
   c *= 1000000000;
   c += ts.tv_nsec;
-  Write64(m->ax, (c & 0x00000000ffffffff) >> 000);
-  Write64(m->dx, (c & 0xffffffff00000000) >> 040);
+  c *= 3;  // the fudge factor
+#endif
+  Put64(m->ax, (c & 0x00000000ffffffff) >> 000);
+  Put64(m->dx, (c & 0xffffffff00000000) >> 040);
 }
 
 static i64 GetTscAux(struct Machine *m) {
@@ -45,11 +61,11 @@ static i64 GetTscAux(struct Machine *m) {
   return (node & 0xfff) << 12 | (core & 0xfff);
 }
 
-void OpRdtscp(struct Machine *m, u32 rde) {
-  OpRdtsc(m, rde);
-  Write64(m->cx, GetTscAux(m));
+void OpRdtscp(P) {
+  OpRdtsc(A);
+  Put64(m->cx, GetTscAux(m));
 }
 
-void OpRdpid(struct Machine *m, u32 rde) {
-  Write64(RegRexbRm(m, rde), GetTscAux(m));
+void OpRdpid(P) {
+  Put64(RegRexbRm(m, rde), GetTscAux(m));
 }

@@ -26,6 +26,8 @@
 #include "blink/assert.h"
 #include "blink/errno.h"
 #include "blink/fds.h"
+#include "blink/lock.h"
+#include "blink/log.h"
 #include "blink/macros.h"
 
 // TODO(jart): We should track the first hole.
@@ -33,30 +35,30 @@
 
 void InitFds(struct Fds *fds) {
   fds->list = 0;
-  unassert(!pthread_mutex_init(&fds->lock, 0));
+  pthread_mutex_init(&fds->lock, 0);
 }
 
 void LockFds(struct Fds *fds) {
-  unassert(!pthread_mutex_lock(&fds->lock));
+  LOCK(&fds->lock);
 }
 
 struct Fd *AllocateFd(struct Fds *fds, int minfd, int oflags) {
   struct Fd *fd;
-  dll_element *e1, *e2;
+  struct Dll *e1, *e2;
   if (minfd < 0) {
     einval();
     return 0;
   }
   if ((fd = (struct Fd *)calloc(1, sizeof(*fd)))) {
-    dll_init(&fd->list);
+    dll_init(&fd->elem);
     fd->cb = &kFdCbHost;
     fd->oflags = oflags & ~O_CLOEXEC;
     fd->cloexec = !!(oflags & O_CLOEXEC);
-    unassert(!pthread_mutex_init(&fd->lock, 0));
+    pthread_mutex_init(&fd->lock, 0);
     atomic_store_explicit(&fd->systemfd, -1, memory_order_release);
     if (!(e1 = dll_first(fds->list)) || minfd < FD_CONTAINER(e1)->fildes) {
       fd->fildes = minfd;
-      fds->list = dll_make_first(fds->list, &fd->list);
+      dll_make_first(&fds->list, &fd->elem);
     } else {
       for (;; e1 = e2) {
         if ((!(e2 = dll_next(fds->list, e1)) ||
@@ -64,9 +66,9 @@ struct Fd *AllocateFd(struct Fds *fds, int minfd, int oflags) {
               minfd < FD_CONTAINER(e2)->fildes))) {
           fd->fildes = MAX(FD_CONTAINER(e1)->fildes + 1, minfd);
           if (e2) {
-            dll_splice_after(e1, &fd->list);
+            dll_splice_after(e1, &fd->elem);
           } else {
-            fds->list = dll_make_last(fds->list, &fd->list);
+            dll_make_last(&fds->list, &fd->elem);
           }
           break;
         }
@@ -77,36 +79,34 @@ struct Fd *AllocateFd(struct Fds *fds, int minfd, int oflags) {
 }
 
 struct Fd *GetFd(struct Fds *fds, int fildes) {
-  dll_element *e;
-  if (fildes < 0) {
-    einval();
-    return 0;
-  }
-  for (e = dll_first(fds->list); e; e = dll_next(fds->list, e)) {
-    if (FD_CONTAINER(e)->fildes == fildes) {
-      if (atomic_load_explicit(&FD_CONTAINER(e)->systemfd,
-                               memory_order_acquire) >= 0) {
-        return FD_CONTAINER(e);
-      } else {
-        ebadf();
-        break;
+  struct Dll *e;
+  if (fildes >= 0) {
+    for (e = dll_first(fds->list); e; e = dll_next(fds->list, e)) {
+      if (FD_CONTAINER(e)->fildes == fildes) {
+        if (atomic_load_explicit(&FD_CONTAINER(e)->systemfd,
+                                 memory_order_acquire) >= 0) {
+          return FD_CONTAINER(e);
+        } else {
+          break;
+        }
       }
     }
   }
+  ebadf();
   return 0;
 }
 
 void LockFd(struct Fd *fd) {
-  unassert(!pthread_mutex_lock(&fd->lock));
+  LOCK(&fd->lock);
 }
 
 void UnlockFd(struct Fd *fd) {
-  unassert(!pthread_mutex_unlock(&fd->lock));
+  UNLOCK(&fd->lock);
 }
 
 int CountFds(struct Fds *fds) {
   int n = 0;
-  dll_element *e;
+  struct Dll *e;
   for (e = dll_first(fds->list); e; e = dll_next(fds->list, e)) {
     ++n;
   }
@@ -116,17 +116,17 @@ int CountFds(struct Fds *fds) {
 void FreeFd(struct Fds *fds, struct Fd *fd) {
   if (fd) {
     unassert(!pthread_mutex_destroy(&fd->lock));
-    fds->list = dll_remove(fds->list, &fd->list);
+    dll_remove(&fds->list, &fd->elem);
     free(fd);
   }
 }
 
 void UnlockFds(struct Fds *fds) {
-  unassert(!pthread_mutex_unlock(&fds->lock));
+  UNLOCK(&fds->lock);
 }
 
 void DestroyFds(struct Fds *fds) {
-  dll_element *e, *e2;
+  struct Dll *e, *e2;
   for (e = dll_first(fds->list); e; e = e2) {
     e2 = dll_next(fds->list, e);
     FreeFd(fds, FD_CONTAINER(e));

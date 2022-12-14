@@ -20,156 +20,65 @@
 
 #include "blink/case.h"
 #include "blink/endian.h"
+#include "blink/likely.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
-#include "blink/memory.h"
 #include "blink/modrm.h"
 #include "blink/sse.h"
 
-static void MmxPor(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    x[i] |= y[i];
-  }
-}
-
-static void MmxPxor(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    x[i] ^= y[i];
-  }
-}
-
-static void MmxPsubb(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    x[i] -= y[i];
-  }
-}
-
-static void MmxPaddb(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    x[i] += y[i];
-  }
-}
-
-static void MmxPand(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    x[i] &= y[i];
-  }
-}
-
-static void MmxPandn(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    x[i] = ~x[i] & y[i];
-  }
-}
-
-static void MmxPavgb(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    x[i] = (x[i] + y[i] + 1) >> 1;
-  }
-}
-
-static void MmxPabsb(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    x[i] = ABS((i8)y[i]);
-  }
-}
-
-static void MmxPminub(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    x[i] = MIN(x[i], y[i]);
-  }
-}
-
-static void MmxPmaxub(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    x[i] = MAX(x[i], y[i]);
-  }
-}
-
 static void MmxPaddusb(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
+  for (unsigned i = 0; i < 8; ++i) {
     x[i] = MIN(255, x[i] + y[i]);
   }
 }
 
 static void MmxPsubusb(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
+  for (unsigned i = 0; i < 8; ++i) {
     x[i] = MIN(255, MAX(0, x[i] - y[i]));
   }
 }
 
-static void MmxPcmpeqb(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    x[i] = -(x[i] == y[i]);
-  }
-}
-
-static void MmxPcmpgtb(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    x[i] = -((i8)x[i] > (i8)y[i]);
-  }
-}
-
 static void MmxPsubsb(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
+  for (unsigned i = 0; i < 8; ++i) {
     x[i] = MAX(-128, MIN(127, (i8)x[i] - (i8)y[i]));
   }
 }
 
 static void MmxPaddsb(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
+  for (unsigned i = 0; i < 8; ++i) {
     x[i] = MAX(-128, MIN(127, (i8)x[i] + (i8)y[i]));
   }
 }
 
 static void MmxPmulhrsw(u8 x[8], const u8 y[8]) {
-  unsigned i;
   i16 a, b;
+  unsigned i;
   for (i = 0; i < 4; ++i) {
-    a = Read16(x + i * 2);
-    b = Read16(y + i * 2);
-    Write16(x + i * 2, (((a * b) >> 14) + 1) >> 1);
+    a = Get16(x + i * 2);
+    b = Get16(y + i * 2);
+    Put16(x + i * 2, (((a * b) >> 14) + 1) >> 1);
   }
 }
 
 static void MmxPmaddubsw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2,
-            MAX(-32768, MIN(32767, (x[i * 2 + 0] * (i8)y[i * 2 + 0] +
-                                    x[i * 2 + 1] * (i8)y[i * 2 + 1]))));
+  for (unsigned i = 0; i < 4; ++i) {
+    Put16(x + i * 2,
+          MAX(-32768, MIN(32767, (x[i * 2 + 0] * (i8)y[i * 2 + 0] +
+                                  x[i * 2 + 1] * (i8)y[i * 2 + 1]))));
   }
 }
 
 static void MmxPsraw(u8 x[8], unsigned k) {
-  unsigned i;
   if (k > 15) k = 15;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2, (i16)Read16(x + i * 2) >> k);
+  for (unsigned i = 0; i < 4; ++i) {
+    Put16(x + i * 2, (i16)Get16(x + i * 2) >> k);
   }
 }
 
 static void MmxPsrad(u8 x[8], unsigned k) {
-  unsigned i;
   if (k > 31) k = 31;
-  for (i = 0; i < 2; ++i) {
-    Write32(x + i * 4, (i32)Read32(x + i * 4) >> k);
+  for (unsigned i = 0; i < 2; ++i) {
+    Put32(x + i * 4, (i32)Get32(x + i * 4) >> k);
   }
 }
 
@@ -177,7 +86,7 @@ static void MmxPsrlw(u8 x[8], unsigned k) {
   unsigned i;
   if (k < 16) {
     for (i = 0; i < 4; ++i) {
-      Write16(x + i * 2, Read16(x + i * 2) >> k);
+      Put16(x + i * 2, Get16(x + i * 2) >> k);
     }
   } else {
     memset(x, 0, 8);
@@ -188,7 +97,7 @@ static void MmxPsllw(u8 x[8], unsigned k) {
   unsigned i;
   if (k <= 15) {
     for (i = 0; i < 4; ++i) {
-      Write16(x + i * 2, Read16(x + i * 2) << k);
+      Put16(x + i * 2, Get16(x + i * 2) << k);
     }
   } else {
     memset(x, 0, 8);
@@ -199,7 +108,7 @@ static void MmxPsrld(u8 x[8], unsigned k) {
   unsigned i;
   if (k <= 31) {
     for (i = 0; i < 2; ++i) {
-      Write32(x + i * 4, Read32(x + i * 4) >> k);
+      Put32(x + i * 4, Get32(x + i * 4) >> k);
     }
   } else {
     memset(x, 0, 8);
@@ -210,7 +119,7 @@ static void MmxPslld(u8 x[8], unsigned k) {
   unsigned i;
   if (k <= 31) {
     for (i = 0; i < 2; ++i) {
-      Write32(x + i * 4, Read32(x + i * 4) << k);
+      Put32(x + i * 4, Get32(x + i * 4) << k);
     }
   } else {
     memset(x, 0, 8);
@@ -219,7 +128,7 @@ static void MmxPslld(u8 x[8], unsigned k) {
 
 static void MmxPsrlq(u8 x[8], unsigned k) {
   if (k <= 63) {
-    Write64(x, Read64(x) >> k);
+    Put64(x, Get64(x) >> k);
   } else {
     memset(x, 0, 8);
   }
@@ -227,7 +136,7 @@ static void MmxPsrlq(u8 x[8], unsigned k) {
 
 static void MmxPsllq(u8 x[8], unsigned k) {
   if (k <= 63) {
-    Write64(x, Read64(x) << k);
+    Put64(x, Get64(x) << k);
   } else {
     memset(x, 0, 8);
   }
@@ -258,86 +167,41 @@ static void MmxPalignr(u8 x[8], const u8 y[8], unsigned k) {
   memcpy(x, t + MIN(k, 16), 8);
 }
 
-static void MmxPsubw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2, Read16(x + i * 2) - Read16(y + i * 2));
-  }
-}
-
-static void MmxPaddw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2, Read16(x + i * 2) + Read16(y + i * 2));
-  }
-}
-
 static void MmxPsubd(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 2; ++i) {
-    Write32(x + i * 4, Read32(x + i * 4) - Read32(y + i * 4));
+  for (unsigned i = 0; i < 2; ++i) {
+    Put32(x + i * 4, Get32(x + i * 4) - Get32(y + i * 4));
   }
 }
 
 static void MmxPaddd(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 2; ++i) {
-    Write32(x + i * 4, Read32(x + i * 4) + Read32(y + i * 4));
+  for (unsigned i = 0; i < 2; ++i) {
+    Put32(x + i * 4, Get32(x + i * 4) + Get32(y + i * 4));
   }
 }
 
 static void MmxPaddq(u8 x[8], const u8 y[8]) {
-  Write64(x, Read64(x) + Read64(y));
+  Put64(x, Get64(x) + Get64(y));
 }
 
 static void MmxPsubq(u8 x[8], const u8 y[8]) {
-  Write64(x, Read64(x) - Read64(y));
-}
-
-static void MmxPaddsw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + i * 2) +
-                                               (i16)Read16(y + i * 2)))));
-  }
-}
-
-static void MmxPsubsw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + i * 2) -
-                                               (i16)Read16(y + i * 2)))));
-  }
-}
-
-static void MmxPaddusw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2, MIN(65535, Read16(x + i * 2) + Read16(y + i * 2)));
-  }
+  Put64(x, Get64(x) - Get64(y));
 }
 
 static void MmxPsubusw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2,
-            MIN(65535, MAX(0, Read16(x + i * 2) - Read16(y + i * 2))));
+  for (unsigned i = 0; i < 4; ++i) {
+    Put16(x + i * 2, MIN(65535, MAX(0, Get16(x + i * 2) - Get16(y + i * 2))));
   }
 }
 
 static void MmxPminsw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2,
-            MIN((i16)Read16(x + i * 2), (i16)Read16(y + i * 2)));
+  for (unsigned i = 0; i < 4; ++i) {
+    Put16(x + i * 2, MIN((i16)Get16(x + i * 2), (i16)Get16(y + i * 2)));
   }
 }
 
 static void MmxPmaxsw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2,
-            MAX((i16)Read16(x + i * 2), (i16)Read16(y + i * 2)));
+  for (unsigned i = 0; i < 4; ++i) {
+    Put16(x + i * 2, MAX((i16)Get16(x + i * 2), (i16)Get16(y + i * 2)));
   }
 }
 
@@ -345,10 +209,10 @@ static void MmxPackuswb(u8 x[8], const u8 y[8]) {
   unsigned i;
   u8 t[8];
   for (i = 0; i < 4; ++i) {
-    t[i + 0] = MIN(255, MAX(0, (i16)Read16(x + i * 2)));
+    t[i + 0] = MIN(255, MAX(0, (i16)Get16(x + i * 2)));
   }
   for (i = 0; i < 4; ++i) {
-    t[i + 4] = MIN(255, MAX(0, (i16)Read16(y + i * 2)));
+    t[i + 4] = MIN(255, MAX(0, (i16)Get16(y + i * 2)));
   }
   memcpy(x, t, 8);
 }
@@ -357,10 +221,10 @@ static void MmxPacksswb(u8 x[8], const u8 y[8]) {
   unsigned i;
   u8 t[8];
   for (i = 0; i < 4; ++i) {
-    t[i + 0] = MAX(-128, MIN(127, (i16)Read16(x + i * 2)));
+    t[i + 0] = MAX(-128, MIN(127, (i16)Get16(x + i * 2)));
   }
   for (i = 0; i < 4; ++i) {
-    t[i + 4] = MAX(-128, MIN(127, (i16)Read16(y + i * 2)));
+    t[i + 4] = MAX(-128, MIN(127, (i16)Get16(y + i * 2)));
   }
   memcpy(x, t, 8);
 }
@@ -369,71 +233,53 @@ static void MmxPackssdw(u8 x[8], const u8 y[8]) {
   unsigned i;
   u8 t[8];
   for (i = 0; i < 2; ++i) {
-    Write16(t + i * 2 + 0, MAX(-32768, MIN(32767, (i32)Read32(x + i * 4))));
+    Put16(t + i * 2 + 0, MAX(-32768, MIN(32767, (i32)Get32(x + i * 4))));
   }
   for (i = 0; i < 2; ++i) {
-    Write16(t + i * 2 + 4, MAX(-32768, MIN(32767, (i32)Read32(y + i * 4))));
+    Put16(t + i * 2 + 4, MAX(-32768, MIN(32767, (i32)Get32(y + i * 4))));
   }
   memcpy(x, t, 8);
 }
 
-static void MmxPcmpgtw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2,
-            -((i16)Read16(x + i * 2) > (i16)Read16(y + i * 2)));
-  }
-}
-
-static void MmxPcmpeqw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2, -(Read16(x + i * 2) == Read16(y + i * 2)));
-  }
-}
-
 static void MmxPcmpgtd(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 2; ++i) {
-    Write32(x + i * 4,
-            -((i32)Read32(x + i * 4) > (i32)Read32(y + i * 4)));
+  for (unsigned i = 0; i < 2; ++i) {
+    Put32(x + i * 4, -((i32)Get32(x + i * 4) > (i32)Get32(y + i * 4)));
   }
 }
 
 static void MmxPcmpeqd(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 2; ++i) {
-    Write32(x + i * 4, -(Read32(x + i * 4) == Read32(y + i * 4)));
+  for (unsigned i = 0; i < 2; ++i) {
+    Put32(x + i * 4, -(Get32(x + i * 4) == Get32(y + i * 4)));
   }
 }
 
 static void MmxPsrawv(u8 x[8], const u8 y[8]) {
-  unsigned i;
   u64 k;
-  k = Read64(y);
+  unsigned i;
+  k = Get64(y);
   if (k > 15) k = 15;
   for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2, (i16)Read16(x + i * 2) >> k);
+    Put16(x + i * 2, (i16)Get16(x + i * 2) >> k);
   }
 }
 
 static void MmxPsradv(u8 x[8], const u8 y[8]) {
-  unsigned i;
   u64 k;
-  k = Read64(y);
+  unsigned i;
+  k = Get64(y);
   if (k > 31) k = 31;
   for (i = 0; i < 2; ++i) {
-    Write32(x + i * 4, (i32)Read32(x + i * 4) >> k);
+    Put32(x + i * 4, (i32)Get32(x + i * 4) >> k);
   }
 }
 
 static void MmxPsrlwv(u8 x[8], const u8 y[8]) {
-  unsigned i;
   u64 k;
-  k = Read64(y);
+  unsigned i;
+  k = Get64(y);
   if (k < 16) {
     for (i = 0; i < 4; ++i) {
-      Write16(x + i * 2, Read16(x + i * 2) >> k);
+      Put16(x + i * 2, Get16(x + i * 2) >> k);
     }
   } else {
     memset(x, 0, 8);
@@ -441,12 +287,12 @@ static void MmxPsrlwv(u8 x[8], const u8 y[8]) {
 }
 
 static void MmxPsllwv(u8 x[8], const u8 y[8]) {
-  unsigned i;
   u64 k;
-  k = Read64(y);
+  unsigned i;
+  k = Get64(y);
   if (k < 16) {
     for (i = 0; i < 4; ++i) {
-      Write16(x + i * 2, Read16(x + i * 2) << k);
+      Put16(x + i * 2, Get16(x + i * 2) << k);
     }
   } else {
     memset(x, 0, 8);
@@ -454,12 +300,12 @@ static void MmxPsllwv(u8 x[8], const u8 y[8]) {
 }
 
 static void MmxPsrldv(u8 x[8], const u8 y[8]) {
-  unsigned i;
   u64 k;
-  k = Read64(y);
+  unsigned i;
+  k = Get64(y);
   if (k < 32) {
     for (i = 0; i < 2; ++i) {
-      Write32(x + i * 4, Read32(x + i * 4) >> k);
+      Put32(x + i * 4, Get32(x + i * 4) >> k);
     }
   } else {
     memset(x, 0, 8);
@@ -467,12 +313,12 @@ static void MmxPsrldv(u8 x[8], const u8 y[8]) {
 }
 
 static void MmxPslldv(u8 x[8], const u8 y[8]) {
-  unsigned i;
   u64 k;
-  k = Read64(y);
+  unsigned i;
+  k = Get64(y);
   if (k < 32) {
     for (i = 0; i < 2; ++i) {
-      Write32(x + i * 4, Read32(x + i * 4) << k);
+      Put32(x + i * 4, Get32(x + i * 4) << k);
     }
   } else {
     memset(x, 0, 8);
@@ -481,9 +327,9 @@ static void MmxPslldv(u8 x[8], const u8 y[8]) {
 
 static void MmxPsrlqv(u8 x[8], const u8 y[8]) {
   u64 k;
-  k = Read64(y);
+  k = Get64(y);
   if (k < 64) {
-    Write64(x, Read64(x) >> k);
+    Put64(x, Get64(x) >> k);
   } else {
     memset(x, 0, 8);
   }
@@ -491,72 +337,50 @@ static void MmxPsrlqv(u8 x[8], const u8 y[8]) {
 
 static void MmxPsllqv(u8 x[8], const u8 y[8]) {
   u64 k;
-  k = Read64(y);
+  k = Get64(y);
   if (k < 64) {
-    Write64(x, Read64(x) << k);
+    Put64(x, Get64(x) << k);
   } else {
     memset(x, 0, 8);
   }
 }
 
-static void MmxPavgw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2, (Read16(x + i * 2) + Read16(y + i * 2) + 1) >> 1);
-  }
-}
-
 static void MmxPsadbw(u8 x[8], const u8 y[8]) {
   unsigned i, s, t;
-  for (s = i = 0; i < 4; ++i) s += ABS(x[i] - y[i]);
-  for (t = 0; i < 8; ++i) t += ABS(x[i] - y[i]);
-  Write32(x + 0, s);
-  Write32(x + 4, t);
+  for (s = i = 0; i < 4; ++i) {
+    s += ABS(x[i] - y[i]);
+  }
+  for (t = 0; i < 8; ++i) {
+    t += ABS(x[i] - y[i]);
+  }
+  Put32(x + 0, s);
+  Put32(x + 4, t);
 }
 
 static void MmxPmaddwd(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 2; ++i) {
-    Write32(x + i * 4,
-            ((i16)Read16(x + i * 4 + 0) * (i16)Read16(y + i * 4 + 0) +
-             (i16)Read16(x + i * 4 + 2) * (i16)Read16(y + i * 4 + 2)));
+  for (unsigned i = 0; i < 2; ++i) {
+    Put32(x + i * 4, ((i16)Get16(x + i * 4 + 0) * (i16)Get16(y + i * 4 + 0) +
+                      (i16)Get16(x + i * 4 + 2) * (i16)Get16(y + i * 4 + 2)));
   }
 }
 
 static void MmxPmulhuw(u8 x[8], const u8 y[8]) {
   u32 v;
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    v = Read16(x + i * 2);
-    v *= Read16(y + i * 2);
+  for (unsigned i = 0; i < 4; ++i) {
+    v = Get16(x + i * 2);
+    v *= Get16(y + i * 2);
     v >>= 16;
-    Write16(x + i * 2, v);
-  }
-}
-
-static void MmxPmulhw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2,
-            ((i16)Read16(x + i * 2) * (i16)Read16(y + i * 2)) >> 16);
+    Put16(x + i * 2, v);
   }
 }
 
 static void MmxPmuludq(u8 x[8], const u8 y[8]) {
-  Write64(x, (u64)Read32(x) * Read32(y));
-}
-
-static void MmxPmullw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2, (i16)Read16(x + i * 2) * (i16)Read16(y + i * 2));
-  }
+  Put64(x, (u64)Get32(x) * Get32(y));
 }
 
 static void MmxPmulld(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 2; ++i) {
-    Write32(x + i * 4, Read32(x + i * 4) * Read32(y + i * 4));
+  for (unsigned i = 0; i < 2; ++i) {
+    Put32(x + i * 4, Get32(x + i * 4) * Get32(y + i * 4));
   }
 }
 
@@ -571,8 +395,7 @@ static void MmxPshufb(u8 x[8], const u8 y[8]) {
 
 static void MmxPsignb(u8 x[8], const u8 y[8]) {
   int v;
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
+  for (unsigned i = 0; i < 8; ++i) {
     v = (i8)y[i];
     if (!v) {
       x[i] = 0;
@@ -584,101 +407,71 @@ static void MmxPsignb(u8 x[8], const u8 y[8]) {
 
 static void MmxPsignw(u8 x[8], const u8 y[8]) {
   int v;
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    v = (i16)Read16(y + i * 2);
+  for (unsigned i = 0; i < 4; ++i) {
+    v = (i16)Get16(y + i * 2);
     if (!v) {
-      Write16(x + i * 2, 0);
+      Put16(x + i * 2, 0);
     } else if (v < 0) {
-      Write16(x + i * 2, -(i16)Read16(x + i * 2));
+      Put16(x + i * 2, -(i16)Get16(x + i * 2));
     }
   }
 }
 
 static void MmxPsignd(u8 x[8], const u8 y[8]) {
   i32 v;
-  unsigned i;
-  for (i = 0; i < 2; ++i) {
-    v = Read32(y + i * 4);
+  for (unsigned i = 0; i < 2; ++i) {
+    v = Get32(y + i * 4);
     if (!v) {
-      Write32(x + i * 4, 0);
+      Put32(x + i * 4, 0);
     } else if (v < 0) {
-      Write32(x + i * 4, -Read32(x + i * 4));
+      Put32(x + i * 4, -Get32(x + i * 4));
     }
   }
 }
 
 static void MmxPabsw(u8 x[8], const u8 y[8]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write16(x + i * 2, ABS((i16)Read16(y + i * 2)));
+  for (unsigned i = 0; i < 4; ++i) {
+    Put16(x + i * 2, ABS((i16)Get16(y + i * 2)));
   }
 }
 
 static void MmxPabsd(u8 x[8], const u8 y[8]) {
   i32 v;
-  unsigned i;
-  for (i = 0; i < 2; ++i) {
-    v = Read32(y + i * 4);
-    Write32(x + i * 4, v >= 0 ? v : -(u32)v);
+  for (unsigned i = 0; i < 2; ++i) {
+    v = Get32(y + i * 4);
+    Put32(x + i * 4, v >= 0 ? v : -(u32)v);
   }
 }
 
 static void MmxPhaddw(u8 x[8], const u8 y[8]) {
   u8 t[8];
-  Write16(t + 0 * 2, Read16(x + 0 * 2) + Read16(x + 1 * 2));
-  Write16(t + 1 * 2, Read16(x + 2 * 2) + Read16(x + 3 * 2));
-  Write16(t + 2 * 2, Read16(y + 0 * 2) + Read16(y + 1 * 2));
-  Write16(t + 3 * 2, Read16(y + 2 * 2) + Read16(y + 3 * 2));
+  Put16(t + 0 * 2, Get16(x + 0 * 2) + Get16(x + 1 * 2));
+  Put16(t + 1 * 2, Get16(x + 2 * 2) + Get16(x + 3 * 2));
+  Put16(t + 2 * 2, Get16(y + 0 * 2) + Get16(y + 1 * 2));
+  Put16(t + 3 * 2, Get16(y + 2 * 2) + Get16(y + 3 * 2));
   memcpy(x, t, 8);
 }
 
 static void MmxPhsubw(u8 x[8], const u8 y[8]) {
   u8 t[8];
-  Write16(t + 0 * 2, Read16(x + 0 * 2) - Read16(x + 1 * 2));
-  Write16(t + 1 * 2, Read16(x + 2 * 2) - Read16(x + 3 * 2));
-  Write16(t + 2 * 2, Read16(y + 0 * 2) - Read16(y + 1 * 2));
-  Write16(t + 3 * 2, Read16(y + 2 * 2) - Read16(y + 3 * 2));
+  Put16(t + 0 * 2, Get16(x + 0 * 2) - Get16(x + 1 * 2));
+  Put16(t + 1 * 2, Get16(x + 2 * 2) - Get16(x + 3 * 2));
+  Put16(t + 2 * 2, Get16(y + 0 * 2) - Get16(y + 1 * 2));
+  Put16(t + 3 * 2, Get16(y + 2 * 2) - Get16(y + 3 * 2));
   memcpy(x, t, 8);
 }
 
 static void MmxPhaddd(u8 x[8], const u8 y[8]) {
   u8 t[8];
-  Write32(t + 0 * 4, Read32(x + 0 * 4) + Read32(x + 1 * 4));
-  Write32(t + 1 * 4, Read32(y + 0 * 4) + Read32(y + 1 * 4));
+  Put32(t + 0 * 4, Get32(x + 0 * 4) + Get32(x + 1 * 4));
+  Put32(t + 1 * 4, Get32(y + 0 * 4) + Get32(y + 1 * 4));
   memcpy(x, t, 8);
 }
 
 static void MmxPhsubd(u8 x[8], const u8 y[8]) {
   u8 t[8];
-  Write32(t + 0 * 4, Read32(x + 0 * 4) - Read32(x + 1 * 4));
-  Write32(t + 1 * 4, Read32(y + 0 * 4) - Read32(y + 1 * 4));
-  memcpy(x, t, 8);
-}
-
-static void MmxPhaddsw(u8 x[8], const u8 y[8]) {
-  u8 t[8];
-  Write16(t + 0 * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + 0 * 2) +
-                                             (i16)Read16(x + 1 * 2)))));
-  Write16(t + 1 * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + 2 * 2) +
-                                             (i16)Read16(x + 3 * 2)))));
-  Write16(t + 2 * 2, MAX(-32768, MIN(32767, ((i16)Read16(y + 0 * 2) +
-                                             (i16)Read16(y + 1 * 2)))));
-  Write16(t + 3 * 2, MAX(-32768, MIN(32767, ((i16)Read16(y + 2 * 2) +
-                                             (i16)Read16(y + 3 * 2)))));
-  memcpy(x, t, 8);
-}
-
-static void MmxPhsubsw(u8 x[8], const u8 y[8]) {
-  u8 t[8];
-  Write16(t + 0 * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + 0 * 2) -
-                                             (i16)Read16(x + 1 * 2)))));
-  Write16(t + 1 * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + 2 * 2) -
-                                             (i16)Read16(x + 3 * 2)))));
-  Write16(t + 2 * 2, MAX(-32768, MIN(32767, ((i16)Read16(y + 0 * 2) -
-                                             (i16)Read16(x + 1 * 2)))));
-  Write16(t + 3 * 2, MAX(-32768, MIN(32767, ((i16)Read16(y + 2 * 2) -
-                                             (i16)Read16(y + 3 * 2)))));
+  Put32(t + 0 * 4, Get32(x + 0 * 4) - Get32(x + 1 * 4));
+  Put32(t + 1 * 4, Get32(y + 0 * 4) - Get32(y + 1 * 4));
   memcpy(x, t, 8);
 }
 
@@ -754,90 +547,6 @@ static void MmxPunpcklqdq(u8 x[8], const u8 y[8]) {
 static void MmxPunpckhqdq(u8 x[8], const u8 y[8]) {
 }
 
-static void SsePsubb(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 16; ++i) {
-    x[i] -= y[i];
-  }
-}
-
-static void SsePaddb(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 16; ++i) {
-    x[i] += y[i];
-  }
-}
-
-static void SsePor(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 16; ++i) {
-    x[i] |= y[i];
-  }
-}
-
-static void SsePxor(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 16; ++i) {
-    x[i] ^= y[i];
-  }
-}
-
-static void SsePand(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 16; ++i) {
-    x[i] &= y[i];
-  }
-}
-
-static void SsePandn(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 16; ++i) {
-    x[i] = ~x[i] & y[i];
-  }
-}
-
-static void SsePcmpeqb(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 16; ++i) {
-    x[i] = -(x[i] == y[i]);
-  }
-}
-
-static void SsePcmpgtb(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 16; ++i) {
-    x[i] = -((i8)x[i] > (i8)y[i]);
-  }
-}
-
-static void SsePavgb(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 16; ++i) {
-    x[i] = (x[i] + y[i] + 1) >> 1;
-  }
-}
-
-static void SsePabsb(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 16; ++i) {
-    x[i] = ABS((i8)y[i]);
-  }
-}
-
-static void SsePminub(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 16; ++i) {
-    x[i] = MIN(x[i], y[i]);
-  }
-}
-
-static void SsePmaxub(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 16; ++i) {
-    x[i] = MAX(x[i], y[i]);
-  }
-}
-
 static void SsePslldq(u8 x[16], unsigned k) {
   unsigned i;
   u8 t[16];
@@ -863,52 +572,27 @@ static void SsePalignr(u8 x[16], const u8 y[16], unsigned k) {
   memcpy(x, t + MIN(k, 32), 16);
 }
 
-static void SsePsubw(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    Write16(x + i * 2, Read16(x + i * 2) - Read16(y + i * 2));
-  }
-}
-
-static void SsePaddw(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    Write16(x + i * 2, Read16(x + i * 2) + Read16(y + i * 2));
-  }
-}
-
 static void SsePsubd(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write32(x + i * 4, Read32(x + i * 4) - Read32(y + i * 4));
+  for (unsigned i = 0; i < 4; ++i) {
+    Put32(x + i * 4, Get32(x + i * 4) - Get32(y + i * 4));
   }
 }
 
 static void SsePaddd(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 4; ++i) {
-    Write32(x + i * 4, Read32(x + i * 4) + Read32(y + i * 4));
+  for (unsigned i = 0; i < 4; ++i) {
+    Put32(x + i * 4, Get32(x + i * 4) + Get32(y + i * 4));
   }
 }
 
 static void SsePaddq(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 2; ++i) {
-    Write64(x + i * 8, Read64(x + i * 8) + Read64(y + i * 8));
+  for (unsigned i = 0; i < 2; ++i) {
+    Put64(x + i * 8, Get64(x + i * 8) + Get64(y + i * 8));
   }
 }
 
 static void SsePsubq(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 2; ++i) {
-    Write64(x + i * 8, Read64(x + i * 8) - Read64(y + i * 8));
-  }
-}
-
-static void SsePaddusw(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 8; ++i) {
-    Write16(x + i * 2, MIN(65535, Read16(x + i * 2) + Read16(y + i * 2)));
+  for (unsigned i = 0; i < 2; ++i) {
+    Put64(x + i * 8, Get64(x + i * 8) - Get64(y + i * 8));
   }
 }
 
@@ -916,10 +600,10 @@ static void SsePackuswb(u8 x[16], const u8 y[16]) {
   unsigned i;
   u8 t[16];
   for (i = 0; i < 8; ++i) {
-    t[i + 0] = MIN(255, MAX(0, (i16)Read16(x + i * 2)));
+    t[i + 0] = MIN(255, MAX(0, (i16)Get16(x + i * 2)));
   }
   for (i = 0; i < 8; ++i) {
-    t[i + 8] = MIN(255, MAX(0, (i16)Read16(y + i * 2)));
+    t[i + 8] = MIN(255, MAX(0, (i16)Get16(y + i * 2)));
   }
   memcpy(x, t, 16);
 }
@@ -928,10 +612,10 @@ static void SsePacksswb(u8 x[16], const u8 y[16]) {
   unsigned i;
   u8 t[16];
   for (i = 0; i < 8; ++i) {
-    t[i + 0] = MAX(-128, MIN(127, (i16)Read16(x + i * 2)));
+    t[i + 0] = MAX(-128, MIN(127, (i16)Get16(x + i * 2)));
   }
   for (i = 0; i < 8; ++i) {
-    t[i + 8] = MAX(-128, MIN(127, (i16)Read16(y + i * 2)));
+    t[i + 8] = MAX(-128, MIN(127, (i16)Get16(y + i * 2)));
   }
   memcpy(x, t, 16);
 }
@@ -940,10 +624,10 @@ static void SsePackssdw(u8 x[16], const u8 y[16]) {
   unsigned i;
   u8 t[16];
   for (i = 0; i < 4; ++i) {
-    Write16(t + i * 2 + 0, MAX(-32768, MIN(32767, (i32)Read32(x + i * 4))));
+    Put16(t + i * 2 + 0, MAX(-32768, MIN(32767, (i32)Get32(x + i * 4))));
   }
   for (i = 0; i < 4; ++i) {
-    Write16(t + i * 2 + 8, MAX(-32768, MIN(32767, (i32)Read32(y + i * 4))));
+    Put16(t + i * 2 + 8, MAX(-32768, MIN(32767, (i32)Get32(y + i * 4))));
   }
   memcpy(x, t, 16);
 }
@@ -952,21 +636,19 @@ static void SsePsadbw(u8 x[16], const u8 y[16]) {
   unsigned i, s, t;
   for (s = i = 0; i < 8; ++i) s += ABS(x[i] - y[i]);
   for (t = 0; i < 16; ++i) t += ABS(x[i] - y[i]);
-  Write64(x + 0, s);
-  Write64(x + 8, t);
+  Put64(x + 0, s);
+  Put64(x + 8, t);
 }
 
 static void SsePmuludq(u8 x[16], const u8 y[16]) {
-  unsigned i;
-  for (i = 0; i < 2; ++i) {
-    Write64(x + i * 8, (u64)Read32(x + i * 8) * Read32(y + i * 8));
+  for (unsigned i = 0; i < 2; ++i) {
+    Put64(x + i * 8, (u64)Get32(x + i * 8) * Get32(y + i * 8));
   }
 }
 
 static void SsePshufb(u8 x[16], const u8 y[16]) {
-  unsigned i;
   u8 t[16];
-  for (i = 0; i < 16; ++i) {
+  for (unsigned i = 0; i < 16; ++i) {
     t[i] = (y[i] & 128) ? 0 : x[y[i] & 15];
   }
   memcpy(x, t, 16);
@@ -974,87 +656,45 @@ static void SsePshufb(u8 x[16], const u8 y[16]) {
 
 static void SsePhaddd(u8 x[16], const u8 y[16]) {
   u8 t[16];
-  Write32(t + 0 * 4, Read32(x + 0 * 4) + Read32(x + 1 * 4));
-  Write32(t + 1 * 4, Read32(x + 2 * 4) + Read32(x + 3 * 4));
-  Write32(t + 2 * 4, Read32(y + 0 * 4) + Read32(y + 1 * 4));
-  Write32(t + 3 * 4, Read32(y + 2 * 4) + Read32(y + 3 * 4));
+  Put32(t + 0 * 4, Get32(x + 0 * 4) + Get32(x + 1 * 4));
+  Put32(t + 1 * 4, Get32(x + 2 * 4) + Get32(x + 3 * 4));
+  Put32(t + 2 * 4, Get32(y + 0 * 4) + Get32(y + 1 * 4));
+  Put32(t + 3 * 4, Get32(y + 2 * 4) + Get32(y + 3 * 4));
   memcpy(x, t, 16);
 }
 
 static void SsePhsubd(u8 x[16], const u8 y[16]) {
   u8 t[16];
-  Write32(t + 0 * 4, Read32(x + 0 * 4) - Read32(x + 1 * 4));
-  Write32(t + 1 * 4, Read32(x + 2 * 4) - Read32(x + 3 * 4));
-  Write32(t + 2 * 4, Read32(y + 0 * 4) - Read32(y + 1 * 4));
-  Write32(t + 3 * 4, Read32(y + 2 * 4) - Read32(y + 3 * 4));
+  Put32(t + 0 * 4, Get32(x + 0 * 4) - Get32(x + 1 * 4));
+  Put32(t + 1 * 4, Get32(x + 2 * 4) - Get32(x + 3 * 4));
+  Put32(t + 2 * 4, Get32(y + 0 * 4) - Get32(y + 1 * 4));
+  Put32(t + 3 * 4, Get32(y + 2 * 4) - Get32(y + 3 * 4));
   memcpy(x, t, 16);
 }
 
 static void SsePhaddw(u8 x[16], const u8 y[16]) {
   u8 t[16];
-  Write16(t + 0 * 2, Read16(x + 0 * 2) + Read16(x + 1 * 2));
-  Write16(t + 1 * 2, Read16(x + 2 * 2) + Read16(x + 3 * 2));
-  Write16(t + 2 * 2, Read16(x + 4 * 2) + Read16(x + 5 * 2));
-  Write16(t + 3 * 2, Read16(x + 6 * 2) + Read16(x + 7 * 2));
-  Write16(t + 4 * 2, Read16(y + 0 * 2) + Read16(y + 1 * 2));
-  Write16(t + 5 * 2, Read16(y + 2 * 2) + Read16(y + 3 * 2));
-  Write16(t + 6 * 2, Read16(y + 4 * 2) + Read16(y + 5 * 2));
-  Write16(t + 7 * 2, Read16(y + 6 * 2) + Read16(y + 7 * 2));
+  Put16(t + 0 * 2, Get16(x + 0 * 2) + Get16(x + 1 * 2));
+  Put16(t + 1 * 2, Get16(x + 2 * 2) + Get16(x + 3 * 2));
+  Put16(t + 2 * 2, Get16(x + 4 * 2) + Get16(x + 5 * 2));
+  Put16(t + 3 * 2, Get16(x + 6 * 2) + Get16(x + 7 * 2));
+  Put16(t + 4 * 2, Get16(y + 0 * 2) + Get16(y + 1 * 2));
+  Put16(t + 5 * 2, Get16(y + 2 * 2) + Get16(y + 3 * 2));
+  Put16(t + 6 * 2, Get16(y + 4 * 2) + Get16(y + 5 * 2));
+  Put16(t + 7 * 2, Get16(y + 6 * 2) + Get16(y + 7 * 2));
   memcpy(x, t, 16);
 }
 
 static void SsePhsubw(u8 x[16], const u8 y[16]) {
   u8 t[16];
-  Write16(t + 0 * 2, Read16(x + 0 * 2) - Read16(x + 1 * 2));
-  Write16(t + 1 * 2, Read16(x + 2 * 2) - Read16(x + 3 * 2));
-  Write16(t + 2 * 2, Read16(x + 4 * 2) - Read16(x + 5 * 2));
-  Write16(t + 3 * 2, Read16(x + 6 * 2) - Read16(x + 7 * 2));
-  Write16(t + 4 * 2, Read16(y + 0 * 2) - Read16(y + 1 * 2));
-  Write16(t + 5 * 2, Read16(y + 2 * 2) - Read16(y + 3 * 2));
-  Write16(t + 6 * 2, Read16(y + 4 * 2) - Read16(y + 5 * 2));
-  Write16(t + 7 * 2, Read16(y + 6 * 2) - Read16(y + 7 * 2));
-  memcpy(x, t, 16);
-}
-
-static void SsePhaddsw(u8 x[16], const u8 y[16]) {
-  u8 t[16];
-  Write16(t + 0 * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + 0 * 2) +
-                                             (i16)Read16(x + 1 * 2)))));
-  Write16(t + 1 * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + 2 * 2) +
-                                             (i16)Read16(x + 3 * 2)))));
-  Write16(t + 2 * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + 4 * 2) +
-                                             (i16)Read16(x + 5 * 2)))));
-  Write16(t + 3 * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + 6 * 2) +
-                                             (i16)Read16(x + 7 * 2)))));
-  Write16(t + 4 * 2, MAX(-32768, MIN(32767, ((i16)Read16(y + 0 * 2) +
-                                             (i16)Read16(y + 1 * 2)))));
-  Write16(t + 5 * 2, MAX(-32768, MIN(32767, ((i16)Read16(y + 2 * 2) +
-                                             (i16)Read16(y + 3 * 2)))));
-  Write16(t + 6 * 2, MAX(-32768, MIN(32767, ((i16)Read16(y + 4 * 2) +
-                                             (i16)Read16(y + 5 * 2)))));
-  Write16(t + 7 * 2, MAX(-32768, MIN(32767, ((i16)Read16(y + 6 * 2) +
-                                             (i16)Read16(y + 7 * 2)))));
-  memcpy(x, t, 16);
-}
-
-static void SsePhsubsw(u8 x[16], const u8 y[16]) {
-  u8 t[16];
-  Write16(t + 0 * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + 0 * 2) -
-                                             (i16)Read16(x + 1 * 2)))));
-  Write16(t + 1 * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + 2 * 2) -
-                                             (i16)Read16(x + 3 * 2)))));
-  Write16(t + 2 * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + 4 * 2) -
-                                             (i16)Read16(x + 5 * 2)))));
-  Write16(t + 3 * 2, MAX(-32768, MIN(32767, ((i16)Read16(x + 6 * 2) -
-                                             (i16)Read16(x + 7 * 2)))));
-  Write16(t + 4 * 2, MAX(-32768, MIN(32767, ((i16)Read16(y + 0 * 2) -
-                                             (i16)Read16(y + 1 * 2)))));
-  Write16(t + 5 * 2, MAX(-32768, MIN(32767, ((i16)Read16(y + 2 * 2) -
-                                             (i16)Read16(y + 3 * 2)))));
-  Write16(t + 6 * 2, MAX(-32768, MIN(32767, ((i16)Read16(y + 4 * 2) -
-                                             (i16)Read16(y + 5 * 2)))));
-  Write16(t + 7 * 2, MAX(-32768, MIN(32767, ((i16)Read16(y + 6 * 2) -
-                                             (i16)Read16(y + 7 * 2)))));
+  Put16(t + 0 * 2, Get16(x + 0 * 2) - Get16(x + 1 * 2));
+  Put16(t + 1 * 2, Get16(x + 2 * 2) - Get16(x + 3 * 2));
+  Put16(t + 2 * 2, Get16(x + 4 * 2) - Get16(x + 5 * 2));
+  Put16(t + 3 * 2, Get16(x + 6 * 2) - Get16(x + 7 * 2));
+  Put16(t + 4 * 2, Get16(y + 0 * 2) - Get16(y + 1 * 2));
+  Put16(t + 5 * 2, Get16(y + 2 * 2) - Get16(y + 3 * 2));
+  Put16(t + 6 * 2, Get16(y + 4 * 2) - Get16(y + 5 * 2));
+  Put16(t + 7 * 2, Get16(y + 6 * 2) - Get16(y + 7 * 2));
   memcpy(x, t, 16);
 }
 
@@ -1251,33 +891,43 @@ static void SsePsllq(u8 x[16], unsigned k) {
 }
 
 static void SsePsubsb(u8 x[16], const u8 y[16]) {
-  MmxPsubsb(x + 0, y + 0);
-  MmxPsubsb(x + 8, y + 8);
+  i8 X[16], Y[16];
+  memcpy(X, x, 16);
+  memcpy(Y, y, 16);
+  for (unsigned i = 0; i < 16; ++i) {
+    X[i] = MAX(-128, MIN(127, X[i] - Y[i]));
+  }
+  memcpy(x, X, 16);
 }
 
 static void SsePaddsb(u8 x[16], const u8 y[16]) {
-  MmxPaddsb(x + 0, y + 0);
-  MmxPaddsb(x + 8, y + 8);
-}
-
-static void SsePsubsw(u8 x[16], const u8 y[16]) {
-  MmxPsubsw(x + 0, y + 0);
-  MmxPsubsw(x + 8, y + 8);
-}
-
-static void SsePaddsw(u8 x[16], const u8 y[16]) {
-  MmxPaddsw(x + 0, y + 0);
-  MmxPaddsw(x + 8, y + 8);
+  i8 X[16], Y[16];
+  memcpy(X, x, 16);
+  memcpy(Y, y, 16);
+  for (unsigned i = 0; i < 16; ++i) {
+    X[i] = MAX(-128, MIN(127, X[i] + Y[i]));
+  }
+  memcpy(x, X, 16);
 }
 
 static void SsePaddusb(u8 x[16], const u8 y[16]) {
-  MmxPaddusb(x + 0, y + 0);
-  MmxPaddusb(x + 8, y + 8);
+  u8 X[16], Y[16];
+  memcpy(X, x, 16);
+  memcpy(Y, y, 16);
+  for (unsigned i = 0; i < 16; ++i) {
+    X[i] = MIN(255, X[i] + Y[i]);
+  }
+  memcpy(x, X, 16);
 }
 
 static void SsePsubusb(u8 x[16], const u8 y[16]) {
-  MmxPsubusb(x + 0, y + 0);
-  MmxPsubusb(x + 8, y + 8);
+  u8 X[16], Y[16];
+  memcpy(X, x, 16);
+  memcpy(Y, y, 16);
+  for (unsigned i = 0; i < 16; ++i) {
+    X[i] = MIN(255, MAX(0, X[i] - Y[i]));
+  }
+  memcpy(x, X, 16);
 }
 
 static void SsePsubusw(u8 x[16], const u8 y[16]) {
@@ -1323,16 +973,6 @@ static void SsePabsw(u8 x[16], const u8 y[16]) {
 static void SsePabsd(u8 x[16], const u8 y[16]) {
   MmxPabsd(x + 0, y + 0);
   MmxPabsd(x + 8, y + 8);
-}
-
-static void SsePcmpgtw(u8 x[16], const u8 y[16]) {
-  MmxPcmpgtw(x + 0, y + 0);
-  MmxPcmpgtw(x + 8, y + 8);
-}
-
-static void SsePcmpeqw(u8 x[16], const u8 y[16]) {
-  MmxPcmpeqw(x + 0, y + 0);
-  MmxPcmpeqw(x + 8, y + 8);
 }
 
 static void SsePcmpgtd(u8 x[16], const u8 y[16]) {
@@ -1385,11 +1025,6 @@ static void SsePsllqv(u8 x[16], const u8 y[16]) {
   MmxPsllqv(x + 8, y);
 }
 
-static void SsePavgw(u8 x[16], const u8 y[16]) {
-  MmxPavgw(x + 0, y + 0);
-  MmxPavgw(x + 8, y + 8);
-}
-
 static void SsePmaddwd(u8 x[16], const u8 y[16]) {
   MmxPmaddwd(x + 0, y + 0);
   MmxPmaddwd(x + 8, y + 8);
@@ -1400,19 +1035,16 @@ static void SsePmulhuw(u8 x[16], const u8 y[16]) {
   MmxPmulhuw(x + 8, y + 8);
 }
 
-static void SsePmulhw(u8 x[16], const u8 y[16]) {
-  MmxPmulhw(x + 0, y + 0);
-  MmxPmulhw(x + 8, y + 8);
-}
-
-static void SsePmullw(u8 x[16], const u8 y[16]) {
-  MmxPmullw(x + 0, y + 0);
-  MmxPmullw(x + 8, y + 8);
-}
-
 static void SsePmulld(u8 x[16], const u8 y[16]) {
-  MmxPmulld(x + 0, y + 0);
-  MmxPmulld(x + 8, y + 8);
+  int i;
+  u32 X[4] = {Get32(x), Get32(x + 4), Get32(x + 8), Get32(x + 12)};
+  u32 Y[4] = {Get32(y), Get32(y + 4), Get32(y + 8), Get32(y + 12)};
+  for (i = 0; i < 4; ++i) {
+    X[i] *= Y[i];
+  }
+  for (i = 0; i < 4; ++i) {
+    Put32(x + i * 4, X[i]);
+  }
 }
 
 static void SsePmaddubsw(u8 x[16], const u8 y[16]) {
@@ -1420,159 +1052,121 @@ static void SsePmaddubsw(u8 x[16], const u8 y[16]) {
   MmxPmaddubsw(x + 8, y + 8);
 }
 
-static void OpPsb(struct Machine *m, u32 rde,
-                  void MmxKernel(u8[8], unsigned),
+static void OpPsb(P, void MmxKernel(u8[8], unsigned),
                   void SseKernel(u8[16], unsigned)) {
   if (Osz(rde)) {
-    SseKernel(XmmRexbRm(m, rde), m->xedd->op.uimm0);
+    SseKernel(XmmRexbRm(m, rde), uimm0);
   } else {
-    MmxKernel(XmmRexbRm(m, rde), m->xedd->op.uimm0);
+    MmxKernel(XmmRexbRm(m, rde), uimm0);
   }
 }
 
-void Op171(struct Machine *m, u32 rde) {
+optimizesize void Op171(P) {
   switch (ModrmReg(rde)) {
     case 2:
-      OpPsb(m, rde, MmxPsrlw, SsePsrlw);
+      OpPsb(A, MmxPsrlw, SsePsrlw);
       break;
     case 4:
-      OpPsb(m, rde, MmxPsraw, SsePsraw);
+      OpPsb(A, MmxPsraw, SsePsraw);
       break;
     case 6:
-      OpPsb(m, rde, MmxPsllw, SsePsllw);
+      OpPsb(A, MmxPsllw, SsePsllw);
       break;
     default:
-      OpUd(m, rde);
+      OpUdImpl(m);
   }
 }
 
-void Op172(struct Machine *m, u32 rde) {
+optimizesize void Op172(P) {
   switch (ModrmReg(rde)) {
     case 2:
-      OpPsb(m, rde, MmxPsrld, SsePsrld);
+      OpPsb(A, MmxPsrld, SsePsrld);
       break;
     case 4:
-      OpPsb(m, rde, MmxPsrad, SsePsrad);
+      OpPsb(A, MmxPsrad, SsePsrad);
       break;
     case 6:
-      OpPsb(m, rde, MmxPslld, SsePslld);
+      OpPsb(A, MmxPslld, SsePslld);
       break;
     default:
-      OpUd(m, rde);
+      OpUdImpl(m);
   }
 }
 
-void Op173(struct Machine *m, u32 rde) {
+optimizesize void Op173(P) {
   switch (ModrmReg(rde)) {
     case 2:
-      OpPsb(m, rde, MmxPsrlq, SsePsrlq);
+      OpPsb(A, MmxPsrlq, SsePsrlq);
       break;
     case 3:
-      OpPsb(m, rde, MmxPsrldq, SsePsrldq);
+      OpPsb(A, MmxPsrldq, SsePsrldq);
       break;
     case 6:
-      OpPsb(m, rde, MmxPsllq, SsePsllq);
+      OpPsb(A, MmxPsllq, SsePsllq);
       break;
     case 7:
-      OpPsb(m, rde, MmxPslldq, SsePslldq);
+      OpPsb(A, MmxPslldq, SsePslldq);
       break;
     default:
-      OpUd(m, rde);
+      OpUdImpl(m);
   }
 }
 
-void OpSsePalignr(struct Machine *m, u32 rde) {
+void OpSsePalignr(P) {
   if (Osz(rde)) {
-    SsePalignr(XmmRexrReg(m, rde), GetModrmRegisterXmmPointerRead16(m, rde),
-               m->xedd->op.uimm0);
+    SsePalignr(XmmRexrReg(m, rde), GetModrmRegisterXmmPointerRead16(A), uimm0);
   } else {
-    MmxPalignr(XmmRexrReg(m, rde), GetModrmRegisterXmmPointerRead8(m, rde),
-               m->xedd->op.uimm0);
+    MmxPalignr(XmmRexrReg(m, rde), GetModrmRegisterXmmPointerRead8(A), uimm0);
   }
 }
 
-static void OpSse(struct Machine *m, u32 rde,
-                  void MmxKernel(u8[8], const u8[8]),
-                  void SseKernel(u8[16], const u8[16])) {
-  if (Osz(rde)) {
-    SseKernel(XmmRexrReg(m, rde), GetModrmRegisterXmmPointerRead16(m, rde));
-  } else {
-    MmxKernel(XmmRexrReg(m, rde), GetModrmRegisterXmmPointerRead8(m, rde));
-  }
-}
-
-/* clang-format off */
-void OpSsePunpcklbw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPunpcklbw, SsePunpcklbw); }
-void OpSsePunpcklwd(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPunpcklwd, SsePunpcklwd); }
-void OpSsePunpckldq(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPunpckldq, SsePunpckldq); }
-void OpSsePacksswb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPacksswb, SsePacksswb); }
-void OpSsePcmpgtb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPcmpgtb, SsePcmpgtb); }
-void OpSsePcmpgtw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPcmpgtw, SsePcmpgtw); }
-void OpSsePcmpgtd(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPcmpgtd, SsePcmpgtd); }
-void OpSsePackuswb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPackuswb, SsePackuswb); }
-void OpSsePunpckhbw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPunpckhbw, SsePunpckhbw); }
-void OpSsePunpckhwd(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPunpckhwd, SsePunpckhwd); }
-void OpSsePunpckhdq(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPunpckhdq, SsePunpckhdq); }
-void OpSsePackssdw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPackssdw, SsePackssdw); }
-void OpSsePunpcklqdq(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPunpcklqdq, SsePunpcklqdq); }
-void OpSsePunpckhqdq(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPunpckhqdq, SsePunpckhqdq); }
-void OpSsePcmpeqb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPcmpeqb, SsePcmpeqb); }
-void OpSsePcmpeqw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPcmpeqw, SsePcmpeqw); }
-void OpSsePcmpeqd(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPcmpeqd, SsePcmpeqd); }
-void OpSsePsrlwv(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsrlwv, SsePsrlwv); }
-void OpSsePsrldv(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsrldv, SsePsrldv); }
-void OpSsePsrlqv(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsrlqv, SsePsrlqv); }
-void OpSsePaddq(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPaddq, SsePaddq); }
-void OpSsePmullw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPmullw, SsePmullw); }
-void OpSsePsubusb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsubusb, SsePsubusb); }
-void OpSsePsubusw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsubusw, SsePsubusw); }
-void OpSsePminub(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPminub, SsePminub); }
-void OpSsePand(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPand, SsePand); }
-void OpSsePaddusb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPaddusb, SsePaddusb); }
-void OpSsePaddusw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPaddusw, SsePaddusw); }
-void OpSsePmaxub(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPmaxub, SsePmaxub); }
-void OpSsePandn(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPandn, SsePandn); }
-void OpSsePavgb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPavgb, SsePavgb); }
-void OpSsePsrawv(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsrawv, SsePsrawv); }
-void OpSsePsradv(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsradv, SsePsradv); }
-void OpSsePavgw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPavgw, SsePavgw); }
-void OpSsePmulhuw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPmulhuw, SsePmulhuw); }
-void OpSsePmulhw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPmulhw, SsePmulhw); }
-void OpSsePsubsb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsubsb, SsePsubsb); }
-void OpSsePsubsw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsubsw, SsePsubsw); }
-void OpSsePminsw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPminsw, SsePminsw); }
-void OpSsePor(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPor, SsePor); }
-void OpSsePaddsb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPaddsb, SsePaddsb); }
-void OpSsePaddsw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPaddsw, SsePaddsw); }
-void OpSsePmaxsw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPmaxsw, SsePmaxsw); }
-void OpSsePxor(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPxor, SsePxor); }
-void OpSsePsllwv(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsllwv, SsePsllwv); }
-void OpSsePslldv(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPslldv, SsePslldv); }
-void OpSsePsllqv(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsllqv, SsePsllqv); }
-void OpSsePmuludq(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPmuludq, SsePmuludq); }
-void OpSsePmaddwd(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPmaddwd, SsePmaddwd); }
-void OpSsePsadbw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsadbw, SsePsadbw); }
-void OpSsePsubb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsubb, SsePsubb); }
-void OpSsePsubw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsubw, SsePsubw); }
-void OpSsePsubd(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsubd, SsePsubd); }
-void OpSsePsubq(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsubq, SsePsubq); }
-void OpSsePaddb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPaddb, SsePaddb); }
-void OpSsePaddw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPaddw, SsePaddw); }
-void OpSsePaddd(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPaddd, SsePaddd); }
-void OpSsePshufb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPshufb, SsePshufb); }
-void OpSsePhaddw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPhaddw, SsePhaddw); }
-void OpSsePhaddd(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPhaddd, SsePhaddd); }
-void OpSsePhaddsw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPhaddsw, SsePhaddsw); }
-void OpSsePmaddubsw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPmaddubsw, SsePmaddubsw); }
-void OpSsePhsubw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPhsubw, SsePhsubw); }
-void OpSsePhsubd(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPhsubd, SsePhsubd); }
-void OpSsePhsubsw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPhsubsw, SsePhsubsw); }
-void OpSsePsignb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsignb, SsePsignb); }
-void OpSsePsignw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsignw, SsePsignw); }
-void OpSsePsignd(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPsignd, SsePsignd); }
-void OpSsePmulhrsw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPmulhrsw, SsePmulhrsw); }
-void OpSsePabsb(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPabsb, SsePabsb); }
-void OpSsePabsw(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPabsw, SsePabsw); }
-void OpSsePabsd(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPabsd, SsePabsd); }
-void OpSsePmulld(struct Machine *m, u32 rde) { OpSse(m, rde, MmxPmulld, SsePmulld); }
-/* clang-format on */
+// clang-format off
+void OpSsePunpcklbw(P) { OpSse(A, MmxPunpcklbw, SsePunpcklbw); }
+void OpSsePunpcklwd(P) { OpSse(A, MmxPunpcklwd, SsePunpcklwd); }
+void OpSsePunpckldq(P) { OpSse(A, MmxPunpckldq, SsePunpckldq); }
+void OpSsePacksswb(P) { OpSse(A, MmxPacksswb, SsePacksswb); }
+void OpSsePcmpgtd(P) { OpSse(A, MmxPcmpgtd, SsePcmpgtd); }
+void OpSsePackuswb(P) { OpSse(A, MmxPackuswb, SsePackuswb); }
+void OpSsePunpckhbw(P) { OpSse(A, MmxPunpckhbw, SsePunpckhbw); }
+void OpSsePunpckhwd(P) { OpSse(A, MmxPunpckhwd, SsePunpckhwd); }
+void OpSsePunpckhdq(P) { OpSse(A, MmxPunpckhdq, SsePunpckhdq); }
+void OpSsePackssdw(P) { OpSse(A, MmxPackssdw, SsePackssdw); }
+void OpSsePunpcklqdq(P) { OpSse(A, MmxPunpcklqdq, SsePunpcklqdq); }
+void OpSsePunpckhqdq(P) { OpSse(A, MmxPunpckhqdq, SsePunpckhqdq); }
+void OpSsePcmpeqd(P) { OpSse(A, MmxPcmpeqd, SsePcmpeqd); }
+void OpSsePsrlwv(P) { OpSse(A, MmxPsrlwv, SsePsrlwv); }
+void OpSsePsrldv(P) { OpSse(A, MmxPsrldv, SsePsrldv); }
+void OpSsePsrlqv(P) { OpSse(A, MmxPsrlqv, SsePsrlqv); }
+void OpSsePaddq(P) { OpSse(A, MmxPaddq, SsePaddq); }
+void OpSsePsubusb(P) { OpSse(A, MmxPsubusb, SsePsubusb); }
+void OpSsePsubusw(P) { OpSse(A, MmxPsubusw, SsePsubusw); }
+void OpSsePaddusb(P) { OpSse(A, MmxPaddusb, SsePaddusb); }
+void OpSsePsrawv(P) { OpSse(A, MmxPsrawv, SsePsrawv); }
+void OpSsePsradv(P) { OpSse(A, MmxPsradv, SsePsradv); }
+void OpSsePmulhuw(P) { OpSse(A, MmxPmulhuw, SsePmulhuw); }
+void OpSsePsubsb(P) { OpSse(A, MmxPsubsb, SsePsubsb); }
+void OpSsePminsw(P) { OpSse(A, MmxPminsw, SsePminsw); }
+void OpSsePaddsb(P) { OpSse(A, MmxPaddsb, SsePaddsb); }
+void OpSsePmaxsw(P) { OpSse(A, MmxPmaxsw, SsePmaxsw); }
+void OpSsePsllwv(P) { OpSse(A, MmxPsllwv, SsePsllwv); }
+void OpSsePslldv(P) { OpSse(A, MmxPslldv, SsePslldv); }
+void OpSsePsllqv(P) { OpSse(A, MmxPsllqv, SsePsllqv); }
+void OpSsePmuludq(P) { OpSse(A, MmxPmuludq, SsePmuludq); }
+void OpSsePmaddwd(P) { OpSse(A, MmxPmaddwd, SsePmaddwd); }
+void OpSsePsadbw(P) { OpSse(A, MmxPsadbw, SsePsadbw); }
+void OpSsePsubd(P) { OpSse(A, MmxPsubd, SsePsubd); }
+void OpSsePsubq(P) { OpSse(A, MmxPsubq, SsePsubq); }
+void OpSsePaddd(P) { OpSse(A, MmxPaddd, SsePaddd); }
+void OpSsePshufb(P) { OpSse(A, MmxPshufb, SsePshufb); }
+void OpSsePhaddw(P) { OpSse(A, MmxPhaddw, SsePhaddw); }
+void OpSsePhaddd(P) { OpSse(A, MmxPhaddd, SsePhaddd); }
+void OpSsePmaddubsw(P) { OpSse(A, MmxPmaddubsw, SsePmaddubsw); }
+void OpSsePhsubw(P) { OpSse(A, MmxPhsubw, SsePhsubw); }
+void OpSsePhsubd(P) { OpSse(A, MmxPhsubd, SsePhsubd); }
+void OpSsePsignb(P) { OpSse(A, MmxPsignb, SsePsignb); }
+void OpSsePsignw(P) { OpSse(A, MmxPsignw, SsePsignw); }
+void OpSsePsignd(P) { OpSse(A, MmxPsignd, SsePsignd); }
+void OpSsePmulhrsw(P) { OpSse(A, MmxPmulhrsw, SsePmulhrsw); }
+void OpSsePabsw(P) { OpSse(A, MmxPabsw, SsePabsw); }
+void OpSsePabsd(P) { OpSse(A, MmxPabsd, SsePabsd); }
+void OpSsePmulld(P) { OpSse(A, MmxPmulld, SsePmulld); }

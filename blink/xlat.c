@@ -18,6 +18,7 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
 #include <signal.h>
@@ -38,6 +39,7 @@
 #include "blink/errno.h"
 #include "blink/linux.h"
 #include "blink/log.h"
+#include "blink/map.h"
 #include "blink/sigwinch.h"
 #include "blink/xlat.h"
 
@@ -198,10 +200,16 @@ int XlatSignal(int x) {
     XLAT(13, SIGPIPE);
     XLAT(14, SIGALRM);
     XLAT(15, SIGTERM);
+#ifdef SIGSTKFLT
+    XLAT(16, SIGSTKFLT);
+#endif
     XLAT(17, SIGCHLD);
     XLAT(18, SIGCONT);
+    XLAT(19, SIGSTOP);
+    XLAT(20, SIGTSTP);
     XLAT(21, SIGTTIN);
     XLAT(22, SIGTTOU);
+    XLAT(23, SIGURG);
     XLAT(24, SIGXCPU);
     XLAT(25, SIGXFSZ);
     XLAT(26, SIGVTALRM);
@@ -210,12 +218,8 @@ int XlatSignal(int x) {
 #ifdef SIGIO
     XLAT(29, SIGIO);
 #endif
-    XLAT(19, SIGSTOP);
     XLAT(31, SIGSYS);
-    XLAT(20, SIGTSTP);
-    XLAT(23, SIGURG);
     default:
-      LOGF("signal %d not supported yet", x);
       return einval();
   }
 }
@@ -287,21 +291,13 @@ int UnXlatSignal(int x) {
 #ifdef SIGIO
     XLAT(SIGIO, 29);
 #endif
+#ifdef SIGSTKFLT
+    XLAT(SIGSTKFLT, 16);
+#endif
     XLAT(SIGSTOP, 19);
     XLAT(SIGSYS, 31);
     XLAT(SIGTSTP, 20);
     XLAT(SIGURG, 23);
-    default:
-      LOGF("don't know how to translate %s %d", "signal", x);
-      return 15;
-  }
-}
-
-int XlatSig(int x) {
-  switch (x) {
-    XLAT(0, SIG_BLOCK);
-    XLAT(1, SIG_UNBLOCK);
-    XLAT(2, SIG_SETMASK);
     default:
       return einval();
   }
@@ -319,9 +315,9 @@ int XlatRusage(int x) {
 
 int XlatSocketFamily(int x) {
   switch (x) {
-    XLAT(0, AF_UNSPEC);
-    XLAT(1, AF_UNIX);
-    XLAT(2, AF_INET);
+    XLAT(AF_UNSPEC_LINUX, AF_UNSPEC);
+    XLAT(AF_UNIX_LINUX, AF_UNIX);
+    XLAT(AF_INET_LINUX, AF_INET);
     default:
       LOGF("%s %d not supported yet", "socket family", x);
       errno = ENOPROTOOPT;
@@ -331,9 +327,9 @@ int XlatSocketFamily(int x) {
 
 int UnXlatSocketFamily(int x) {
   switch (x) {
-    XLAT(AF_UNSPEC, 0);
-    XLAT(AF_UNIX, 1);
-    XLAT(AF_INET, 2);
+    XLAT(AF_UNSPEC, AF_UNSPEC_LINUX);
+    XLAT(AF_UNIX, AF_UNIX_LINUX);
+    XLAT(AF_INET, AF_INET_LINUX);
     default:
       LOGF("don't know how to translate %s %d", "socket family", x);
       return x;
@@ -374,7 +370,7 @@ int XlatSocketLevel(int x) {
 
 int XlatSocketOptname(int level, int optname) {
   switch (level) {
-    case SOL_SOCKET:
+    case SOL_SOCKET_LINUX:
       switch (optname) {
         XLAT(2, SO_REUSEADDR);
         XLAT(5, SO_DONTROUTE);
@@ -383,10 +379,12 @@ int XlatSocketOptname(int level, int optname) {
         XLAT(9, SO_KEEPALIVE);
         XLAT(13, SO_LINGER);
         XLAT(15, SO_REUSEPORT);
+        XLAT(20, SO_RCVTIMEO);
+        XLAT(21, SO_SNDTIMEO);
         default:
           break;
       }
-    case IPPROTO_TCP:
+    case SOL_TCP_LINUX:
       switch (optname) {
         XLAT(1, TCP_NODELAY);
 #if defined(TCP_CORK)
@@ -397,8 +395,14 @@ int XlatSocketOptname(int level, int optname) {
 #ifdef TCP_FASTOPEN
         XLAT(23, TCP_FASTOPEN);
 #endif
+#ifdef TCP_FASTOPEN_CONNECT
+        XLAT(30, TCP_FASTOPEN_CONNECT);
+#endif
 #ifdef TCP_QUICKACK
         XLAT(12, TCP_QUICKACK);
+#endif
+#ifdef TCP_SAVE_SYN
+        XLAT(27, TCP_SAVE_SYN);
 #endif
         default:
           break;
@@ -441,16 +445,7 @@ int XlatWait(int x) {
   if (x & 1) r |= WNOHANG, x &= ~1;
   if (x & 2) r |= WUNTRACED, x &= ~2;
   if (x & 8) r |= WCONTINUED, x &= ~8;
-  LOGF("%s %d not supported yet", "wait", x);
-  return r;
-}
-
-int XlatMapFlags(int x) {
-  int r = 0;
-  if (x & 1) r |= MAP_SHARED;
-  if (x & 2) r |= MAP_PRIVATE;
-  if (x & 16) r |= MAP_FIXED;
-  if (x & 32) r |= MAP_ANONYMOUS;
+  if (x) LOGF("%s %d not supported yet", "wait", x);
   return r;
 }
 
@@ -533,6 +528,18 @@ int XlatOpenFlags(int x) {
   if (x & O_CREAT_LINUX) res |= O_CREAT, x &= ~O_CREAT_LINUX;
   if (x & O_EXCL_LINUX) res |= O_EXCL, x &= ~O_EXCL_LINUX;
   if (x & O_TRUNC_LINUX) res |= O_TRUNC, x &= ~O_TRUNC_LINUX;
+#ifdef O_PATH
+  if (x & O_PATH_LINUX) res |= O_PATH, x &= ~O_PATH_LINUX;
+#elif defined(O_EXEC)
+  if (x & O_PATH_LINUX) res |= O_EXEC, x &= ~O_PATH_LINUX;
+#else
+  x &= ~O_PATH_LINUX;
+#endif
+#ifdef O_LARGEFILE
+  if (x & O_LARGEFILE_LINUX) res |= O_LARGEFILE, x &= ~O_LARGEFILE_LINUX;
+#else
+  x &= ~O_LARGEFILE_LINUX;
+#endif
 #ifdef O_NDELAY
   if (x & O_NDELAY_LINUX) res |= O_NDELAY, x &= ~O_NDELAY_LINUX;
 #endif
@@ -558,7 +565,7 @@ int XlatOpenFlags(int x) {
   if (x & O_DSYNC_LINUX) res |= O_DSYNC, x &= ~O_DSYNC_LINUX;
 #endif
   if (x) {
-    LOGF("%s %d not supported yet", "open flags", x);
+    LOGF("%s %#x not supported", "open flags", x);
     return einval();
   }
   return res;
@@ -567,30 +574,38 @@ int XlatOpenFlags(int x) {
 int UnXlatOpenFlags(int x) {
   int res;
   res = UnXlatAccMode(x);
-  if (x & O_APPEND) res |= 0x00400;
-  if (x & O_CREAT) res |= 0x00040;
-  if (x & O_EXCL) res |= 0x00080;
-  if (x & O_TRUNC) res |= 0x00200;
+  if (x & O_APPEND) res |= O_APPEND_LINUX;
+  if (x & O_CREAT) res |= O_CREAT_LINUX;
+  if (x & O_EXCL) res |= O_EXCL_LINUX;
+  if (x & O_TRUNC) res |= O_TRUNC_LINUX;
+#ifdef O_PATH
+  if (x & O_PATH) res |= O_PATH_LINUX;
+#elif defined(O_EXEC)
+  if (x & O_EXEC) res |= O_PATH_LINUX;
+#endif
+#ifdef O_LARGEFILE
+  if (x & O_LARGEFILE) res |= O_LARGEFILE_LINUX;
+#endif
 #ifdef O_NDELAY
-  if (x & O_NDELAY) res |= 0x00800;
+  if (x & O_NDELAY) res |= O_NDELAY_LINUX;
 #endif
 #ifdef O_DIRECT
-  if (x & O_DIRECT) res |= 0x04000;
+  if (x & O_DIRECT) res |= O_DIRECT_LINUX;
 #endif
-  if (x & O_DIRECTORY) res |= 0x10000;
+  if (x & O_DIRECTORY) res |= O_DIRECTORY_LINUX;
 #ifdef O_NOFOLLOW
-  if (x & O_NOFOLLOW) res |= 0x20000;
+  if (x & O_NOFOLLOW) res |= O_NOFOLLOW_LINUX;
 #endif
-  if (x & O_CLOEXEC) res |= 0x80000;
-  if (x & O_NOCTTY) res |= 0x00100;
+  if (x & O_CLOEXEC) res |= O_CLOEXEC_LINUX;
+  if (x & O_NOCTTY) res |= O_NOCTTY_LINUX;
 #ifdef O_ASYNC
-  if (x & O_ASYNC) res |= 0x02000;
+  if (x & O_ASYNC) res |= O_ASYNC_LINUX;
 #endif
 #ifdef O_NOATIME
-  if (x & O_NOATIME) res |= 0x40000;
+  if (x & O_NOATIME) res |= O_NOATIME_LINUX;
 #endif
 #ifdef O_DSYNC
-  if (x & O_DSYNC) res |= 0x000001000;
+  if (x & O_DSYNC) res |= O_DSYNC_LINUX;
 #endif
   return res;
 }
@@ -692,24 +707,26 @@ void XlatWinsizeToLinux(struct winsize_linux *dst, const struct winsize *src) {
 }
 
 void XlatSigsetToLinux(u8 dst[8], const sigset_t *src) {
-  int i;
-  u64 x;
-  for (x = i = 0; i < 64; ++i) {
-    if (sigismember(src, i + 1)) {
-      x |= 1ull << i;
+  u64 set = 0;
+  int syssig, linuxsig;
+  for (syssig = 1; syssig <= 32; ++syssig) {
+    if (sigismember(src, syssig) == 1 &&
+        (linuxsig = UnXlatSignal(syssig)) != -1) {
+      set |= 1ull << (linuxsig - 1);
     }
   }
-  Write64(dst, x);
+  Write64(dst, set);
 }
 
 void XlatLinuxToSigset(sigset_t *dst, const u8 src[8]) {
-  int i;
-  u64 x;
-  x = Read64(src);
+  u64 set;
+  int syssig, linuxsig;
+  set = Read64(src);
   sigemptyset(dst);
-  for (i = 0; i < 64; ++i) {
-    if ((1ull << i) & x) {
-      sigaddset(dst, i + 1);
+  for (linuxsig = 1; linuxsig <= 32; ++linuxsig) {
+    if (((1ull << (linuxsig - 1)) & set) &&
+        (syssig = XlatSignal(linuxsig)) != -1) {
+      sigaddset(dst, syssig);
     }
   }
 }
