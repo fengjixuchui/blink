@@ -29,6 +29,10 @@ LDLIBS +=				\
 	-lm				\
 	-pthread
 
+ifneq ($(HOST_OS), Darwin)
+LDLIBS += -lrt
+endif
+
 LDFLAGS_STATIC =			\
 	-static				\
 	-fno-exceptions			\

@@ -64,6 +64,7 @@
 #define kStackSize  (8 * 1024 * 1024)
 #define kMinBrk     (2 * 1024 * 1024)
 #define kMinBlinkFd 100
+#define kPollingMs  50
 
 #define PAGE_V    0x0001  // valid
 #define PAGE_RW   0x0002  // writeable
@@ -92,9 +93,13 @@
 #define CanHaveLinearMemory() (LONG_BIT == 64)
 #endif
 
-#define HasLinearMapping(x) \
-  (CanHaveLinearMemory() && \
-   !atomic_load_explicit(&(x)->nolinear, memory_order_relaxed))
+#ifdef HAVE_JIT
+#define IsMakingPath(m) m->path.jb
+#else
+#define IsMakingPath(m) 0
+#endif
+
+#define HasLinearMapping(x) (CanHaveLinearMemory() && !(x)->nolinear)
 
 #if LONG_BIT == 64
 #define _Atomicish(t) _Atomic(t)
@@ -114,7 +119,6 @@ MICRO_OP_SAFE u8 *ToHost(i64 v) {
 
 static inline i64 ToGuest(void *r) {
   i64 v = (intptr_t)r - kSkew;
-  unassert(!(v & ~PAGE_TA));
   return v;
 }
 
@@ -182,7 +186,7 @@ struct OpCache {
   u32 stashsize;  // for writes that overlap page
   bool writable;
   _Atomic(bool) invalidated;
-  u64 icache[1024][kInstructionBytes / 8];
+  u64 icache[512][kInstructionBytes / 8];
 };
 
 struct Futex {
@@ -218,6 +222,7 @@ struct System {
   pthread_mutex_t machines_lock;
   struct Dll *machines GUARDED_BY(machines_lock);
   unsigned next_tid GUARDED_BY(machines_lock);
+  intptr_t ender;
   struct Jit jit;
   struct Fds fds;
   struct Elf elf;
@@ -251,11 +256,12 @@ struct Machine {                           //
   i64 stashaddr;                           // page overlap buffer
   u32 flags;                               // x86 eflags register
   bool reserving;                          // did it call ReserveAddress?
+  bool nolinear;                           // [dup] no linear address resolution
   _Atomic(bool) invalidated;               // the tlb must be flushed
-  _Atomic(bool) nolinear;                  // [dup] no linear address resolution
   _Atomic(bool) killed;                    // used to send a soft SIGKILL
   u8 mode;                                 // [dup] XED_MODE_{REAL,LEGACY,LONG}
   _Atomic(int) *fun;                       // [dup] jit hooks for code bytes
+  _Atomicish(u64) signals;                 // signals waiting for delivery
   unsigned long codesize;                  // [dup] size of exe code section
   i64 codestart;                           // [dup] virt of exe code section
   union {                                  // GENERAL REGISTER FILE
@@ -330,7 +336,6 @@ struct Machine {                           //
   struct JitPath path;                     // under construction jit route
   i64 bofram[2];                           // helps debug bootloading code
   i64 faultaddr;                           // used for tui error reporting
-  _Atomicish(u64) signals;                 // signals waiting for delivery
   _Atomicish(u64) sigmask;                 // signals that've been blocked
   u32 tlbindex;                            //
   int sig;                                 // signal under active delivery
@@ -339,7 +344,8 @@ struct Machine {                           //
   struct System *system;                   //
   bool canhalt;                            //
   bool metal;                              //
-  jmp_buf onhalt;                          //
+  bool interrupted;                        //
+  sigjmp_buf onhalt;                       //
   i64 ctid;                                //
   int tid;                                 //
   sigset_t spawn_sigmask;                  //
@@ -370,7 +376,7 @@ void LoadInstruction(struct Machine *, u64);
 void ExecuteInstruction(struct Machine *);
 u64 AllocatePage(struct System *);
 u64 AllocatePageTable(struct System *);
-int ReserveVirtual(struct System *, i64, i64, u64, int, bool);
+int ReserveVirtual(struct System *, i64, i64, u64, int, i64, bool);
 char *FormatPml4t(struct Machine *);
 i64 FindVirtual(struct System *, i64, i64);
 int FreeVirtual(struct System *, i64, i64);
@@ -413,15 +419,35 @@ void EndStoreNp(struct Machine *, i64, size_t, void *[2], u8 *);
 void ResetRam(struct Machine *);
 void SetReadAddr(struct Machine *, i64, u32);
 void SetWriteAddr(struct Machine *, i64, u32);
-void ProtectVirtual(struct System *, i64, i64, u64, u64);
+int ProtectVirtual(struct System *, i64, i64, int);
+int CheckVirtual(struct System *, i64, i64);
+void SyncVirtual(struct Machine *, i64, i64, int, i64);
+int GetProtection(u64);
+u64 SetProtection(int);
 int ClassifyOp(u64) pureconst;
+void Terminate(P, void (*)(struct Machine *, u64));
 
 void CountOp(long *);
-void FastJmp(struct Machine *, i32);
 void FastPush(struct Machine *, long);
 void FastPop(struct Machine *, long);
 void FastCall(struct Machine *, u64);
+void FastJmp(struct Machine *, u64);
 void FastRet(struct Machine *);
+
+u32 Jb(struct Machine *);
+u32 Jae(struct Machine *);
+u32 Je(struct Machine *);
+u32 Jne(struct Machine *);
+u32 Jo(struct Machine *);
+u32 Jno(struct Machine *);
+u32 Ja(struct Machine *);
+u32 Jbe(struct Machine *);
+u32 Jg(struct Machine *);
+u32 Jge(struct Machine *);
+u32 Jl(struct Machine *);
+u32 Jle(struct Machine *);
+u32 Js(struct Machine *);
+u32 Jns(struct Machine *);
 
 void Push(P, u64);
 u64 Pop(P, u16);

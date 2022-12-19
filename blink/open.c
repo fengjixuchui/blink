@@ -52,7 +52,8 @@ int SysOpenat(struct Machine *m, i32 dirfildes, i64 pathaddr, i32 oflags,
     } else {
       sysdirfd = AT_FDCWD;
     }
-    if ((sf = openat(sysdirfd, path, oflags, mode)) != -1) {
+    INTERRUPTIBLE(sf = openat(sysdirfd, path, oflags, mode));
+    if (sf != -1) {
       atomic_store_explicit(&fd->systemfd, sf, memory_order_release);
       fildes = fd->fildes;
     } else {

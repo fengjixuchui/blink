@@ -377,7 +377,6 @@ int XlatSocketOptname(int level, int optname) {
         XLAT(7, SO_SNDBUF);
         XLAT(8, SO_RCVBUF);
         XLAT(9, SO_KEEPALIVE);
-        XLAT(13, SO_LINGER);
         XLAT(15, SO_REUSEPORT);
         XLAT(20, SO_RCVTIMEO);
         XLAT(21, SO_SNDTIMEO);
@@ -613,15 +612,12 @@ int UnXlatOpenFlags(int x) {
 int XlatSockaddrToHost(struct sockaddr_in *dst,
                        const struct sockaddr_in_linux *src) {
   int family;
-  if ((family = XlatSocketFamily(Read16(src->sin_family))) != -1) {
-    memset(dst, 0, sizeof(*dst));
-    dst->sin_family = family;
-    dst->sin_port = src->sin_port;
-    dst->sin_addr.s_addr = src->sin_addr;
-    return 0;
-  } else {
-    return -1;
-  }
+  if ((family = XlatSocketFamily(Read16(src->sin_family))) == -1) return -1;
+  memset(dst, 0, sizeof(*dst));
+  dst->sin_family = family;
+  dst->sin_port = src->sin_port;
+  dst->sin_addr.s_addr = src->sin_addr;
+  return 0;
 }
 
 void XlatSockaddrToLinux(struct sockaddr_in_linux *dst,

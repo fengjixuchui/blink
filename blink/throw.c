@@ -47,7 +47,7 @@ void DeliverSignalToUser(struct Machine *m, int sig) {
 
 void HaltMachine(struct Machine *m, int code) {
   SIG_LOGF("HaltMachine(%d)", code);
-  if (m->path.jb) {
+  if (IsMakingPath(m)) {
     AbandonPath(m);
   }
   switch (code) {
@@ -81,7 +81,7 @@ void HaltMachine(struct Machine *m, int code) {
       }
   }
   unassert(m->canhalt);
-  longjmp(m->onhalt, code);
+  siglongjmp(m->onhalt, code);
 }
 
 void RaiseDivideError(struct Machine *m) {

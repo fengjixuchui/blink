@@ -25,6 +25,7 @@
 #include "blink/macros.h"
 #include "blink/modrm.h"
 #include "blink/mop.h"
+#include "blink/path.h"
 #include "blink/tsan.h"
 #include "blink/x86.h"
 
@@ -33,22 +34,22 @@ static const u8 kCallOsz[2][3] = {{4, 4, 8}, {2, 2, 8}};
 
 static void WriteStackWord(u8 *p, u64 rde, u32 osz, u64 x) {
   if (osz == 8) {
-    Store64(p, x);
+    Write64(p, x);
   } else if (osz == 2) {
-    Store16(p, x);
+    Write16(p, x);
   } else {
-    Store32(p, x);
+    Write32(p, x);
   }
 }
 
 static u64 ReadStackWord(u8 *p, u32 osz) {
   u64 x;
   if (osz == 8) {
-    x = Load64(p);
+    x = Read64(p);
   } else if (osz == 2) {
-    x = Load16(p);
+    x = Read16(p);
   } else {
-    x = Load32(p);
+    x = Read32(p);
   }
   return x;
 }
@@ -88,7 +89,7 @@ void Push(P, u64 x) {
 void OpPushZvq(P) {
   int osz = kStackOsz[Osz(rde)][Mode(rde)];
   PushN(A, ReadStackWord(RegRexbSrm(m, rde), osz), Eamode(rde), osz);
-  if (HasLinearMapping(m) && !Osz(rde)) {
+  if (IsMakingPath(m) && HasLinearMapping(m) && !Osz(rde)) {
     Jitter(A, "a1i m", RexbSrm(rde), FastPush);
   }
 }
@@ -138,7 +139,7 @@ void OpPopZvq(P) {
     default:
       __builtin_unreachable();
   }
-  if (HasLinearMapping(m) && !Osz(rde)) {
+  if (IsMakingPath(m) && HasLinearMapping(m) && !Osz(rde)) {
     Jitter(A, "a1i m", RexbSrm(rde), FastPop);
   }
 }
@@ -150,8 +151,8 @@ static void OpCall(P, u64 func) {
 
 void OpCallJvds(P) {
   OpCall(A, m->ip + disp);
-  if (HasLinearMapping(m) && !Osz(rde)) {
-    Jitter(A, "a1i m", disp, FastCall);
+  if (HasLinearMapping(m)) {
+    Terminate(A, FastCall);
   }
 }
 
@@ -189,7 +190,7 @@ void OpLeave(P) {
 
 void OpRet(P) {
   m->ip = Pop(A, 0);
-  if (HasLinearMapping(m) && !Osz(rde)) {
+  if (IsMakingPath(m) && HasLinearMapping(m) && !Osz(rde)) {
     Jitter(A, "m", FastRet);
   }
 }

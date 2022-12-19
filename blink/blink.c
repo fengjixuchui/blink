@@ -25,6 +25,7 @@
 
 #include "blink/assert.h"
 #include "blink/case.h"
+#include "blink/debug.h"
 #include "blink/dll.h"
 #include "blink/endian.h"
 #include "blink/jit.h"
@@ -51,6 +52,33 @@
 static bool FLAG_nojit;
 static bool FLAG_nolinear;
 
+static void OnSigSys(int sig) {
+  // do nothing
+}
+
+_Noreturn void TerminateSignal(struct Machine *m, int sig) {
+  int syssig;
+  struct sigaction sa;
+  LOGF("terminating due to signal %s", DescribeSignal(sig));
+  if ((syssig = XlatSignal(sig)) == -1) syssig = SIGTERM;
+  LOCK(&m->system->sig_lock);
+  sa.sa_flags = 0;
+  sa.sa_handler = SIG_DFL;
+  sigemptyset(&sa.sa_mask);
+  unassert(!sigaction(syssig, &sa, 0));
+  unassert(!kill(getpid(), syssig));
+  abort();
+}
+
+static void OnSigSegv(int sig, siginfo_t *si, void *uc) {
+  RestoreIp(g_machine);
+  g_machine->faultaddr = ToGuest(si->si_addr);
+  LOGF("SEGMENTATION FAULT AT ADDRESS %" PRIx64 "\n\t%s", g_machine->faultaddr,
+       GetBacktrace(g_machine));
+  DeliverSignalToUser(g_machine, SIGSEGV_LINUX);
+  siglongjmp(g_machine->onhalt, kMachineSegmentationFault);
+}
+
 static int Exec(char *prog, char **argv, char **envp) {
   struct Machine *old;
   if ((old = g_machine)) KillOtherThreads(old->system);
@@ -75,7 +103,7 @@ static int Exec(char *prog, char **argv, char **envp) {
     FreeMachine(old);
   }
   for (;;) {
-    if (!setjmp(g_machine->onhalt)) {
+    if (!sigsetjmp(g_machine->onhalt, 1)) {
       g_machine->canhalt = true;
       Actor(g_machine);
     }
@@ -115,10 +143,22 @@ static void GetOpts(int argc, char *argv[]) {
   }
 }
 
+static void HandleSigs(void) {
+  struct sigaction sa;
+  sigfillset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  sa.sa_handler = OnSigSys;
+  unassert(!sigaction(SIGSYS, &sa, 0));
+  sa.sa_sigaction = OnSigSegv;
+  sa.sa_flags = SA_SIGINFO;
+  unassert(!sigaction(SIGSEGV, &sa, 0));
+}
+
 int main(int argc, char *argv[], char **envp) {
   g_blink_path = argc > 0 ? argv[0] : 0;
   GetOpts(argc, argv);
   if (optind_ == argc) PrintUsage(argc, argv, 48, 2);
   WriteErrorInit();
+  HandleSigs();
   return Exec(argv[optind_], argv + optind_, envp);
 }

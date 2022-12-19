@@ -224,19 +224,19 @@ const aluop_f kJustBsu[8] = {
 MICRO_OP void FastPush(struct Machine *m, long rexbsrm) {
   u64 v, x = Get64(m->weg[rexbsrm]);
   Put64(m->sp, (v = Get64(m->sp) - 8));
-  Store64(ToHost(v), x);
+  Write64(ToHost(v), x);
 }
 
 MICRO_OP void FastPop(struct Machine *m, long rexbsrm) {
   u64 v = Get64(m->sp);
   Put64(m->sp, v + 8);
-  Put64(m->weg[rexbsrm], Load64(ToHost(v)));
+  Put64(m->weg[rexbsrm], Read64(ToHost(v)));
 }
 
 MICRO_OP void FastCall(struct Machine *m, u64 disp) {
   u64 v, x = m->ip + disp;
   Put64(m->sp, (v = Get64(m->sp) - 8));
-  Store64(ToHost(v), m->ip);
+  Write64(ToHost(v), m->ip);
   m->ip = x;
 }
 
@@ -249,24 +249,52 @@ MICRO_OP void FastRet(struct Machine *m) {
 ////////////////////////////////////////////////////////////////////////////////
 // BRANCHING
 
-MICRO_OP void FastJmp(struct Machine *m, i32 disp) {
+MICRO_OP void FastJmp(struct Machine *m, u64 disp) {
   m->ip += disp;
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// SIGN EXTENDING
-
-MICRO_OP static u64 Sex8(u64 x) {
-  return (i8)x;
+MICRO_OP u32 Jb(struct Machine *m) {
+  return m->flags & CF;
 }
-MICRO_OP static u64 Sex16(u64 x) {
-  return (i16)x;
+MICRO_OP u32 Jae(struct Machine *m) {
+  return ~m->flags & CF;
 }
-MICRO_OP static u64 Sex32(u64 x) {
-  return (i32)x;
+MICRO_OP u32 Je(struct Machine *m) {
+  return m->flags & ZF;
 }
-typedef u64 (*sex_f)(u64);
-static const sex_f kSex[] = {Sex8, Sex16, Sex32};
+MICRO_OP u32 Jne(struct Machine *m) {
+  return ~m->flags & ZF;
+}
+MICRO_OP u32 Js(struct Machine *m) {
+  return m->flags & SF;
+}
+MICRO_OP u32 Jns(struct Machine *m) {
+  return ~m->flags & SF;
+}
+MICRO_OP u32 Jo(struct Machine *m) {
+  return m->flags & OF;
+}
+MICRO_OP u32 Jno(struct Machine *m) {
+  return ~m->flags & OF;
+}
+MICRO_OP u32 Ja(struct Machine *m) {
+  return IsAbove(m);
+}
+MICRO_OP u32 Jbe(struct Machine *m) {
+  return IsBelowOrEqual(m);
+}
+MICRO_OP u32 Jg(struct Machine *m) {
+  return IsGreater(m);
+}
+MICRO_OP u32 Jge(struct Machine *m) {
+  return IsGreaterOrEqual(m);
+}
+MICRO_OP u32 Jl(struct Machine *m) {
+  return IsLess(m);
+}
+MICRO_OP u32 Jle(struct Machine *m) {
+  return IsLessOrEqual(m);
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // ADDRESSING
@@ -355,14 +383,40 @@ static long GetInstructionLength(u8 *p) {
 #endif
 }
 
-static long GetMicroOpLength(void *p) {
+long GetMicroOpLengthImpl(void *uop) {
   long k, n = 0;
   for (;;) {
-    if (IsRet((u8 *)p + n)) return n;
-    k = GetInstructionLength((u8 *)p + n);
+    if (IsRet((u8 *)uop + n)) return n;
+    k = GetInstructionLength((u8 *)uop + n);
     if (k == -1) return -1;
     n += k;
   }
+}
+
+long GetMicroOpLength(void *uop) {
+#ifdef __x86_64__
+#define kMaxOps 128
+  static unsigned count;
+  static void *ops[kMaxOps * 2];
+  static short len[kMaxOps * 2];
+  long res;
+  unsigned hash, i, step;
+  i = 0;
+  step = 0;
+  hash = ((uintptr_t)uop * 0x9e3779b1u) >> 16;
+  do {
+    i = (hash + step * (step + 1) / 2) & (kMaxOps - 1);
+    if (ops[i] == uop) return len[i];
+    ++step;
+  } while (ops[i]);
+  res = GetMicroOpLengthImpl(uop);
+  unassert(count++ < kMaxOps);
+  ops[i] = uop;
+  len[i] = res;
+  return res;
+#else
+  return GetMicroOpLengthImpl(uop);
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -435,11 +489,6 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
       case 'c':  // call
         AppendJitCall(m->path.jb, va_arg(va, void *));
         ClobberEverythingExceptResult(m);
-        break;
-
-      case 'x':  // sign extend
-        ItemsRequired(1);
-        Jitter(A, "a0= m", kSex[CheckBelow(fmt[k++] - '0', 3)]);
         break;
 
       case 'r':  // push res reg
@@ -553,7 +602,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
 void Jitter(P, const char *fmt, ...) {
 #ifdef HAVE_JIT
   va_list va;
-  if (!m->path.jb) return;
+  if (!IsMakingPath(m)) return;
   va_start(va, fmt);
   JitterImpl(A, fmt, va, 0, 0);
   unassert(!i);
