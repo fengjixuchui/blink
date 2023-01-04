@@ -168,6 +168,7 @@
 #define CLONE_SETTLS_LINUX         0x00080000
 #define CLONE_PARENT_SETTID_LINUX  0x00100000
 #define CLONE_CHILD_CLEARTID_LINUX 0x00200000
+#define CLONE_DETACHED_LINUX       0x00400000
 #define CLONE_CHILD_SETTID_LINUX   0x01000000
 
 #define FUTEX_WAIT_LINUX           0
@@ -242,12 +243,23 @@
 #define SIGRTMIN_LINUX  32
 #define SIGRTMAX_LINUX  64
 
+#define AT_PAGESZ_LINUX 6
+#define AT_UID_LINUX    11
+#define AT_EUID_LINUX   12
+#define AT_GID_LINUX    13
+#define AT_EGID_LINUX   14
+#define AT_CLKTCK_LINUX 17
+#define AT_SECURE_LINUX 23
 #define AT_RANDOM_LINUX 25
 #define AT_EXECFN_LINUX 31
 
 #define IFNAMSIZ_LINUX 16
 
-#define SIOCGIFCONF_LINUX 0x8912
+#define SIOCGIFCONF_LINUX    0x8912
+#define SIOCGIFADDR_LINUX    0x8915
+#define SIOCGIFNETMASK_LINUX 0x891b
+#define SIOCGIFBRDADDR_LINUX 0x8919
+#define SIOCGIFDSTADDR_LINUX 0x8917
 
 #define AF_UNSPEC_LINUX 0
 #define AF_UNIX_LINUX   1
@@ -312,6 +324,27 @@
 
 #define GRND_NONBLOCK_LINUX 1
 #define GRND_RANDOM_LINUX   2
+
+#define VMIN_LINUX     7
+#define VTIME_LINUX    6
+#define NCCS_LINUX     20
+#define VINTR_LINUX    1
+#define VQUIT_LINUX    2
+#define VERASE_LINUX   3
+#define VKILL_LINUX    4
+#define VEOF_LINUX     5
+#define VSWTC_LINUX    8
+#define VSTART_LINUX   9
+#define VSTOP_LINUX    10
+#define VSUSP_LINUX    11
+#define VEOL_LINUX     12
+#define VREPRINT_LINUX 13
+#define VDISCARD_LINUX 14
+#define VWERASE_LINUX  15
+#define VLNEXT_LINUX   16
+#define VEOL2_LINUX    17
+
+#define RLIM_INFINITY_LINUX 0xffffffffffffffffull
 
 struct iovec_linux {
   u8 iov_base[8];
@@ -547,6 +580,13 @@ struct sysinfo_linux {
   u8 totalhigh[8];  // wut
   u8 freehigh[8];   // wut
   u8 mem_unit[4];   // ram stuff above is multiples of this
+};
+
+struct tms_linux {
+  u8 tms_utime[8];   // user time
+  u8 tms_stime[8];   // system time
+  u8 tms_cutime[8];  // user time of children
+  u8 tms_cstime[8];  // system time of children
 };
 
 int sysinfo_linux(struct sysinfo_linux *);

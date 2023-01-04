@@ -56,7 +56,7 @@ static void OnSigSys(int sig) {
   // do nothing
 }
 
-_Noreturn void TerminateSignal(struct Machine *m, int sig) {
+void TerminateSignal(struct Machine *m, int sig) {
   int syssig;
   struct sigaction sa;
   LOGF("terminating due to signal %s", DescribeSignal(sig));
@@ -124,7 +124,7 @@ _Noreturn static void PrintUsage(int argc, char *argv[], int rc, int fd) {
 static void GetOpts(int argc, char *argv[]) {
   int opt;
   FLAG_nolinear = !CanHaveLinearMemory();
-  while ((opt = getopt_(argc, argv, OPTS)) != -1) {
+  while ((opt = GetOpt(argc, argv, OPTS)) != -1) {
     switch (opt) {
       case 'j':
         FLAG_nojit = true;
@@ -149,9 +149,11 @@ static void HandleSigs(void) {
   sa.sa_flags = 0;
   sa.sa_handler = OnSigSys;
   unassert(!sigaction(SIGSYS, &sa, 0));
+#ifndef __SANITIZE_THREAD__
   sa.sa_sigaction = OnSigSegv;
   sa.sa_flags = SA_SIGINFO;
   unassert(!sigaction(SIGSEGV, &sa, 0));
+#endif
 }
 
 int main(int argc, char *argv[], char **envp) {

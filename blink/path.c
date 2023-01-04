@@ -19,7 +19,6 @@
 #include <errno.h>
 #include <string.h>
 
-#include "blink/address.h"
 #include "blink/assert.h"
 #include "blink/builtin.h"
 #include "blink/debug.h"
@@ -27,7 +26,6 @@
 #include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/modrm.h"
-#include "blink/path.h"
 #include "blink/stats.h"
 
 void (*AddPath_StartOp_Hook)(P);
@@ -44,17 +42,15 @@ static void DebugOp(struct Machine *m, i64 expected_ip) {
   unassert(m->ip == expected_ip);
 }
 
-static void StartOp(struct Machine *m, long len) {
+static void StartOp(struct Machine *m) {
   JIX_LOGF("%" PRIx64 "   <op>", GetPc(m));
   JIX_LOGF("%" PRIx64 "     %s", GetPc(m), DescribeOp(m, GetPc(m)));
   unassert(!IsMakingPath(m));
-  m->oldip = m->ip;
-  m->ip += len;
 }
 
 static void EndOp(struct Machine *m) {
   JIX_LOGF("%" PRIx64 "   </op>", GetPc(m));
-  m->oldip = -1;
+  m->oplen = 0;
   if (m->stashaddr) {
     CommitStash(m);
   }
@@ -138,11 +134,15 @@ bool CreatePath(P) {
   InitPaths(m->system);
   if ((pc = GetPc(m))) {
     if ((m->path.jb = StartJit(&m->system->jit))) {
-      JIT_LOGF("starting new path %" PRIxPTR " at %" PRIx64,
+      JIT_LOGF("starting new path jit_pc:%" PRIxPTR " at pc:%" PRIx64,
                GetJitPc(m->path.jb), pc);
       AppendJit(m->path.jb, kEnter, sizeof(kEnter));
 #if LOG_JIX
-      Jitter(A, "s0a0= c s0a0=", StartPath);
+      Jitter(A,
+             "q"   // arg0 = machine
+             "c"   // call function (StartPath)
+             "q",  // arg0 = machine
+             StartPath);
 #endif
       m->path.start = pc;
       m->path.elements = 0;
@@ -180,6 +180,7 @@ void FinishPath(struct Machine *m) {
   } else {
     STATISTIC(++path_ooms);
     JIT_LOGF("path starting at %" PRIx64 " ran out of space", m->path.start);
+    SetHook(m, m->path.start, 0);
   }
   m->path.jb = 0;
 }
@@ -187,51 +188,46 @@ void FinishPath(struct Machine *m) {
 void AbandonPath(struct Machine *m) {
   unassert(IsMakingPath(m));
   STATISTIC(++path_abandoned);
+  JIT_LOGF("abandoning path jit_pc:%" PRIxPTR " which started at pc:%" PRIx64,
+           GetJitPc(m->path.jb), m->path.start);
   AbandonJit(&m->system->jit, m->path.jb);
+  SetHook(m, m->path.start, 0);
   m->path.jb = 0;
 }
 
 void AddPath_StartOp(P) {
-  _Static_assert(offsetof(struct Machine, ip) < 128, "");
-  _Static_assert(offsetof(struct Machine, oldip) < 128, "");
 #ifndef NDEBUG
-  Jitter(A, "a0i m", &instructions_jitted, CountOp);
+  if (FLAG_statistics) {
+    Jitter(A,
+           "a0i"  // arg0 = &instructions_jitted
+           "m",   // call micro-op (CountOp)
+           &instructions_jitted, CountOp);
+  }
 #endif
   if (AddPath_StartOp_Hook) {
     AddPath_StartOp_Hook(A);
   }
-  u8 len = Oplength(rde);
-  // TODO(jart): We shouldn't need to modify m->ip on every op.
-#if defined(DEBUG) || LOG_JIX
-  Jitter(A, "a1i s0a0= c s0a0=", m->ip, DebugOp);
+#if LOG_JIX || defined(DEBUG)
+  Jitter(A,
+         "a1i"  // arg1 = m->ip
+         "q"    // arg0 = machine
+         "c",   // call function (DebugOp)
+         m->ip, DebugOp);
 #endif
-#if !LOG_JIX && defined(__x86_64__)
-  AppendJitMovReg(m->path.jb, kJitArg0, kJitSav0);
-  u8 ip = offsetof(struct Machine, ip);
-  u8 oldip = offsetof(struct Machine, oldip);
-  u8 code[] = {
-      0x48, 0x8b, 0107, ip,     // mov 8(%rdi),%rax
-      0x48, 0x89, 0107, oldip,  // mov %rax,16(%rdi)
-      0x48, 0x83, 0300, len,    // add $len,%rax
-      0x48, 0x89, 0107, ip,     // mov %rax,8(%rdi)
-  };
-  AppendJit(m->path.jb, code, sizeof(code));
-  m->reserving = false;
-#elif !LOG_JIX && defined(__aarch64__)
-  AppendJitMovReg(m->path.jb, kJitArg0, kJitSav0);
-  u8 ip = offsetof(struct Machine, ip);
-  u8 oldip = offsetof(struct Machine, oldip);
-  u32 code[] = {
-      0xf9400001 | (ip / 8) << 10,     // ldr x1, [x0, #ip]
-      0xf9000001 | (oldip / 8) << 10,  // str x1, [x0, #oldip]
-      0x91000021 | len << 10,          // add x1, x1, #len
-      0xf9000001 | (ip / 8) << 10,     // str x1, [x0, #ip]
-  };
-  AppendJit(m->path.jb, code, sizeof(code));
-  m->reserving = false;
-#else
-  Jitter(A, "a1i s0a0= c s0a0=", len, StartOp);
+#if LOG_JIX
+  Jitter(A,
+         "a1i"  // arg1 = Oplength(rde)
+         "q"    // arg0 = machine
+         "c",   // call function (StartOp)
+         Oplength(rde), StartOp);
 #endif
+  Jitter(A,
+         "a1i"  // arg1 = Oplength(rde)
+         "q"    // arg0 = machine
+         "m"    // call micro-op (AddIp)
+         "q",   // arg0 = machine
+         Oplength(rde), AddIp);
+  m->reserving = false;
 }
 
 void AddPath_EndOp(P) {
@@ -259,7 +255,10 @@ void AddPath_EndOp(P) {
     AppendJitCall(m->path.jb, (void *)CommitStash);
   }
 #else
-  Jitter(A, "s0a0= c", EndOp);
+  Jitter(A,
+         "q"   // arg0 = machine
+         "c",  // call function (EndOp)
+         EndOp);
 #endif
 }
 

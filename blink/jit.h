@@ -9,10 +9,10 @@
 #include "blink/dll.h"
 #include "blink/types.h"
 
-#define kJitFit          800
+#define kJitFit          1000
 #define kJitAlign        16
-#define kJitJumpTries    8
-#define kJitMinBlockSize 65536
+#define kJitJumpTries    16
+#define kJitMinBlockSize 262144
 
 #ifdef __x86_64__
 #define kJitRes0 kAmdAx
@@ -101,31 +101,31 @@ typedef _Atomic(int) hook_t;
 struct JitJump {
   hook_t *hook;
   u8 *code;
-  int tries;
-  int addend;
+  long tries;
+  long addend;
   struct Dll elem;
 };
 
 struct JitStage {
-  int start;
-  int index;
+  long start;
+  long index;
   hook_t *hook;
   struct Dll elem;
 };
 
 struct JitBlock {
   u8 *addr;
-  int start;
-  int index;
-  int committed;
-  int blocksize;
+  long start;
+  long index;
+  long committed;
+  long blocksize;
   struct Dll elem;
   struct Dll *jumps;
   struct Dll *staged;
 };
 
 struct Jit {
-  int pagesize;
+  long pagesize;
   _Atomic(int) blocksize;
   _Atomic(bool) disabled;
   pthread_mutex_t lock;

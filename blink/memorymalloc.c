@@ -44,7 +44,7 @@ struct Allocator {
 
 static void FillPage(void *p, int c) {
   memset(p, c, 4096);
-  atomic_thread_fence(memory_order_release);
+  FENCE;
 }
 
 static void ClearPage(void *p) {
@@ -86,6 +86,7 @@ void *AllocateBig(size_t n) {
     p = Mmap(brk, n, PROT_READ | PROT_WRITE,
              MAP_DEMAND | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, "big");
   } while (p == MAP_FAILED && errno == MAP_DENIED);
+  unassert(p == MAP_FAILED || (uintptr_t)p < 0x800000000000);
   return p != MAP_FAILED ? p : 0;
 }
 
@@ -100,7 +101,6 @@ struct System *NewSystem(void) {
     InitFds(&s->fds);
     pthread_mutex_init(&s->sig_lock, 0);
     pthread_mutex_init(&s->mmap_lock, 0);
-    pthread_mutex_init(&s->lock_lock, 0);
     pthread_mutex_init(&s->futex_lock, 0);
     pthread_mutex_init(&s->machines_lock, 0);
     s->blinksigs = 1ull << (SIGSYS_LINUX - 1) |   //
@@ -165,7 +165,6 @@ void FreeSystem(struct System *s) {
   unassert(!pthread_mutex_destroy(&s->machines_lock));
   unassert(!pthread_mutex_destroy(&s->futex_lock));
   unassert(!pthread_mutex_destroy(&s->mmap_lock));
-  unassert(!pthread_mutex_destroy(&s->lock_lock));
   unassert(!pthread_mutex_destroy(&s->sig_lock));
   DestroyFds(&s->fds);
   DestroyJit(&s->jit);
@@ -194,7 +193,7 @@ struct Machine *NewMachine(struct System *system, struct Machine *parent) {
     ResetCpu(m);
   }
   m->ctid = 0;
-  m->oldip = -1;
+  m->oplen = 0;
   m->system = system;
   m->mode = system->mode;
   m->thread = pthread_self();
@@ -580,9 +579,9 @@ int ProtectVirtual(struct System *s, i64 virt, i64 size, int prot) {
     return einval();
   }
   if (HasLinearMapping(s) && (virt & (pagesize - 1))) {
-    LOGF("mprotect(%#" PRIx64 ", %#" PRIx64
-         ") not aligned to host page size while using linear mode",
-         virt, size, "addr");
+    LOGF("mprotect(%#" PRIx64 ", %#" PRIx64 ", %d)"
+         " not aligned to host page size while using linear mode",
+         virt, size, prot);
     return einval();
   }
   if (CheckVirtual(s, virt, size) == -1) {
@@ -606,7 +605,7 @@ int ProtectVirtual(struct System *s, i64 virt, i64 size, int prot) {
         if (HasLinearMapping(s) && (pt & PAGE_HOST) &&
             (mpstart = ROUNDDOWN(virt, pagesize)) != last) {
           last = mpstart;
-          if (mprotect(ToHost(mpstart), pagesize, prot)) {
+          if (mprotect(ToHost(mpstart), pagesize, prot & ~PROT_EXEC)) {
             LOGF("mprotect(%#" PRIx64 " [%p], %#" PRIx64 ", %d) failed",
                  mpstart, ToHost(mpstart), pagesize, prot);
             abort();

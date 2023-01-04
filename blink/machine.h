@@ -60,11 +60,16 @@
 #define kPreciousStart 0x44000000  // 192 mb
 #define kPreciousEnd   0x50000000
 #endif
-#define kRealSize   (16 * 1024 * 1024)
-#define kStackSize  (8 * 1024 * 1024)
-#define kMinBrk     (2 * 1024 * 1024)
-#define kMinBlinkFd 100
-#define kPollingMs  50
+
+#define kRealSize  (16 * 1024 * 1024)  // size of ram for real mode
+#define kStackSize (8 * 1024 * 1024)   // size of stack for user mode
+#define kMinBrk    (2 * 1024 * 1024)   // minimum user mode image address
+
+#define kMinBlinkFd 100       // fds owned by the vm start here
+#define kPollingMs  50        // busy loop for futex(), poll(), etc.
+#define kSemSize    128       // number of bytes used for each semaphore
+#define kBusCount   256       // # load balanced semaphores in virtual bus
+#define kBusRegion  kSemSize  // 16 is sufficient for 8-byte loads/stores
 
 #define PAGE_V    0x0001  // valid
 #define PAGE_RW   0x0002  // writeable
@@ -101,7 +106,7 @@
 
 #define HasLinearMapping(x) (CanHaveLinearMemory() && !(x)->nolinear)
 
-#if LONG_BIT == 64
+#if LONG_BIT >= 64
 #define _Atomicish(t) _Atomic(t)
 #else
 #define _Atomicish(t) t
@@ -124,6 +129,11 @@ static inline i64 ToGuest(void *r) {
 
 struct Machine;
 typedef void (*nexgen32e_f)(P);
+
+struct Xmm {
+  u64 lo;
+  u64 hi;
+};
 
 struct FreeList {
   int n;
@@ -217,7 +227,6 @@ struct System {
   const char *brand;
   _Atomic(int) *fun;
   unsigned long codesize;
-  pthread_mutex_t lock_lock;
   struct MachineMemstat memstat;
   pthread_mutex_t machines_lock;
   struct Dll *machines GUARDED_BY(machines_lock);
@@ -252,14 +261,14 @@ struct MachineTlb {
 
 struct Machine {                           //
   u64 ip;                                  // instruction pointer
-  u64 oldip;                               // ip saved at start of op, or -1
-  i64 stashaddr;                           // page overlap buffer
-  u32 flags;                               // x86 eflags register
-  bool reserving;                          // did it call ReserveAddress?
+  u8 oplen;                                // length of operation
+  u8 mode;                                 // [dup] XED_MODE_{REAL,LEGACY,LONG}
   bool nolinear;                           // [dup] no linear address resolution
+  bool reserving;                          // did it call ReserveAddress?
+  u32 flags;                               // x86 eflags register
+  i64 stashaddr;                           // page overlap buffer
   _Atomic(bool) invalidated;               // the tlb must be flushed
   _Atomic(bool) killed;                    // used to send a soft SIGKILL
-  u8 mode;                                 // [dup] XED_MODE_{REAL,LEGACY,LONG}
   _Atomic(int) *fun;                       // [dup] jit hooks for code bytes
   _Atomicish(u64) signals;                 // signals waiting for delivery
   unsigned long codesize;                  // [dup] size of exe code section
@@ -354,6 +363,9 @@ struct Machine {                           //
 };                                         //
 
 extern _Thread_local struct Machine *g_machine;
+extern const nexgen32e_f kConvert[3];
+extern const nexgen32e_f kSax[3];
+extern bool FLAG_noconnect;
 
 struct System *NewSystem(void);
 void FreeSystem(struct System *);
@@ -373,6 +385,7 @@ void ResetInstructionCache(struct Machine *);
 void GeneralDispatch(P);
 nexgen32e_f GetOp(long);
 void LoadInstruction(struct Machine *, u64);
+int LoadInstruction2(struct Machine *, u64);
 void ExecuteInstruction(struct Machine *);
 u64 AllocatePage(struct System *);
 u64 AllocatePageTable(struct System *);
@@ -393,7 +406,8 @@ void RestoreIp(struct Machine *);
 
 bool IsValidAddrSize(i64, i64) pureconst;
 bool OverlapsPrecious(i64, i64) pureconst;
-char **LoadStrList(struct Machine *, i64);
+char **CopyStrList(struct Machine *, i64);
+char *CopyStr(struct Machine *, i64);
 char *LoadStr(struct Machine *, i64);
 int RegisterMemory(struct Machine *, i64, void *, size_t);
 u8 *GetPageAddress(struct System *, u64);
@@ -431,23 +445,15 @@ void CountOp(long *);
 void FastPush(struct Machine *, long);
 void FastPop(struct Machine *, long);
 void FastCall(struct Machine *, u64);
+void FastCallAbs(u64, struct Machine *);
 void FastJmp(struct Machine *, u64);
+void FastJmpAbs(u64, struct Machine *);
+void FastLeave(struct Machine *);
 void FastRet(struct Machine *);
 
-u32 Jb(struct Machine *);
-u32 Jae(struct Machine *);
-u32 Je(struct Machine *);
-u32 Jne(struct Machine *);
-u32 Jo(struct Machine *);
-u32 Jno(struct Machine *);
-u32 Ja(struct Machine *);
-u32 Jbe(struct Machine *);
-u32 Jg(struct Machine *);
-u32 Jge(struct Machine *);
-u32 Jl(struct Machine *);
-u32 Jle(struct Machine *);
-u32 Js(struct Machine *);
-u32 Jns(struct Machine *);
+u64 Pick(u32, u64, u64);
+typedef u32 (*cc_f)(struct Machine *);
+extern const cc_f kConditionCode[16];
 
 void Push(P, u64);
 u64 Pop(P, u16);
@@ -467,6 +473,7 @@ void OpAam(P);
 void OpAas(P);
 void OpAlub(P);
 void OpAluw(P);
+void OpAluwi(P);
 void OpCallEq(P);
 void OpCallJvds(P);
 void OpCallf(P);
@@ -521,5 +528,79 @@ void FreeBig(void *, size_t);
 bool HasHook(struct Machine *, u64);
 nexgen32e_f GetHook(struct Machine *, u64);
 void SetHook(struct Machine *, u64, nexgen32e_f);
+
+u64 MaskAddress(u32, u64);
+i64 GetIp(struct Machine *);
+i64 GetPc(struct Machine *);
+u64 AddressOb(P);
+u64 AddressDi(P);
+i64 AddressSi(P);
+u64 *GetSegment(P, unsigned);
+i64 DataSegment(P, u64);
+i64 AddSegment(P, u64, u64);
+
+void OpLddquVdqMdq(P);
+void OpMaskMovDiXmmRegXmmRm(P);
+void OpMov0f10(P);
+void OpMov0f12(P);
+void OpMov0f13(P);
+void OpMov0f16(P);
+void OpMov0f17(P);
+void OpMov0f28(P);
+void OpMov0f29(P);
+void OpMov0f2b(P);
+void OpMov0f6e(P);
+void OpMov0f6f(P);
+void OpMov0f7e(P);
+void OpMov0f7f(P);
+void OpMov0fD6(P);
+void OpMov0fE7(P);
+void OpMovWpsVps(P);
+void OpMovntdqaVdqMdq(P);
+void OpMovntiMdqpGdqp(P);
+void OpPmovmskbGdqpNqUdq(P);
+
+void OpUnpcklpsd(P);
+void OpUnpckhpsd(P);
+void OpPextrwGdqpUdqIb(P);
+void OpPinsrwVdqEwIb(P);
+void OpShuffle(P);
+void OpShufpsd(P);
+void OpSqrtpsd(P);
+void OpRsqrtps(P);
+void OpRcpps(P);
+void OpComissVsWs(P);
+void OpAddpsd(P);
+void OpMulpsd(P);
+void OpSubpsd(P);
+void OpDivpsd(P);
+void OpMinpsd(P);
+void OpMaxpsd(P);
+void OpCmppsd(P);
+void OpAndpsd(P);
+void OpAndnpsd(P);
+void OpOrpsd(P);
+void OpXorpsd(P);
+void OpHaddpsd(P);
+void OpHsubpsd(P);
+void OpAddsubpsd(P);
+void OpMovmskpsd(P);
+
+extern void (*AddPath_StartOp_Hook)(P);
+
+bool AddPath(P);
+bool CreatePath(P);
+void CompletePath(P);
+void AddPath_EndOp(P);
+void AddPath_StartOp(P);
+long GetPrologueSize(void);
+void FinishPath(struct Machine *);
+void AbandonPath(struct Machine *);
+void AddIp(struct Machine *, long);
+
+void OpTest(P);
+void OpAlui(P);
+i64 FastAnd8(struct Machine *, u64, u64);
+i64 FastSub8(struct Machine *, u64, u64);
 
 #endif /* BLINK_MACHINE_H_ */

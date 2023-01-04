@@ -16,9 +16,10 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
-#include "blink/address.h"
 #include "blink/builtin.h"
+#include "blink/debug.h"
 #include "blink/flags.h"
+#include "blink/log.h"
 #include "blink/modrm.h"
 #include "blink/stats.h"
 
@@ -57,21 +58,51 @@ u64 ExportFlags(u64 flags) {
   return flags;
 }
 
-int GetNeededFlags(struct Machine *m, i64 pc, int myflags, int lookahead) {
-  int i, need;
-  for (i = need = 0;;) {
-    LoadInstruction(m, pc);
-    pc += Oplength(m->xedd->op.rde);
-    need |= GetFlagDeps(m->xedd->op.rde) & myflags;
-    if (!(myflags &= ~GetFlagClobbers(m->xedd->op.rde))) break;
-    if (++i == lookahead || ClassifyOp(m->xedd->op.rde) != kOpNormal) {
-      need = -1;
-      break;
-    }
-  }
-  return need;
+static bool IsJump(u64 rde) {
+  int op = Mopcode(rde);
+  return op == 0x0E9 ||  // jmp  Jvds
+         op == 0x0EB ||  // jmp  Jbs
+         op == 0x0E8;    // call Jvds
 }
 
+static bool IsConditionalJump(u64 rde) {
+  int op = Mopcode(rde);
+  return (0x070 <= op && op <= 0x07F) ||  // Jcc Jbs
+         (0x180 <= op && op <= 0x18F);    // Jcc Jvds
+}
+
+static int CrawlFlags(struct Machine *m,  //
+                      i64 pc,             //
+                      int myflags,        //
+                      int look,           //
+                      int depth) {
+  int need = 0;
+  for (;;) {
+    SPX_LOGF("%" PRIx64 " %*s%s", pc, depth * 2, "", DescribeOp(m, pc));
+    if (LoadInstruction2(m, pc)) return -1;
+    pc += Oplength(m->xedd->op.rde);
+    need |= GetFlagDeps(m->xedd->op.rde) & myflags;
+    if (!(myflags &= ~GetFlagClobbers(m->xedd->op.rde))) {
+      return need;
+    } else if (!--look) {
+      return -1;
+    } else if (IsJump(m->xedd->op.rde)) {
+      pc += m->xedd->op.disp;
+    } else if (IsConditionalJump(m->xedd->op.rde)) {
+      need |= CrawlFlags(m, pc + m->xedd->op.disp, myflags, look, depth + 1);
+      if (need == -1) return -1;
+    } else if (ClassifyOp(m->xedd->op.rde) != kOpNormal) {
+      return -1;
+    }
+  }
+}
+
+// returns bitset of flags read by code at pc, or -1 if unknown
+int GetNeededFlags(struct Machine *m, i64 pc, int myflags) {
+  return CrawlFlags(m, pc, myflags, 16, 0);
+}
+
+// returns bitset of flags set or undefined by operation
 int GetFlagClobbers(u64 rde) {
   switch (Mopcode(rde)) {
     default:
@@ -356,6 +387,7 @@ static int GetFlagDepsImpl(u64 rde) {
   }
 }
 
+// returns bitset of flags read by operation
 int GetFlagDeps(u64 rde) {
   int flags = GetFlagDepsImpl(rde);
   if (Rep(rde) >= 2) flags |= ZF;

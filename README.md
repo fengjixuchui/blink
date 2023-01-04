@@ -1,90 +1,123 @@
 ![Screenshot of Blink running GCC 9.4.0](blink/blink-gcc.png)
 
-# blink
+# Blinkenlights
 
-blink is a virtual machine for running statically-compiled x86-64-linux
+This project contains two programs:
+
+`blink` is a virtual machine that runs statically-compiled x86-64-linux
 programs on different operating systems and hardware architectures. It's
 designed to do the same thing as the `qemu-x86_64` command, except (a)
-rather than being a 4mb binary, Blink only has a ~158kb footprint; and
-(b) Blink goes faster than Qemu on some benchmarks, such as emulating
-GCC. The tradeoff is Blink doesn't have as many systems integrations as
-Qemu. Blink is a great fit when you want a virtual machine that's
-embeddable, readable, hackable, and easy to compile. For further details
-on the motivations for this tool, please read
-<https://justine.lol/ape.html>.
+rather than being a 4mb binary, Blink only has a ~156kb footprint; and
+(b) Blink goes 2x faster than Qemu on some benchmarks such as emulating
+GCC. The tradeoff is Blink doesn't have as many features as Qemu. Blink
+is a great fit when you want a virtual machine that's extremely small
+and runs ephemeral programs much faster. For further details on the
+motivations for this tool, please read <https://justine.lol/ape.html>.
 
-## Caveat Emptor
-
-Welcome everyone from the Hacker News, Lobsters, and Reddit communities!
-This project is a work in progress. Please don't use this for production
-yet. If you try this be sure to calibrate your expectations accordingly.
-Especially if you use multiple threads under heavy processor load.
+[`blinkenlights`](https://justine.lol/blinkenlights) is a TUI interface
+that may be used for debugging x86_64-linux programs across platforms.
+Unlike GDB, Blinkenlights focuses on visualizing program execution. It
+uses UNICODE IBM Code Page 437 characters to display binary memory
+panels, which change as you step through your program's assembly code.
+These memory panels may be scrolled and zoomed using your mouse wheel.
+Blinkenlights also permits reverse debugging, where scroll wheeling over
+the assembly display allows the rewinding of execution history.
 
 ## Getting Started
 
-You can compile Blink on x86-64 Linux, Darwin, FreeBSD, NetBSD, OpenBSD,
-Apple Silicon, and Raspberry Pi using your operating system's toolchain.
+We regularly test that Blink is able run x86-64-linux binaries on the
+following platforms:
+
+- Linux (x86, ARM, RISC-V, MIPS, PowerPC, s390x)
+- MacOS (x86, ARM)
+- FreeBSD
+- OpenBSD
+- NetBSD
+
+Blink depends on the following libraries:
+
+- libc (POSIX.1-2017)
+
+Blink can be compiled on UNIX systems that have:
+
+- A C11 compiler (e.g. GCC 4.9.4+)
+- Modern GNU Make (i.e. not the one that comes with XCode)
+
+The instructions for compiling Blink are as follows:
 
 ```sh
-# for all x86-64 platforms
-$ build/bootstrap/make.com -j8 o//blink/blink
-
-# for apple m1 arm silicon
-# don't use the ancient version of gnu make that comes with xcode
-$ make -j8 o//blink/blink
-
-# for linux raspberry pi
-$ build/bootstrap/blink-linux-aarch64 build/bootstrap/make.com -j8 o//blink/blink
-
-# run actually portable executable in virtual machine
-$ o//blink/blink third_party/cosmo/hello.com
-hello world
-
-# run static elf binary in virtual machine
-$ o//blink/blink third_party/cosmo/tinyhello.elf
-hello world
+$ make -j4
+$ o//blink/blink -h
+Usage: o//blink/blink [-hjms] PROG [ARGS...]
+  -h        help
+  -j        disable jit
+  -m        enable memory safety
+  -s        print statistics on exit
 ```
 
-There's a terminal interface for debugging:
-
-```
-$ build/bootstrap/make.com -j8 o//blink/tui
-$ o//blink/tui third_party/cosmo/tinyhello.elf
-```
-
-You can run our test executables to check your local platform build:
+Here's how you can run a simple hello world program with Blink:
 
 ```sh
-$ build/bootstrap/make.com -j8 check
+o//blink/blink third_party/cosmo/tinyhello.elf
 ```
 
-For maximum performance, use `MODE=rel` or `MODE=opt`.
+Blink has a debugger TUI, which works with UTF-8 ANSI terminals. The
+most important keystrokes in this interface are `?` for help, `s` for
+step, `c` for continue, and scroll wheel for reverse debugging.
 
 ```sh
-$ build/bootstrap/make.com MODE=opt -j8 check
+o//blink/blinkenlights third_party/cosmo/tinyhello.elf
 ```
 
-For maximum tinyness, use `MODE=tiny`.
+## Testing
 
-```
-$ build/bootstrap/make.com MODE=tiny -j8 check
-$ strip o/tiny/blink/blink
-$ ls -hal o/tiny/blink/blink
-```
-
-You can sanitize using `MODE=asan`, `MODE=ubsan`, `MODE=tsan`, and
-`MODE=msan`.
-
-If you're building your code on an x86-64 Linux machine, then the
-following command will cross-compile blink for i386, arm, m68k, riscv,
-mips, s390x. Then it'll launch all the cross-compiled binaries in qemu
-to ensure the test programs above work on all architectures.
+Blink is tested primarily using precompiled x86 binaries, which are
+downloaded automatically. You can check how well Blink works on your
+local platform by running:
 
 ```sh
-$ build/bootstrap/make.com -j8 emulates
-$ o/third_party/qemu/qemu-aarch64 o//aarch64/blink/blink third_party/cosmo/hello.com
-hello world
+make check
 ```
+
+To check that Blink works on 11 different hardware `$(ARCHITECTURES)`
+(see [Makefile](Makefile)), you can run the following command, which
+will download statically-compiled builds of GCC and Qemu. Since our
+toolchain binaries are intended for x86-64 Linux, Blink will bootstrap
+itself locally first, so that it's possible to run these tests on other
+operating systems and architectures.
+
+```sh
+make check2
+make emulates
+```
+
+## Alternative Builds
+
+For maximum performance, use `MODE=rel` or `MODE=opt`. Please note the
+release mode builds will remove all the logging and assertion statements
+and Blink isn't mature enough for that yet. So extra caution is advised.
+
+```sh
+make MODE=rel
+o/rel/blink/blink -h
+```
+
+For maximum tinyness, use `MODE=tiny`. This build mode will not only
+remove logging and assertion statements, but also reduce performance in
+favor of smaller binary size whenever possible.
+
+```sh
+make MODE=tiny
+strip o/tiny/blink/blink
+ls -hal o/tiny/blink/blink
+```
+
+You can hunt down bugs in Blink using the following build modes:
+
+- `MODE=asan` helps find memory safety bugs
+- `MODE=tsan` helps find threading related bugs
+- `MODE=ubsan` to find violations of the C standard
+- `MODE=msan` helps find uninitialized memory errors
 
 ## Technical Details
 
@@ -117,9 +150,9 @@ Blink has a runtime check which will catch obvious problems, and then
 gracefully fall back to using a CALL instruction. Since no JIT can be
 fully perfect on all platforms, the `o//blink/blink -j` flag may be
 passed to disable Blink's JIT. Please note that disabling JIT makes
-Blink go 10x slower. With the `o//blink/tui` command, the `-j` flag
-takes on the opposite meaning, where it instead *enables* JIT. This can
-be useful for troubleshooting the JIT, because the TUI display has a
+Blink go 10x slower. With the `o//blink/blinkenlights` command, the `-j`
+flag takes on the opposite meaning, where it instead *enables* JIT. This
+can be useful for troubleshooting the JIT, because the TUI display has a
 feature that lets JIT path formation be visualized. Blink currently only
 enables the JIT for programs running in long mode (64-bit) but we may
 support JITing 16-bit programs in the future.
@@ -157,12 +190,13 @@ embedded terminal display. For example, it's possible to use Antirez's
 Kilo text editor inside Blink's TUI.
 
 Blink supports 16-bit BIOS programs, such as SectorLISP. To boot real
-mode programs in Blink, the `o//blink/tui -r` flag may be passed, which
-puts the virtual machine in i8086 mode. Currently only a limited set of
-BIOS APIs are available. For example, Blink supports IBM PC Serial UART,
-CGA display, and the MDA display APIs which are rendered using block
-characters in the TUI interface. We hope to expand our real mode support
-in the near future, in order to run operating systems like ELKS.
+mode programs in Blink, the `o//blink/blinkenlights -r` flag may be
+passed, which puts the virtual machine in i8086 mode. Currently only a
+limited set of BIOS APIs are available. For example, Blink supports IBM
+PC Serial UART, CGA display, and the MDA display APIs which are rendered
+using block characters in the TUI interface. We hope to expand our real
+mode support in the near future, in order to run operating systems like
+ELKS.
 
 Blink supports troubleshooting operating system bootloaders. Blink was
 designed for Cosmopolitan Libc, which embeds an operating system in each
@@ -189,4 +223,5 @@ static. You can run:
   of BSS memory.
 
 - Real mode executables, which are loaded to the address `0x7c00`. These
-  programs must be run using the `tui` command with the `-r` flag.
+  programs must be run using the `blinkenlights` command with the `-r`
+  flag.

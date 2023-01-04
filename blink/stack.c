@@ -18,14 +18,12 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <string.h>
 
-#include "blink/address.h"
 #include "blink/builtin.h"
 #include "blink/endian.h"
 #include "blink/log.h"
 #include "blink/macros.h"
 #include "blink/modrm.h"
 #include "blink/mop.h"
-#include "blink/path.h"
 #include "blink/tsan.h"
 #include "blink/x86.h"
 
@@ -50,6 +48,18 @@ static u64 ReadStackWord(u8 *p, u32 osz) {
     x = Read16(p);
   } else {
     x = Read32(p);
+  }
+  return x;
+}
+
+static u64 ReadMemoryWord(u8 *p, u32 osz) {
+  u64 x;
+  if (osz == 8) {
+    x = Load64(p);
+  } else if (osz == 2) {
+    x = Load16(p);
+  } else {
+    x = Load32(p);
   }
   return x;
 }
@@ -90,7 +100,10 @@ void OpPushZvq(P) {
   int osz = kStackOsz[Osz(rde)][Mode(rde)];
   PushN(A, ReadStackWord(RegRexbSrm(m, rde), osz), Eamode(rde), osz);
   if (IsMakingPath(m) && HasLinearMapping(m) && !Osz(rde)) {
-    Jitter(A, "a1i m", RexbSrm(rde), FastPush);
+    Jitter(A,
+           "a1i"
+           "m",
+           RexbSrm(rde), FastPush);
   }
 }
 
@@ -140,7 +153,10 @@ void OpPopZvq(P) {
       __builtin_unreachable();
   }
   if (IsMakingPath(m) && HasLinearMapping(m) && !Osz(rde)) {
-    Jitter(A, "a1i m", RexbSrm(rde), FastPop);
+    Jitter(A,
+           "a1i"
+           "m",
+           RexbSrm(rde), FastPop);
   }
 }
 
@@ -158,14 +174,30 @@ void OpCallJvds(P) {
 
 static u64 LoadAddressFromMemory(P) {
   unsigned osz = kCallOsz[Osz(rde)][Mode(rde)];
-  return ReadStackWord(GetModrmRegisterWordPointerRead(A, osz), osz);
+  return ReadMemoryWord(GetModrmRegisterWordPointerRead(A, osz), osz);
 }
 
 void OpCallEq(P) {
+  if (IsMakingPath(m) && HasLinearMapping(m) && !Osz(rde)) {
+    Jitter(A,
+           "z3B"    // res0 = GetRegOrMem[force64bit](RexbRm)
+           "s0a1="  // arg1 = machine
+           "t"      // arg0 = res0
+           "m",     // call micro-op (FastCallAbs)
+           FastCallAbs);
+  }
   OpCall(A, LoadAddressFromMemory(A));
 }
 
 void OpJmpEq(P) {
+  if (IsMakingPath(m) && HasLinearMapping(m) && !Osz(rde)) {
+    Jitter(A,
+           "z3B"    // res0 = GetRegOrMem[force64bit](RexbRm)
+           "s0a1="  // arg1 = machine
+           "t"      // arg0 = res0
+           "m",     // call micro-op (FastJmpAbs)
+           FastJmpAbs);
+  }
   m->ip = LoadAddressFromMemory(A);
 }
 
@@ -174,6 +206,9 @@ void OpLeave(P) {
     case XED_MODE_LONG:
       Put64(m->sp, Get64(m->bp));
       Put64(m->bp, Pop(A, 0));
+      if (HasLinearMapping(m)) {
+        Jitter(A, "m", FastLeave);
+      }
       break;
     case XED_MODE_LEGACY:
       Put64(m->sp, Get32(m->bp));

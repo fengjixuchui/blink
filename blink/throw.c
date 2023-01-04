@@ -22,20 +22,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "blink/address.h"
 #include "blink/assert.h"
 #include "blink/debug.h"
 #include "blink/endian.h"
 #include "blink/linux.h"
 #include "blink/log.h"
-#include "blink/path.h"
 #include "blink/signal.h"
 
 void RestoreIp(struct Machine *m) {
-  if (m->oldip != -1) {
-    m->ip = m->oldip;
-    m->oldip = -1;
-  }
+  m->ip -= m->oplen;
+  m->oplen = 0;
 }
 
 void DeliverSignalToUser(struct Machine *m, int sig) {

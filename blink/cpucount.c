@@ -18,6 +18,7 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <stdatomic.h>
 #include <sys/types.h>
+#include <unistd.h>
 #ifdef __linux
 #include <sched.h>
 #elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__APPLE__)
@@ -45,6 +46,8 @@ static int GetCpuCountImpl(void) {
   int mib[] = {CTL_HW, HW_NCPU};
   if (sysctl(mib, ARRAYLEN(mib), &x, &n, 0, 0) == -1) return -1;
   return x;
+#elif defined(_SC_NPROCESSORS_ONLN)
+  return sysconf(_SC_NPROCESSORS_ONLN);
 #else
   return 1;
 #endif /* HAVE_SYSCTL */

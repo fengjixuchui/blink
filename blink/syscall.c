@@ -41,6 +41,7 @@
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
+#include <sys/times.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -48,6 +49,7 @@
 
 #include "blink/assert.h"
 #include "blink/macros.h"
+#include "blink/mop.h"
 #include "blink/util.h"
 
 #ifdef __linux
@@ -265,16 +267,15 @@ static int SysFork(struct Machine *m) {
   int pid, newpid;
   LOCK(&m->system->sig_lock);
   LOCK(&m->system->mmap_lock);
-  LOCK(&m->system->lock_lock);
   LOCK(&m->system->futex_lock);
   LOCK(&m->system->machines_lock);
   pid = fork();
   UNLOCK(&m->system->machines_lock);
   UNLOCK(&m->system->futex_lock);
-  UNLOCK(&m->system->lock_lock);
   UNLOCK(&m->system->mmap_lock);
   UNLOCK(&m->system->sig_lock);
   if (!pid) {
+    InitBus();  // TODO(jart): use shared memory for g_bus
     newpid = getpid();
     THR_LOGF("pid=%d tid=%d SysFork -> pid=%d tid=%d",  //
              m->system->pid, m->tid, newpid, newpid);
@@ -306,7 +307,9 @@ static void *OnSpawn(void *arg) {
 
 static int SysSpawn(struct Machine *m, u64 flags, u64 stack, u64 ptid, u64 ctid,
                     u64 tls, u64 func) {
-  int tid, err;
+  int tid;
+  int err;
+  int ignored;
   int supported;
   int mandatory;
   sigset_t ss, oldss;
@@ -321,8 +324,10 @@ static int SysSpawn(struct Machine *m, u64 flags, u64 stack, u64 ptid, u64 ctid,
               CLONE_CHILD_SETTID_LINUX | CLONE_SYSVSEM_LINUX;
   mandatory = CLONE_THREAD_LINUX | CLONE_VM_LINUX | CLONE_FS_LINUX |
               CLONE_FILES_LINUX | CLONE_SIGHAND_LINUX;
+  ignored = CLONE_DETACHED_LINUX;
+  flags &= ~ignored;
   if (flags & ~supported) {
-    LOGF("unsupported clone() flags: %#x", flags);
+    LOGF("unsupported clone() flags: %#x", flags & ~supported);
     return einval();
   }
   if ((flags & mandatory) != mandatory) {
@@ -451,6 +456,14 @@ static int SysFutexWait(struct Machine *m,  //
   do {
     if (CheckInterrupt(m)) {
       rc = EINTR;
+      break;
+    }
+    if (!(mem = GetAddress(m, uaddr))) {
+      rc = EFAULT;
+      break;
+    }
+    if (Load32(mem) != expect) {
+      rc = 0;
       break;
     }
     tick = AddTime(tick, FromMilliseconds(kPollingMs));
@@ -774,13 +787,20 @@ void DropFd(struct Machine *m, struct Fd *fd) {
 static int SysUname(struct Machine *m, i64 utsaddr) {
   struct utsname_linux uts = {
       .sysname = "blink",
-      .nodename = "blink.local",
       .release = "4.0",        // or glibc whines
       .version = "blink 4.0",  // or glibc whines
       .machine = "x86_64",
   };
-  strcpy(uts.sysname, "unknown");
-  strcpy(uts.sysname, "unknown");
+  union {
+    char host[sizeof(uts.nodename)];
+    char domain[sizeof(uts.domainname)];
+  } u;
+  memset(u.host, 0, sizeof(u.host));
+  gethostname(u.host, sizeof(u.host) - 1);
+  strcpy(uts.nodename, u.host);
+  memset(u.domain, 0, sizeof(u.domain));
+  getdomainname(u.domain, sizeof(u.domain) - 1);
+  strcpy(uts.domainname, u.domain);
   CopyToUser(m, utsaddr, &uts, sizeof(uts));
   return 0;
 }
@@ -1064,6 +1084,35 @@ static int SysSetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
   return rc;
 }
 
+static int SysGetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
+                         i64 optvaladdr, i64 optvalsizeaddr) {
+  int rc;
+  void *optval;
+  struct Fd *fd;
+  socklen_t optvalsize;
+  u8 optvalsize_linux[4];
+  int syslevel, sysoptname;
+  if ((syslevel = XlatSocketLevel(level)) == -1) return -1;
+  if ((sysoptname = XlatSocketOptname(level, optname)) == -1) return -1;
+  CopyFromUserRead(m, optvalsize_linux, optvalsizeaddr,
+                   sizeof(optvalsize_linux));
+  optvalsize = Read32(optvalsize_linux);
+  if (optvalsize > 256) return einval();
+  if (!(optval = calloc(1, optvalsize))) return -1;
+  if (!(fd = GetAndLockFd(m, fildes))) {
+    free(optval);
+    return -1;
+  }
+  rc = getsockopt(fd->systemfd, syslevel, sysoptname, optval, &optvalsize);
+  Write32(optvalsize_linux, optvalsize);
+  CopyToUserWrite(m, optvaladdr, optval, optvalsize);
+  CopyToUserWrite(m, optvalsizeaddr, optvalsize_linux,
+                  sizeof(optvalsize_linux));
+  UnlockFd(fd);
+  free(optval);
+  return rc;
+}
+
 static i64 SysReadImpl(struct Machine *m, struct Fd *fd, i64 addr, u64 size) {
   i64 rc;
   struct Iovs iv;
@@ -1337,6 +1386,25 @@ static int IoctlSiocgifconf(struct Machine *m, int systemfd, i64 ifconf_addr) {
   return 0;
 }
 
+static int IoctlSiocgifaddr(struct Machine *m, int systemfd, i64 ifreq_addr,
+                            int kind) {
+  struct ifreq ifreq;
+  struct ifreq_linux ifreq_linux;
+  CopyFromUserRead(m, &ifreq_linux, ifreq_addr, sizeof(ifreq_linux));
+  memset(ifreq.ifr_name, 0, sizeof(ifreq.ifr_name));
+  memcpy(ifreq.ifr_name, ifreq_linux.name,
+         MIN(sizeof(ifreq_linux.name) - 1, sizeof(ifreq.ifr_name)));
+  if (Read16(ifreq_linux.addr.sin_family) != AF_INET_LINUX) return einval();
+  XlatSockaddrToHost((struct sockaddr_in *)&ifreq.ifr_addr, &ifreq_linux.addr);
+  if (ioctl(systemfd, kind, &ifreq)) return -1;
+  memset(ifreq_linux.name, 0, sizeof(ifreq_linux.name));
+  memcpy(ifreq_linux.name, ifreq.ifr_name,
+         MIN(sizeof(ifreq_linux.name) - 1, sizeof(ifreq.ifr_name)));
+  XlatSockaddrToLinux(&ifreq_linux.addr, (struct sockaddr_in *)&ifreq.ifr_addr);
+  CopyToUserWrite(m, ifreq_addr, &ifreq_linux, sizeof(ifreq_linux));
+  return 0;
+}
+
 static int SysIoctl(struct Machine *m, int fildes, u64 request, i64 addr) {
   struct Fd *fd;
   int rc, systemfd;
@@ -1363,6 +1431,18 @@ static int SysIoctl(struct Machine *m, int fildes, u64 request, i64 addr) {
       break;
     case SIOCGIFCONF_LINUX:
       rc = IoctlSiocgifconf(m, systemfd, addr);
+      break;
+    case SIOCGIFADDR_LINUX:
+      rc = IoctlSiocgifaddr(m, systemfd, addr, SIOCGIFADDR);
+      break;
+    case SIOCGIFNETMASK_LINUX:
+      rc = IoctlSiocgifaddr(m, systemfd, addr, SIOCGIFNETMASK);
+      break;
+    case SIOCGIFBRDADDR_LINUX:
+      rc = IoctlSiocgifaddr(m, systemfd, addr, SIOCGIFBRDADDR);
+      break;
+    case SIOCGIFDSTADDR_LINUX:
+      rc = IoctlSiocgifaddr(m, systemfd, addr, SIOCGIFDSTADDR);
       break;
     default:
       LOGF("missing ioctl %#" PRIx64, request);
@@ -1627,6 +1707,28 @@ static int SysMknod(struct Machine *m, i64 path, i32 mode, u64 dev) {
   return mknod(LoadStr(m, path), mode, dev);
 }
 
+static int XlatPrio(int x) {
+  switch (x) {
+    XLAT(0, PRIO_PROCESS);
+    XLAT(1, PRIO_PGRP);
+    XLAT(2, PRIO_USER);
+    default:
+      return -1;
+  }
+}
+
+static int SysGetpriority(struct Machine *m, i32 which, u32 who) {
+  int rc;
+  errno = 0;
+  rc = getpriority(XlatPrio(which), who);
+  if (rc == -1 && errno) return -1;
+  return MAX(-20, MIN(19, rc)) + 20;
+}
+
+static int SysSetpriority(struct Machine *m, i32 which, u32 who, int prio) {
+  return setpriority(XlatPrio(which), who, prio);
+}
+
 static int SysUnlinkat(struct Machine *m, i32 dirfd, i64 path, i32 flags) {
   return unlinkat(GetDirFildes(m, dirfd), LoadStr(m, path), XlatAtf(flags));
 }
@@ -1641,9 +1743,9 @@ static int SysExecve(struct Machine *m, i64 pa, i64 aa, i64 ea) {
   char *prog, **argv, **envp;
   // TODO(jart): do native exec with fd->fildes mapped to fd->systemfd
   if (m->system->exec) {
-    prog = LoadStr(m, pa);
-    argv = LoadStrList(m, aa);
-    envp = LoadStrList(m, ea);
+    prog = CopyStr(m, pa);
+    argv = CopyStrList(m, aa);
+    envp = CopyStrList(m, ea);
     SysCloseExec(m->system);
     _Exit(m->system->exec(prog, argv, envp));
   } else {
@@ -1694,11 +1796,13 @@ static int SysGetrlimit(struct Machine *m, i32 resource, i64 rlimitaddr) {
 }
 
 static int SysSetrlimit(struct Machine *m, i32 resource, i64 rlimitaddr) {
+  int sysresource;
   struct rlimit rlim;
   struct rlimit_linux lux;
+  if ((sysresource = XlatResource(resource)) == -1) return -1;
   CopyFromUserRead(m, &lux, rlimitaddr, sizeof(lux));
-  XlatRlimitToLinux(&lux, &rlim);
-  return setrlimit(XlatResource(resource), &rlim);
+  XlatLinuxToRlimit(sysresource, &rlim, &lux);
+  return setrlimit(sysresource, &rlim);
 }
 
 static int SysPrlimit(struct Machine *m, i32 pid, i32 resource,
@@ -2024,6 +2128,20 @@ static int SysGettimeofday(struct Machine *m, i64 tv, i64 tz) {
   return rc;
 }
 
+static i64 SysTimes(struct Machine *m, i64 bufaddr) {
+  // no conversion needed thanks to getauxval(AT_CLKTCK)
+  clock_t res;
+  struct tms tms;
+  struct tms_linux gtms;
+  if ((res = times(&tms)) == (clock_t)-1) return -1;
+  Write64(gtms.tms_utime, tms.tms_utime);
+  Write64(gtms.tms_stime, tms.tms_stime);
+  Write64(gtms.tms_cutime, tms.tms_cutime);
+  Write64(gtms.tms_cstime, tms.tms_cstime);
+  CopyToUserWrite(m, bufaddr, &gtms, sizeof(gtms));
+  return res;
+}
+
 static int SysUtimes(struct Machine *m, i64 pathaddr, i64 tvsaddr) {
   const char *path;
   struct timeval tvs[2];
@@ -2214,6 +2332,10 @@ static int SysSetsid(struct Machine *m) {
   return setsid();
 }
 
+static i32 SysGetsid(struct Machine *m, i32 pid) {
+  return getsid(pid);
+}
+
 static int SysGetpid(struct Machine *m) {
   return m->system->pid;
 }
@@ -2260,6 +2382,10 @@ static int SysSetgid(struct Machine *m, int gid) {
 
 static int SysGetpgid(struct Machine *m, int pid) {
   return getpgid(pid);
+}
+
+static int SysGetpgrp(struct Machine *m) {
+  return getpgid(0);
 }
 
 static int SysAlarm(struct Machine *m, unsigned seconds) {
@@ -2385,6 +2511,7 @@ void OpSyscall(P) {
     SYSCALL(0x033, SysGetsockname, (m, di, si, dx));
     SYSCALL(0x034, SysGetpeername, (m, di, si, dx));
     SYSCALL(0x036, SysSetsockopt, (m, di, si, dx, r0, r8));
+    SYSCALL(0x037, SysGetsockopt, (m, di, si, dx, r0, r8));
     SYSCALL(0x038, SysClone, (m, di, si, dx, r0, r8, r9));
     SYSCALL(0x039, SysFork, (m));
     SYSCALL(0x03A, SysVfork, (m));
@@ -2415,7 +2542,10 @@ void OpSyscall(P) {
     SYSCALL(0x061, SysGetrlimit, (m, di, si));
     SYSCALL(0x062, SysGetrusage, (m, di, si));
     SYSCALL(0x063, SysSysinfo, (m, di));
+    SYSCALL(0x064, SysTimes, (m, di));
+    SYSCALL(0x06F, SysGetpgrp, (m));
     SYSCALL(0x070, SysSetsid, (m));
+    SYSCALL(0x07C, SysGetsid, (m, di));
     SYSCALL(0x079, SysGetpgid, (m, di));
     SYSCALL(0x06D, SysSetpgid, (m, di, si));
     SYSCALL(0x066, SysGetuid, (m));
@@ -2428,6 +2558,8 @@ void OpSyscall(P) {
     SYSCALL(0x082, SysSigsuspend, (m, di, si));
     SYSCALL(0x083, SysSigaltstack, (m, di, si));
     SYSCALL(0x085, SysMknod, (m, di, si, dx));
+    SYSCALL(0x08C, SysGetpriority, (m, di, si));
+    SYSCALL(0x08D, SysSetpriority, (m, di, si, dx));
     SYSCALL(0x08E, SysSchedSetparam, (m, di, si));
     SYSCALL(0x08F, SysSchedGetparam, (m, di, si));
     SYSCALL(0x090, SysSchedSetscheduler, (m, di, si, dx));

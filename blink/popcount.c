@@ -16,9 +16,9 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
-#include "blink/util.h"
+#include "blink/bitscan.h"
 
-int popcount(u64 x) {
+int(popcount)(u64 x) {
   x = x - ((x >> 1) & 0x5555555555555555);
   x = ((x >> 2) & 0x3333333333333333) + (x & 0x3333333333333333);
   x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0f;

@@ -23,6 +23,7 @@
 #include "blink/assert.h"
 #include "blink/endian.h"
 #include "blink/flags.h"
+#include "blink/lock.h"
 #include "blink/modrm.h"
 #include "blink/mop.h"
 #include "blink/stats.h"
@@ -68,7 +69,7 @@ static void AluEvqp(P, const aluop_f ops[4]) {
   f = ops[RegLog2(rde)];
   if (Rexw(rde)) {
     p = GetModrmRegisterWordPointerWrite8(A);
-#if LONG_BIT == 64
+#if LONG_BIT >= 64
     if (Lock(rde) && !((intptr_t)p & 7)) {
       u64 x, z;
       x = atomic_load_explicit((_Atomic(u64) *)p, memory_order_acquire);
@@ -80,7 +81,13 @@ static void AluEvqp(P, const aluop_f ops[4]) {
       return;
     }
 #endif
-    Store64(p, f(m, Load64(p), 0));
+    if (!Lock(rde)) {
+      Store64(p, f(m, Load64(p), 0));
+    } else {
+      LockBus(p);
+      Store64Unlocked(p, f(m, Load64Unlocked(p), 0));
+      UnlockBus(p);
+    }
   } else if (!Osz(rde)) {
     u32 x, z;
     p = GetModrmRegisterWordPointerWrite4(A);
@@ -92,7 +99,9 @@ static void AluEvqp(P, const aluop_f ops[4]) {
                                                       memory_order_release,
                                                       memory_order_relaxed));
     } else {
+      if (Lock(rde)) LockBus(p);
       Store32(p, f(m, Load32(p), 0));
+      if (Lock(rde)) UnlockBus(p);
     }
     if (IsModrmRegister(rde)) {
       Put32(p + 4, 0);
@@ -108,11 +117,19 @@ static void AluEvqp(P, const aluop_f ops[4]) {
                                                       memory_order_release,
                                                       memory_order_relaxed));
     } else {
+      if (Lock(rde)) LockBus(p);
       Store16(p, f(m, Load16(p), 0));
+      if (Lock(rde)) UnlockBus(p);
     }
   }
   if (IsMakingPath(m) && !Lock(rde)) {
-    Jitter(A, "B r0a1= s0a0= c r0 D", f);
+    Jitter(A,
+           "B"      // res0 = GetRegOrMem(RexbRm)
+           "r0a1="  // arg1 = res0
+           "q"      // arg0 = machine
+           "c"      // call function
+           "r0D",   // PutRegOrMem(RexbRm, res0)
+           f);
   }
 }
 
