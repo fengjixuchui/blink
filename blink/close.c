@@ -29,6 +29,7 @@
 #include "blink/fds.h"
 #include "blink/log.h"
 #include "blink/machine.h"
+#include "blink/syscall.h"
 
 static int CloseFd(struct System *s, struct Fd *fd) {
   int sf, rc;
@@ -37,7 +38,7 @@ static int CloseFd(struct System *s, struct Fd *fd) {
     if (fd->dirstream) {
       rc = closedir(fd->dirstream);
     } else {
-      rc = IB(fd->cb->close)(sf);
+      rc = fd->cb->close(sf);
     }
     // EINTR shouldn't be possible since we don't support SO_LINGER
     unassert(!(rc == -1 && errno == EINTR));

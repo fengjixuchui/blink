@@ -2,7 +2,7 @@
 #───vi: set et ft=make ts=8 tw=8 fenc=utf-8 :vi───────────────────────┘
 
 third_party/gcc/%.xz: third_party/gcc/%.xz.sha256 o/tool/sha256sum
-	curl -so $@ https://justine.lol/compilers/$(notdir $@)
+	curl -so $@ https://justine.storage.googleapis.com/compilers/$(notdir $@)
 	o/tool/sha256sum $<
 
 o/$(MODE)/i486/%.o: %.c o/third_party/gcc/i486/bin/i486-linux-musl-gcc $(VM)
@@ -39,11 +39,11 @@ o/$(MODE)/x86_64-gcc49/%.o: %.c o/third_party/gcc/x86_64-gcc49/bin/x86_64-linux-
 
 o/$(MODE)/m68k/%.o: %.c o/third_party/gcc/m68k/bin/m68k-linux-musl-gcc $(VM)
 	@mkdir -p $(@D)
-	$(VM) o/third_party/gcc/m68k/bin/m68k-linux-musl-gcc -static -Werror $(CFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@ $<
+	$(VM) o/third_party/gcc/m68k/bin/m68k-linux-musl-gcc -static -Werror $(filter-out -mtune=generic,$(CFLAGS)) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@ $<
 
 o/$(MODE)/arm/%.o: %.c o/third_party/gcc/arm/bin/arm-linux-musleabi-gcc $(VM)
 	@mkdir -p $(@D)
-	$(VM) o/third_party/gcc/arm/bin/arm-linux-musleabi-gcc -static -Werror $(CFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@ $<
+	$(VM) o/third_party/gcc/arm/bin/arm-linux-musleabi-gcc -static -Werror $(filter-out -mtune=generic,$(CFLAGS)) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@ $<
 
 o/$(MODE)/aarch64/%.o: %.c o/third_party/gcc/aarch64/bin/aarch64-linux-musl-gcc $(VM)
 	@mkdir -p $(@D)
@@ -51,7 +51,7 @@ o/$(MODE)/aarch64/%.o: %.c o/third_party/gcc/aarch64/bin/aarch64-linux-musl-gcc 
 
 o/$(MODE)/riscv64/%.o: %.c o/third_party/gcc/riscv64/bin/riscv64-linux-musl-gcc $(VM)
 	@mkdir -p $(@D)
-	$(VM) o/third_party/gcc/riscv64/bin/riscv64-linux-musl-gcc -static -Werror $(CFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@ $<
+	$(VM) o/third_party/gcc/riscv64/bin/riscv64-linux-musl-gcc -static -Werror $(filter-out -mtune=generic,$(CFLAGS)) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@ $<
 
 o/$(MODE)/mips/%.o: %.c o/third_party/gcc/mips/bin/mips-linux-musl-gcc $(VM)
 	@mkdir -p $(@D)
@@ -63,11 +63,11 @@ o/$(MODE)/mipsel/%.o: %.c o/third_party/gcc/mipsel/bin/mipsel-linux-musl-gcc $(V
 
 o/$(MODE)/mips64/%.o: %.c o/third_party/gcc/mips64/bin/mips64-linux-musl-gcc $(VM)
 	@mkdir -p $(@D)
-	$(VM) o/third_party/gcc/mips64/bin/mips64-linux-musl-gcc -static -Werror $(CFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@ $<
+	$(VM) o/third_party/gcc/mips64/bin/mips64-linux-musl-gcc -static -Werror $(filter-out -mtune=generic,$(CFLAGS)) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@ $<
 
 o/$(MODE)/mips64el/%.o: %.c o/third_party/gcc/mips64el/bin/mips64el-linux-musl-gcc $(VM)
 	@mkdir -p $(@D)
-	$(VM) o/third_party/gcc/mips64el/bin/mips64el-linux-musl-gcc -static -Werror $(CFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@ $<
+	$(VM) o/third_party/gcc/mips64el/bin/mips64el-linux-musl-gcc -static -Werror $(filter-out -mtune=generic,$(CFLAGS)) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@ $<
 
 o/$(MODE)/s390x/%.o: %.c o/third_party/gcc/s390x/bin/s390x-linux-musl-gcc $(VM)
 	@mkdir -p $(@D)

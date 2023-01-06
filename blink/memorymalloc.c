@@ -64,6 +64,10 @@ void FreeBig(void *p, size_t n) {
 
 void *AllocateBig(size_t n) {
   void *p;
+#if defined(__EMSCRIPTEN__)
+  p = Mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, "big");
+  return p != MAP_FAILED ? p : 0;
+#else
   u8 *brk;
   if (!(brk = atomic_load_explicit(&g_allocator.brk, memory_order_relaxed))) {
     // we're going to politely ask the kernel for addresses starting
@@ -86,8 +90,8 @@ void *AllocateBig(size_t n) {
     p = Mmap(brk, n, PROT_READ | PROT_WRITE,
              MAP_DEMAND | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, "big");
   } while (p == MAP_FAILED && errno == MAP_DENIED);
-  unassert(p == MAP_FAILED || (uintptr_t)p < 0x800000000000);
   return p != MAP_FAILED ? p : 0;
+#endif
 }
 
 static void FreeHostPages(struct System *s) {

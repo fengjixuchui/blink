@@ -44,6 +44,7 @@
 #include "blink/debug.h"
 #include "blink/dis.h"
 #include "blink/endian.h"
+#include "blink/errno.h"
 #include "blink/fds.h"
 #include "blink/flags.h"
 #include "blink/fpu.h"
@@ -70,6 +71,7 @@
 #include "blink/types.h"
 #include "blink/util.h"
 #include "blink/watch.h"
+#include "blink/web.h"
 #include "blink/xlat.h"
 #include "blink/xmmtype.h"
 
@@ -125,6 +127,7 @@ x       hex                       -v       increase verbosity\n\
 t       sse type                  -m       disables memory safety\n\
 w       sse width                 -N       natural scroll wheel\n\
 B       pop breakpoint            -?       help\n\
+p       profiling mode\n\
 ctrl-t  turbo\n\
 alt-t   slowmo"
 
@@ -257,6 +260,17 @@ struct History {
   struct Rendering p[HISTORY];
 };
 
+struct ProfSym {
+  int sym;  // dis->syms.p[sym]
+  unsigned long hits;
+};
+
+struct ProfSyms {
+  int i, n;
+  unsigned long toto;
+  struct ProfSym *p;
+};
+
 static const char kRipName[3][4] = {"IP", "EIP", "RIP"};
 
 static const char kRegisterNames[3][16][4] = {
@@ -275,6 +289,7 @@ static bool alarmed;
 static bool natural;
 static bool mousemode;
 static bool showhighsse;
+static bool showprofile;
 static bool readingteletype;
 
 static int tyn;
@@ -309,6 +324,8 @@ static jmp_buf *onbusted;
 static const char *dialog;
 static char *statusmessage;
 static i64 breakpointsstart;
+static unsigned long *ophits;
+static struct ProfSyms profsyms;
 
 static struct Panels pan;
 static struct Keystrokes keystrokes;
@@ -330,8 +347,8 @@ static char systemfailure[128];
 static struct sigaction oldsig[4];
 struct History g_history;
 
+static void Redraw(bool);
 static void SetupDraw(void);
-static void Redraw(void);
 static void HandleKeyboard(const char *);
 
 const char kXedErrorNames[] = "\
@@ -479,6 +496,72 @@ static i64 ReadWord(u8 *p) {
       return Read32(p);
     case 2:
       return Read16(p);
+  }
+}
+
+static void AppendPanel(struct Panel *p, i64 line, const char *s) {
+  if (0 <= line && line < p->bottom - p->top) {
+    AppendStr(&p->lines[line], s);
+  }
+}
+
+static int CompareProfSyms(const void *p, const void *q) {
+  const struct ProfSym *a = (const struct ProfSym *)p;
+  const struct ProfSym *b = (const struct ProfSym *)q;
+  if (a->hits > b->hits) return -1;
+  if (a->hits < b->hits) return +1;
+  return 0;
+}
+
+static void SortProfSyms(void) {
+  qsort(profsyms.p, profsyms.i, sizeof(*profsyms.p), CompareProfSyms);
+}
+
+static int AddProfSym(int sym, unsigned long hits) {
+  if (!hits) return -1;
+  if (profsyms.i == profsyms.n) {
+    profsyms.p = (struct ProfSym *)realloc(profsyms.p,
+                                           ++profsyms.n * sizeof(*profsyms.p));
+  }
+  profsyms.p[profsyms.i].sym = sym;
+  profsyms.p[profsyms.i].hits = hits;
+  return profsyms.i++;
+}
+
+static unsigned long TallyHits(i64 addr, int size) {
+  i64 pc;
+  unsigned long hits;
+  for (hits = 0, pc = addr; pc < addr + size; ++pc) {
+    hits += ophits[pc - m->system->codestart];
+  }
+  return hits;
+}
+
+static void GenerateProfile(void) {
+  int sym;
+  profsyms.i = 0;
+  profsyms.toto = TallyHits(m->system->codestart, m->system->codesize);
+  if (!ophits) return;
+  for (sym = 0; sym < dis->syms.i; ++sym) {
+    if (dis->syms.p[sym].addr >= m->system->codestart &&
+        dis->syms.p[sym].addr + dis->syms.p[sym].size <
+            m->system->codestart + m->system->codesize) {
+      AddProfSym(sym, TallyHits(dis->syms.p[sym].addr, dis->syms.p[sym].size));
+    }
+  }
+  SortProfSyms();
+  profsyms.i = MIN(50, profsyms.i);
+}
+
+static void DrawProfile(struct Panel *p) {
+  int i;
+  char line[256];
+  GenerateProfile();
+  for (i = 0; i < profsyms.i; ++i) {
+    snprintf(line, sizeof(line), "%7.3f%% %s",
+             (double)profsyms.p[i].hits / profsyms.toto * 100,
+             dis->syms.stab + dis->syms.p[profsyms.p[i].sym].name);
+    AppendPanel(p, i - framesstart, line);
   }
 }
 
@@ -679,7 +762,7 @@ static void OnSigAlrm(int sig, siginfo_t *si, void *uc) {
 static void OnSigCont(int sig, siginfo_t *si, void *uc) {
   if (tuimode) {
     TuiRejuvinate();
-    Redraw();
+    Redraw(true);
   }
   EnqueueSignal(m, SIGCONT);
 }
@@ -841,12 +924,6 @@ static void ExecSetup(void) {
   it.it_value.tv_sec = 0;
   it.it_value.tv_usec = 1. / FPS * 1e6;
   setitimer(ITIMER_REAL, &it, 0);
-}
-
-static void AppendPanel(struct Panel *p, i64 line, const char *s) {
-  if (0 <= line && line < p->bottom - p->top) {
-    AppendStr(&p->lines[line], s);
-  }
 }
 
 static void pcmpeqb(u8 x[16], const u8 y[16]) {
@@ -1147,7 +1224,8 @@ static i64 Disassemble(void) {
 
 static i64 GetDisIndex(void) {
   i64 i;
-  if ((i = DisFind(dis, GetPc(m))) != -1 || (i = Disassemble()) != -1) {
+  if ((i = DisFind(dis, GetPc(m) - m->oplen)) != -1 ||
+      (i = Disassemble()) != -1) {
     while (i + 1 < dis->ops.i) {
       if (!dis->ops.p[i].size) {
         ++i;
@@ -1338,7 +1416,7 @@ static void DrawCpu(struct Panel *p) {
 static void DrawXmm(struct Panel *p, i64 i, i64 r) {
   float f;
   double d;
-  wint_t ival;
+  wchar_t ival;
   char buf[32];
   bool changed;
   u64 itmp;
@@ -1494,19 +1572,19 @@ static void DrawMemoryZoomed(struct Panel *p, struct MemoryView *view,
                  (histart && hiend && histart >= a && hiend < b));
       if (changed && !high) {
         high = true;
-        AppendStr(&p->lines[i], "\e[7m");
+        AppendStr(&p->lines[i], "\033[7m");
       } else if (!changed && high) {
-        AppendStr(&p->lines[i], "\e[27m");
+        AppendStr(&p->lines[i], "\033[27m");
         high = false;
       }
       if (invalid[c]) {
-        AppendWide(&p->lines[i], u'⋅');
+        AppendWide(&p->lines[i], L'⋅');
       } else {
         AppendWide(&p->lines[i], kCp437[canvas[c]]);
       }
     }
     if (high) {
-      AppendStr(&p->lines[i], "\e[27m");
+      AppendStr(&p->lines[i], "\033[27m");
       high = false;
     }
   }
@@ -1922,7 +2000,7 @@ static void ShowHistory(void) {
   free(ansi);
 }
 
-static void Redraw(void) {
+static void Redraw(bool force) {
   int i, j;
   char *ansi;
   size_t size;
@@ -1957,14 +2035,24 @@ static void Redraw(void) {
   DrawSse(&pan.sse);
   DrawHr(&pan.breakpointshr, "BREAKPOINTS");
   DrawHr(&pan.mapshr, "PML4T");
-  DrawHr(&pan.frameshr, m->bofram[0] ? "PROTECTED FRAMES" : "FRAMES");
+  if (showprofile) {
+    DrawHr(&pan.frameshr, "PROFILE");
+  } else if (m->bofram[0]) {
+    DrawHr(&pan.frameshr, "PROTECTED FRAMES");
+  } else {
+    DrawHr(&pan.frameshr, "FRAMES");
+  }
   DrawHr(&pan.ssehr, "SSE");
   DrawHr(&pan.codehr, "CODE");
   DrawHr(&pan.readhr, "READ");
   DrawHr(&pan.writehr, "WRITE");
   DrawHr(&pan.stackhr, "STACK");
   DrawMaps(&pan.maps);
-  DrawFrames(&pan.frames);
+  if (showprofile) {
+    DrawProfile(&pan.frames);
+  } else {
+    DrawFrames(&pan.frames);
+  }
   DrawBreakpoints(&pan.breakpoints);
   DrawMemory(&pan.code, &codeview, GetPc(m), GetPc(m) + m->xedd->length);
   DrawMemory(&pan.readdata, &readview, readaddr, readaddr + readsize);
@@ -1976,7 +2064,7 @@ static void Redraw(void) {
   (void)end_draw;
   STATISTIC(AVERAGE(redraw_latency_us,
                     ToMicroseconds(SubtractTime(end_draw, start_draw))));
-  if (PreventBufferbloat()) {
+  if (force || PreventBufferbloat()) {
     unassert(UninterruptibleWrite(ttyout, ansi, size) != -1);
   }
   AddHistory(ansi, size);
@@ -1987,7 +2075,8 @@ static void Redraw(void) {
 
 static void ReactiveDraw(void) {
   if (tuimode) {
-    Redraw();
+    LOGF("%" PRIx64 " %s ReactiveDraw", GetPc(m), tuimode ? "TUI" : "EXEC");
+    Redraw(true);
     tick = speed;
   }
 }
@@ -1996,7 +2085,7 @@ static void DescribeKeystroke(char *b, const char *p) {
   int c;
   do {
     c = *p++ & 255;
-    if (c == '\e') {
+    if (c == '\033') {
       b = stpcpy(b, "ALT-");
       c = *p++ & 255;
     }
@@ -2098,15 +2187,15 @@ static struct Mouse ParseMouse(char *p) {
 
 static ssize_t ReadAnsi(int fd, char *p, size_t n) {
   ssize_t rc;
-  struct Mouse m;
-  LOGF("ReadAnsi");
+  struct Mouse mo;
   for (;;) {
+    LOGF("%" PRIx64 " %s ReadAnsi", GetPc(m), tuimode ? "TUI" : "EXEC");
     readingteletype = true;
     ReactiveDraw();
     rc = readansi(fd, p, n);
     readingteletype = false;
     if (rc != -1) {
-      if (tuimode && rc > 3 && p[0] == '\e' && p[1] == '[') {
+      if (tuimode && rc > 3 && p[0] == '\033' && p[1] == '[') {
         if (p[2] == '2' && p[3] == '0' && p[4] == '0' && p[5] == '~') {
           belay = true;
           continue;
@@ -2116,8 +2205,8 @@ static ssize_t ReadAnsi(int fd, char *p, size_t n) {
           continue;
         }
         if (p[2] == '<') {
-          m = ParseMouse(p + 3);
-          if (LocatePanel(m.y, m.x) != &pan.display) {
+          mo = ParseMouse(p + 3);
+          if (LocatePanel(mo.y, mo.x) != &pan.display) {
             HandleKeyboard(p);
             continue;
           }
@@ -2127,6 +2216,7 @@ static ssize_t ReadAnsi(int fd, char *p, size_t n) {
     } else {
       unassert(errno == EINTR);
       HandleAppReadInterrupt();
+      return eintr();
     }
   }
 }
@@ -2223,7 +2313,7 @@ static void DrawDisplayOnly(struct Panel *p) {
   memset(&b, 0, sizeof(b));
   tly = tyn / 2 - yn / 2;
   tlx = txn / 2 - xn / 2;
-  AppendStr(&b, "\e[0m\e[H");
+  AppendStr(&b, "\033[0m\033[H");
   for (y = 0; y < tyn; ++y) {
     if (y) AppendStr(&b, "\r\n");
     if (tly <= y && y <= tly + yn) {
@@ -2232,7 +2322,7 @@ static void DrawDisplayOnly(struct Panel *p) {
       }
       AppendData(&b, p->lines[y - tly].p, p->lines[y - tly].i);
     }
-    AppendStr(&b, "\e[0m\e[K");
+    AppendStr(&b, "\033[0m\033[K");
   }
   write(ttyout, b.p, b.i);
   free(b.p);
@@ -2571,8 +2661,11 @@ static void OnKeyboardServiceReadKeyPress(void) {
   ssize_t rc;
   static char buf[32];
   static size_t pending;
-  tuimode = true;
-  action |= CONTINUE;
+  LOGF("OnKeyboardServiceReadKeyPress");
+  if (!tuimode) {
+    tuimode = true;
+    action |= CONTINUE;
+  }
   pty->conf |= kPtyBlinkcursor;
   if (!pending) {
     rc = ReadAnsi(ttyin, buf, sizeof(buf));
@@ -2658,7 +2751,8 @@ static void OnInt15h(void) {
 }
 
 static bool OnHalt(int interrupt) {
-  LOGF("OnHalt(%d)", interrupt);
+  LOGF("%" PRIx64 " %s OnHalt(%#x)", GetPc(m), tuimode ? "TUI" : "EXEC",
+       interrupt);
   ReactiveDraw();
   switch (interrupt) {
     case 1:
@@ -3011,6 +3105,7 @@ static void HandleKeyboard(const char *k) {
     CASE('u', OnUp());
     CASE('d', OnDown());
     CASE('V', ++verbose);
+    CASE('p', showprofile = !showprofile);
     CASE('B', PopBreakpoint(&breakpoints));
     CASE('M', ToggleMouseTracking());
     CASE('\t', OnTab());
@@ -3063,6 +3158,7 @@ static void HandleKeyboard(const char *k) {
 
 static void ReadKeyboard(void) {
   char buf[64];
+  LOGF("ReadKeyboard");
   memset(buf, 0, sizeof(buf));
   dialog = NULL;
   if (readansi(ttyin, buf, sizeof(buf)) == -1) {
@@ -3143,8 +3239,17 @@ static void EnterWatchpoint(long bp) {
   tuimode = true;
 }
 
+static void ProfileOp(struct Machine *m, u64 pc) {
+  if (ophits &&                      //
+      pc >= m->system->codestart &&  //
+      pc < m->system->codestart + m->system->codesize) {
+    ++ophits[pc - m->system->codestart];
+  }
+}
+
 static void StartOp_Tui(P) {
   ++cycle;
+  ProfileOp(m, m->ip - m->oplen);
 }
 
 static void Execute(void) {
@@ -3156,6 +3261,7 @@ static void Execute(void) {
   ExecuteInstruction(m);
   if (c == cycle) {
     ++cycle;
+    ProfileOp(m, GetPc(m) - m->oplen);
   }
 }
 
@@ -3163,6 +3269,7 @@ static void Exec(void) {
   int sig;
   ssize_t bp;
   int interrupt;
+  LOGF("Exec");
   ExecSetup();
   if (!(interrupt = sigsetjmp(m->onhalt, 1))) {
     m->canhalt = true;
@@ -3246,6 +3353,7 @@ static void Tui(void) {
   ssize_t bp;
   int interrupt;
   bool interactive;
+  LOGF("Tui");
   TuiSetup();
   SetupDraw();
   ScrollOp(&pan.disassembly, GetDisIndex());
@@ -3288,7 +3396,7 @@ static void Tui(void) {
       }
       if (!(action & CONTINUE) || interactive) {
         tick = 0;
-        Redraw();
+        Redraw(false);
         CopyMachineState(&laststate);
       }
       if (dialog) {
@@ -3469,10 +3577,7 @@ static int OpenDevTty(void) {
 }
 
 static void AddPath_StartOp_Tui(P) {
-  Jitter(m, rde, 0, 0,
-         "q"
-         "c",
-         StartOp_Tui);
+  Jitter(m, rde, 0, 0, "qc", StartOp_Tui);
 }
 
 int VirtualMachine(int argc, char *argv[]) {
@@ -3481,6 +3586,10 @@ int VirtualMachine(int argc, char *argv[]) {
   do {
     action = 0;
     LoadProgram(m, codepath, argv + optind_ - 1, environ);
+    if (m->system->codesize) {
+      ophits = (unsigned long *)AllocateBig(m->system->codesize *
+                                            sizeof(unsigned long));
+    }
     ScrollMemoryViews();
     AddStdFd(&m->system->fds, 0);
     AddStdFd(&m->system->fds, 1);
@@ -3552,6 +3661,7 @@ int main(int argc, char *argv[]) {
   int rc;
   struct System *s;
   static struct sigaction sa;
+  SetupWeb();
   g_blink_path = argc > 0 ? argv[0] : 0;
   react = true;
   tuimode = true;
@@ -3588,9 +3698,11 @@ int main(int argc, char *argv[]) {
                           1ull << (SIGWINCH_LINUX - 1);  //
   if (optind_ == argc) PrintUsage(48, stderr);
   rc = VirtualMachine(argc, argv);
+  FreeBig(ophits, m->system->codesize * sizeof(unsigned long));
   FreeMachine(m);
   ClearHistory();
   FreePanels();
+  free(profsyms.p);
   if (FLAG_statistics) {
     PrintStats();
   }

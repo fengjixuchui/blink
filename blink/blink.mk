@@ -9,20 +9,18 @@ BLINK_HDRS = $(filter %.h,$(BLINK_FILES))
 # avoid static memory being placed in micro-operations
 o/$(MODE)/blink/uop.o: private CFLAGS += -fno-stack-protector
 
-# Clang isn't very good at compiling Write64()
-ifeq ($(HOST_ARCH), x86_64)
-o/$(MODE)/blink/uop.o: private CFLAGS += -mno-avx
-endif
-
 # GCC whines if -pg is passed without this flag
 ifneq ($(MODE), prof)
 o/$(MODE)/blink/uop.o: private CFLAGS += -fomit-frame-pointer
 endif
 
-# x86.c doesn't understand VEX encoding right now
-ifeq ($(HOST_ARCH), x86_64)
-o/$(MODE)/blink/uop.o: private TARGET_ARCH = -march=k8
-endif
+# Actually Portable Executable
+# make m=cosmo o/cosmo/blink/blink.com
+# needs cosmopolitan/tool/scripts/cosmocc
+o/cosmo/blink/blink.com: o/$(MODE)/blink/blink
+	objcopy -S -O binary $< $@
+o/cosmo/blink/blinkenlights.com: o/$(MODE)/blink/blinkenlights
+	objcopy -S -O binary $< $@
 
 # vectorization makes code smaller
 o/$(MODE)/blink/sse2.o: private CFLAGS += -O3
@@ -110,7 +108,9 @@ o/$(MODE)/powerpc/blink/blink: o/$(MODE)/powerpc/blink/blink.o o/$(MODE)/powerpc
 o/$(MODE)/powerpc64le/blink/blink: o/$(MODE)/powerpc64le/blink/blink.o o/$(MODE)/powerpc64le/blink/blink.a
 	$(VM) o/third_party/gcc/powerpc64le/bin/powerpc64le-linux-musl-gcc $(LDFLAGS_STATIC) $(LDFLAGS) $(TARGET_ARCH) $^ $(LOADLIBES) $(LDLIBS) -o $@
 
-o/$(MODE)/blink/blinkenlights: o/$(MODE)/blink/blinkenlights.o o/$(MODE)/blink/blink.a o/$(MODE)/third_party/zlib/zlib.a
+o/$(MODE)/blink/blinkenlights.html: o/$(MODE)/blink/blinkenlights.o o/$(MODE)/blink/blink.a $(ZLIB)
+	$(CC) $(LDFLAGS) $(TARGET_ARCH) $^ $(LOADLIBES) $(LDLIBS) -o $@
+o/$(MODE)/blink/blinkenlights: o/$(MODE)/blink/blinkenlights.o o/$(MODE)/blink/blink.a $(ZLIB)
 	$(CC) $(LDFLAGS) $(TARGET_ARCH) $^ $(LOADLIBES) $(LDLIBS) -o $@
 o/$(MODE)/i486/blink/blinkenlights: o/$(MODE)/i486/blink/blinkenlights.o o/$(MODE)/i486/blink/blink.a o/$(MODE)/i486/third_party/zlib/zlib.a
 	$(VM) o/third_party/gcc/i486/bin/i486-linux-musl-gcc $(LDFLAGS_STATIC) $(LDFLAGS) $(TARGET_ARCH) $^ $(LOADLIBES) $(LDLIBS) -o $@

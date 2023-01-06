@@ -16,7 +16,6 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
-#include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +38,7 @@
 #include "blink/stats.h"
 #include "blink/syscall.h"
 #include "blink/util.h"
+#include "blink/web.h"
 #include "blink/xlat.h"
 
 #define OPTS "hjms"
@@ -49,6 +49,7 @@
   -m        enable memory safety\n\
   -s        print statistics on exit\n"
 
+extern char **environ;
 static bool FLAG_nojit;
 static bool FLAG_nolinear;
 
@@ -152,15 +153,17 @@ static void HandleSigs(void) {
 #ifndef __SANITIZE_THREAD__
   sa.sa_sigaction = OnSigSegv;
   sa.sa_flags = SA_SIGINFO;
+  unassert(!sigaction(SIGILL, &sa, 0));
   unassert(!sigaction(SIGSEGV, &sa, 0));
 #endif
 }
 
-int main(int argc, char *argv[], char **envp) {
+int main(int argc, char *argv[]) {
+  SetupWeb();
   g_blink_path = argc > 0 ? argv[0] : 0;
   GetOpts(argc, argv);
   if (optind_ == argc) PrintUsage(argc, argv, 48, 2);
   WriteErrorInit();
   HandleSigs();
-  return Exec(argv[optind_], argv + optind_, envp);
+  return Exec(argv[optind_], argv + optind_, environ);
 }

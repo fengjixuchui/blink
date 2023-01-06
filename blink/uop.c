@@ -229,30 +229,56 @@ const aluop_f kJustAlu[8] = {
     JustSub,  //
 };
 
-MICRO_OP i64 JustRol(struct Machine *m, u64 x, u64 y) {
+MICRO_OP i64 JustRol(u64 x, int ign1, int ign2, u64 y) {
   return x << y | x >> (64 - y);
 }
-MICRO_OP i64 JustRor(struct Machine *m, u64 x, u64 y) {
+MICRO_OP i64 JustRor(u64 x, int ign1, int ign2, u64 y) {
   return x >> y | x << (64 - y);
 }
-MICRO_OP i64 JustShl(struct Machine *m, u64 x, u64 y) {
+MICRO_OP i64 JustShl(u64 x, int ign1, int ign2, u64 y) {
   return x << y;
 }
-MICRO_OP i64 JustShr(struct Machine *m, u64 x, u64 y) {
+MICRO_OP i64 JustShr(u64 x, int ign1, int ign2, u64 y) {
   return x >> y;
 }
-MICRO_OP i64 JustSar(struct Machine *m, u64 x, u64 y) {
+MICRO_OP i64 JustSar(u64 x, int ign1, int ign2, u64 y) {
   return (i64)x >> y;
 }
 const aluop_f kJustBsu[8] = {
-    JustRol,  //
-    JustRor,  //
-    0,        //
-    0,        //
-    JustShl,  //
-    JustShr,  //
-    JustShl,  //
-    JustSar,  //
+    (aluop_f)JustRol,  //
+    (aluop_f)JustRor,  //
+    0,                 //
+    0,                 //
+    (aluop_f)JustShl,  //
+    (aluop_f)JustShr,  //
+    (aluop_f)JustShl,  //
+    (aluop_f)JustSar,  //
+};
+
+MICRO_OP i32 JustRol32(u32 x, int ign1, int ign2, u32 y) {
+  return x << y | x >> (32 - y);
+}
+MICRO_OP i32 JustRor32(u32 x, int ign1, int ign2, u32 y) {
+  return x >> y | x << (32 - y);
+}
+MICRO_OP i32 JustShl32(u32 x, int ign1, int ign2, u32 y) {
+  return x << y;
+}
+MICRO_OP i32 JustShr32(u32 x, int ign1, int ign2, u32 y) {
+  return x >> y;
+}
+MICRO_OP i32 JustSar32(u32 x, int ign1, int ign2, u32 y) {
+  return (i32)x >> y;
+}
+const aluop_f kJustBsu32[8] = {
+    (aluop_f)JustRol32,  //
+    (aluop_f)JustRor32,  //
+    0,                   //
+    0,                   //
+    (aluop_f)JustShl32,  //
+    (aluop_f)JustShr32,  //
+    (aluop_f)JustShl32,  //
+    (aluop_f)JustSar32,  //
 };
 
 MICRO_OP static i64 FastXor64(struct Machine *m, u64 x, u64 y) {
@@ -433,6 +459,48 @@ const aluop_f kAluFast[8][4] = {
     {FastXor8, FastXor16, FastXor32, FastXor64},  //
     {FastSub8, FastSub16, FastSub32, FastSub64},  //
 };
+
+#ifdef HAVE_INT128
+MICRO_OP void Mulx64(u64 x,              //
+                     struct Machine *m,  //
+                     long vreg,          //
+                     long rexrreg) {
+  unsigned __int128 z;
+  z = (unsigned __int128)x * Get64(m->dx);
+  Put64(m->weg[vreg], z);
+  Put64(m->weg[rexrreg], z >> 64);
+}
+#endif
+
+MICRO_OP i64 Adcx32(u64 x, u64 y, struct Machine *m) {
+  u32 t = x + !!(m->flags & CF);
+  u32 z = t + y;
+  int c = (t < x) | (z < y);
+  m->flags = (m->flags & ~CF) | c << FLAGS_CF;
+  return z;
+}
+MICRO_OP i64 Adcx64(u64 x, u64 y, struct Machine *m) {
+  u64 t = x + !!(m->flags & CF);
+  u64 z = t + y;
+  int c = (t < x) | (z < y);
+  m->flags = (m->flags & ~CF) | c << FLAGS_CF;
+  return z;
+}
+
+MICRO_OP i64 Adox32(u64 x, u64 y, struct Machine *m) {
+  u32 t = x + !!(m->flags & OF);
+  u32 z = t + y;
+  int c = (t < x) | (z < y);
+  m->flags = (m->flags & ~OF) | c << FLAGS_OF;
+  return z;
+}
+MICRO_OP i64 Adox64(u64 x, u64 y, struct Machine *m) {
+  u64 t = x + !!(m->flags & OF);
+  u64 z = t + y;
+  int c = (t < x) | (z < y);
+  m->flags = (m->flags & ~OF) | c << FLAGS_OF;
+  return z;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // STACK OPERATIONS
@@ -814,8 +882,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                "q"    // arg0 = machine
                "a1i"  // arg1 = register index
                "m",   // call micro-op
-               log2sz ? RexrReg(rde) : kByteReg[ByteRexr(rde)],
-               kGetReg[log2sz]);
+               log2sz ? RexrReg(rde) : kByteReg[RexRexr(rde)], kGetReg[log2sz]);
         break;
 
       case 'C':  // PutReg(RexrReg, <pop>)
@@ -826,7 +893,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                  "a1i"  // arg1 = register index
                  "q"    // arg0 = machine
                  "m",   // call micro-op
-                 log2sz ? RexrReg(rde) : kByteReg[ByteRexr(rde)],
+                 log2sz ? RexrReg(rde) : kByteReg[RexRexr(rde)],
                  kPutReg[log2sz]);
         } else {
           Jitter(A,
@@ -846,7 +913,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                  "a1i"  // arg1 = register index
                  "q"    // arg0 = machine
                  "m",   // call micro-op
-                 log2sz ? RexbRm(rde) : kByteReg[ByteRexb(rde)],
+                 log2sz ? RexbRm(rde) : kByteReg[RexRexb(rde)],
                  kGetReg[log2sz]);
         } else if (HasLinearMapping(m)) {
           Jitter(A,
@@ -858,14 +925,14 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                  ResolveHost, kLoad[log2sz]);
         } else {
           Jitter(A,
-                 "L"      // load effective address
-                 "a3i"    // arg3 = false
-                 "a2i"    // arg2 = bytes to read
-                 "r0a1="  // arg1 = virtual address
-                 "q"      // arg0 = machine
-                 "c"      // call function (turn virtual into pointer)
-                 "t"      // arg0 = pointer
-                 "m",     // call micro-op (read vector shared memory)
+                 "L"         // load effective address
+                 "a3i"       // arg3 = false
+                 "a2i"       // arg2 = bytes to read
+                 "r0a1="     // arg1 = virtual address
+                 "q"         // arg0 = machine
+                 "c"         // call function (turn virtual into pointer)
+                 "t"         // arg0 = pointer
+                 LOADSTORE,  // call micro-op (read vector shared memory)
                  false, 1ul << log2sz, ReserveAddress, kLoad[log2sz]);
         }
         break;
@@ -879,7 +946,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                    "a1i"  // arg1 = register index
                    "q"    // arg0 = machine
                    "m",   // call micro-op
-                   log2sz ? RexbRm(rde) : kByteReg[ByteRexb(rde)],
+                   log2sz ? RexbRm(rde) : kByteReg[RexRexb(rde)],
                    kPutReg[log2sz]);
           } else if (HasLinearMapping(m)) {
             Jitter(A,
@@ -917,30 +984,30 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                    RexbRm(rde), kPutReg[log2sz]);
           } else if (HasLinearMapping(m)) {
             Jitter(A,
-                   "r1s4="  // sav4 = res1
-                   "r0s3="  // sav3 = res0
-                   "L"      // load effective address
-                   "t"      // arg0 = virtual address
-                   "m"      // call micro-op
-                   "s4a2="  // arg2 = sav4
-                   "s3a1="  // arg1 = sav3
-                   "t"      // arg0 = res0
-                   "m",     // call micro-op (store vector to shared memory)
+                   "r1s4="     // sav4 = res1
+                   "r0s3="     // sav3 = res0
+                   "L"         // load effective address
+                   "t"         // arg0 = virtual address
+                   "m"         // call micro-op
+                   "s4a2="     // arg2 = sav4
+                   "s3a1="     // arg1 = sav3
+                   "t"         // arg0 = res0
+                   LOADSTORE,  // call micro-op (store vector to shared memory)
                    ResolveHost, kStore[log2sz]);
           } else {
             Jitter(A,
-                   "r1s4="  // sav4 = res1
-                   "r0s3="  // sav3 = res0
-                   "L"      // load effective address
-                   "a3i"    // arg3 = true
-                   "a2i"    // arg2 = bytes to write
-                   "r0a1="  // arg1 = res0
-                   "q"      // arg0 = machine
-                   "c"      // call function (turn virtual into pointer)
-                   "s4a2="  // arg2 = sav4
-                   "s3a1="  // arg1 = sav3
-                   "t"      // arg0 = res0
-                   "m",     // call micro-op (store vector to shared memory)
+                   "r1s4="     // sav4 = res1
+                   "r0s3="     // sav3 = res0
+                   "L"         // load effective address
+                   "a3i"       // arg3 = true
+                   "a2i"       // arg2 = bytes to write
+                   "r0a1="     // arg1 = res0
+                   "q"         // arg0 = machine
+                   "c"         // call function (turn virtual into pointer)
+                   "s4a2="     // arg2 = sav4
+                   "s3a1="     // arg1 = sav3
+                   "t"         // arg0 = res0
+                   LOADSTORE,  // call micro-op (store vector to shared memory)
                    true, 1ul << log2sz, ReserveAddress, kStore[log2sz]);
           }
         }
@@ -999,7 +1066,8 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                "a1i"  // arg1 = index of register
                "q"    // arg0 = machine
                "m",   // call micro-op (get register)
-               RexbSrm(rde), kGetReg[WordLog2(rde)]);
+               log2sz ? RexbSrm(rde) : kByteReg[RexRexbSrm(rde)],
+               kGetReg[WordLog2(rde)]);
         break;
 
       case 'F':  // PutReg(RexbSrm, <pop>)
@@ -1010,7 +1078,8 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                "a1i"  // arg1 = index of register
                "q"    // arg0 = machine
                "m",   // call micro-op
-               RexbSrm(rde), kPutReg[WordLog2(rde)]);
+               log2sz ? RexbSrm(rde) : kByteReg[RexRexbSrm(rde)],
+               kPutReg[log2sz]);
         break;
 
       case 'G':  // r0 = GetReg(AX)

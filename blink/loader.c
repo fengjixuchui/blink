@@ -41,10 +41,6 @@
 #define READ64(p) Read64((const u8 *)(p))
 #define READ32(p) Read32((const u8 *)(p))
 
-static bool CouldJit(struct Machine *m) {
-  return m->mode == XED_MODE_LONG;
-}
-
 static i64 LoadElfLoadSegment(struct Machine *m, void *image, size_t imagesize,
                               const Elf64_Phdr *phdr, i64 last_end, int fd) {
   i64 bulk;
@@ -89,7 +85,10 @@ static i64 LoadElfLoadSegment(struct Machine *m, void *image, size_t imagesize,
     exit(127);
   }
   if (skew != (offset & (pagesize - 1))) {
-    LOGF("p_vaddr p_offset skew unequal w.r.t. host page size");
+    LOGF("p_vaddr p_offset skew unequal w.r.t. host page size; try "
+         "rebuilding your program using the linker flags: -static "
+         "-Wl,-z,common-page-size=%d,-z,max-page-size=%d",
+         pagesize, pagesize);
     exit(127);
   }
 
@@ -172,8 +171,7 @@ static i64 LoadElfLoadSegment(struct Machine *m, void *image, size_t imagesize,
 
   s->brk = MAX(s->brk, end);
 
-#ifdef HAVE_JIT
-  if ((flags & PF_X) && CouldJit(m)) {
+  if (flags & PF_X) {
     if (!s->codesize) {
       s->codestart = vaddr;
       s->codesize = memsz;
@@ -184,7 +182,6 @@ static i64 LoadElfLoadSegment(struct Machine *m, void *image, size_t imagesize,
            "addresses; only the first region will benefit from jitting");
     }
   }
-#endif
 
   return end;
 }
@@ -311,13 +308,17 @@ static void SetupDispatch(struct Machine *m) {
       IsJitDisabled(&m->system->jit) ||  //
       !(n = m->system->codesize) ||      //
       !(m->system->fun = (atomic_int *)AllocateBig(n * sizeof(atomic_int)))) {
-    m->system->codestart = 0;
-    m->system->codesize = 0;
     m->system->fun = 0;
   }
-  m->fun = m->system->fun - m->system->codestart;
-  m->codestart = m->system->codestart;
-  m->codesize = m->system->codesize;
+  if (m->system->fun) {
+    m->fun = m->system->fun - m->system->codestart;
+    m->codestart = m->system->codestart;
+    m->codesize = m->system->codesize;
+  } else {
+    m->fun = 0;
+    m->codestart = 0;
+    m->codesize = 0;
+  }
 #endif
 }
 

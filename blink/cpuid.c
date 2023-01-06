@@ -55,8 +55,10 @@ void OpCpuid(P) {
       switch (Get32(m->cx)) {
         case 0:
           bx |= 1 << 0;   // fsgsbase
+          bx |= 1 << 8;   // bmi2
           bx |= 1 << 9;   // erms
           bx |= 1 << 18;  // rdseed
+          bx |= 1 << 19;  // adx
           cx |= 1 << 22;  // rdpid
           break;
         default:
