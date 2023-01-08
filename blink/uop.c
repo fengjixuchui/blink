@@ -31,6 +31,7 @@
 #include "blink/macros.h"
 #include "blink/modrm.h"
 #include "blink/mop.h"
+#include "blink/pun.h"
 #include "blink/stats.h"
 #include "blink/swap.h"
 #include "blink/types.h"
@@ -116,6 +117,14 @@ typedef void (*store_f)(u8 *, u64);
 
 MICRO_OP static u8 *ResolveHost(i64 v) {
   return ToHost(v);
+}
+
+MICRO_OP static u8 *GetXmmPtr(struct Machine *m, long i) {
+  return m->xmm[i];
+}
+
+MICRO_OP void MovsdWpsVpsOp(u8 *p, struct Machine *m, long reg) {
+  Write64(p, Read64(m->xmm[reg]));
 }
 
 #if defined(__x86_64__) && defined(TRIVIALLY_RELOCATABLE)
@@ -460,6 +469,26 @@ const aluop_f kAluFast[8][4] = {
     {FastSub8, FastSub16, FastSub32, FastSub64},  //
 };
 
+MICRO_OP i32 Imul32(i32 x, i32 y, struct Machine *m) {
+  int o;
+  i64 z;
+  z = (i64)x * y;
+  o = z != (i32)z;
+  m->flags = (m->flags & ~(CF | OF)) | o << FLAGS_CF | o << FLAGS_OF;
+  return z;
+}
+
+#ifdef HAVE_INT128
+MICRO_OP i64 Imul64(i64 x, i64 y, struct Machine *m) {
+  int o;
+  __int128 z;
+  z = (__int128)x * y;
+  o = z != (i64)z;
+  m->flags = (m->flags & ~(CF | OF)) | o << FLAGS_CF | o << FLAGS_OF;
+  return z;
+}
+#endif
+
 #ifdef HAVE_INT128
 MICRO_OP void Mulx64(u64 x,              //
                      struct Machine *m,  //
@@ -673,6 +702,69 @@ MICRO_OP static i64 BaseIndex(struct Machine *m, u64 d, long b, int z, long i) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// FLOATING POINT
+
+MICRO_OP void OpPsdMuld1(u8 *p, struct Machine *m, long reg) {
+  union DoublePun x, y;
+  y.i = Read64(p);
+  x.i = Read64(m->xmm[reg]);
+  x.f = x.f * y.f;
+  Write64(m->xmm[reg], x.i);
+}
+
+MICRO_OP void OpPsdAddd1(u8 *p, struct Machine *m, long reg) {
+  union DoublePun x, y;
+  y.i = Read64(p);
+  x.i = Read64(m->xmm[reg]);
+  x.f = x.f + y.f;
+  Write64(m->xmm[reg], x.i);
+}
+
+MICRO_OP void OpPsdSubd1(u8 *p, struct Machine *m, long reg) {
+  union DoublePun x, y;
+  y.i = Read64(p);
+  x.i = Read64(m->xmm[reg]);
+  x.f = x.f - y.f;
+  Write64(m->xmm[reg], x.i);
+}
+
+MICRO_OP void OpPsdDivd1(u8 *p, struct Machine *m, long reg) {
+  union DoublePun x, y;
+  y.i = Read64(p);
+  x.i = Read64(m->xmm[reg]);
+  x.f = x.f / y.f;
+  Write64(m->xmm[reg], x.i);
+}
+
+MICRO_OP void OpPsdMind1(u8 *p, struct Machine *m, long reg) {
+  union DoublePun x, y;
+  y.i = Read64(p);
+  x.i = Read64(m->xmm[reg]);
+  x.f = MIN(x.f, y.f);
+  Write64(m->xmm[reg], x.i);
+}
+
+MICRO_OP void OpPsdMaxd1(u8 *p, struct Machine *m, long reg) {
+  union DoublePun x, y;
+  y.i = Read64(p);
+  x.i = Read64(m->xmm[reg]);
+  x.f = MAX(x.f, y.f);
+  Write64(m->xmm[reg], x.i);
+}
+
+MICRO_OP void Int64ToDouble(i64 x, struct Machine *m, long reg) {
+  union DoublePun d;
+  d.f = x;
+  Put64(m->xmm[reg], d.i);
+}
+
+MICRO_OP void Int32ToDouble(i32 x, struct Machine *m, long reg) {
+  union DoublePun d;
+  d.f = x;
+  Put64(m->xmm[reg], d.i);
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // JIT DEBUGGING UTILITIES
 
 static pureconst bool UsesStaticMemory(u64 rde) {
@@ -832,12 +924,13 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
         long len = GetMicroOpLength(fun);
         if (len > 0) {
           AppendJit(m->path.jb, fun, len);
-          break;
+        } else {
+          LOG_ONCE(LOGF("jit micro-operation at address %" PRIxPTR
+                        " has branches or static memory references",
+                        (intptr_t)fun));
+          AppendJitCall(m->path.jb, fun);
         }
-        LOG_ONCE(LOGF("jit micro-operation at address %" PRIxPTR
-                      " has branches or static memory references",
-                      (intptr_t)fun));
-        // fallthrough
+        break;
       }
 #endif
 
@@ -1058,6 +1151,39 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                  "q"      // arg0 = machine
                  "m",     // call micro-op
                  Sego(rde) - 1, Seg);
+        }
+        break;
+
+      case 'Q':  // res0 = GetXmmPointer(RexrReg)
+        Jitter(A,
+               "a1i"  // arg1 = register index
+               "q"    // arg0 = machine
+               "m",   // call micro-op
+               RexrReg(rde), GetXmmPtr);
+        break;
+
+      case 'P':  // res0 = GetXmmOrMemPointer(RexbRm)
+        if (IsModrmRegister(rde)) {
+          Jitter(A,
+                 "a1i"  // arg1 = register index
+                 "q"    // arg0 = machine
+                 "m",   // call micro-op
+                 RexbRm(rde), GetXmmPtr);
+        } else if (HasLinearMapping(m)) {
+          Jitter(A,
+                 "L"   // load effective address
+                 "t"   // arg0 = virtual address
+                 "m",  // res0 = call micro-op (turn virtual into pointer)
+                 ResolveHost);
+        } else {
+          Jitter(A,
+                 "L"      // load effective address
+                 "a3i"    // arg3 = false
+                 "a2i"    // arg2 = bytes to read
+                 "r0a1="  // arg1 = virtual address
+                 "q"      // arg0 = machine
+                 "c",     // res0 = call function (turn virtual into pointer)
+                 false, 1ul << log2sz, ReserveAddress);
         }
         break;
 

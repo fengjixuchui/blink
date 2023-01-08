@@ -23,9 +23,11 @@
 #include "blink/endian.h"
 #include "blink/flags.h"
 #include "blink/fpu.h"
+#include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/modrm.h"
 #include "blink/pun.h"
+#include "blink/tsan.h"
 
 static void pshufw(i16 b[4], const i16 a[4], int m) {
   i16 t[4];
@@ -87,6 +89,7 @@ void OpUnpcklpsd(P) {
   u8 *a, *b;
   a = XmmRexrReg(m, rde);
   b = GetModrmRegisterXmmPointerRead8(A);
+  IGNORE_RACES_START();
   if (Osz(rde)) {
     memcpy(a + 8, b, 8);
   } else {
@@ -94,12 +97,14 @@ void OpUnpcklpsd(P) {
     memcpy(a + 4 * 2, a + 4, 4);
     memcpy(a + 4 * 1, b + 0, 4);
   }
+  IGNORE_RACES_END();
 }
 
 void OpUnpckhpsd(P) {
   u8 *a, *b;
   a = XmmRexrReg(m, rde);
   b = GetModrmRegisterXmmPointerRead16(A);
+  IGNORE_RACES_START();
   if (Osz(rde)) {
     memcpy(a + 0, b + 8, 8);
     memcpy(a + 8, b + 8, 8);
@@ -109,6 +114,7 @@ void OpUnpckhpsd(P) {
     memcpy(a + 4 * 2, a + 4 * 3, 4);
     memcpy(a + 4 * 3, b + 4 * 3, 4);
   }
+  IGNORE_RACES_END();
 }
 
 void OpPextrwGdqpUdqIb(P) {
@@ -122,14 +128,17 @@ void OpPinsrwVdqEwIb(P) {
   u8 i;
   i = uimm0;
   i &= Osz(rde) ? 7 : 3;
+  IGNORE_RACES_START();
   Put16(XmmRexrReg(m, rde) + i * 2,
         Read16(GetModrmRegisterWordPointerRead2(A)));
+  IGNORE_RACES_END();
 }
 
 void OpShuffle(P) {
   i16 q16[4];
   i16 x16[8];
   i32 x32[4];
+  IGNORE_RACES_START();
   switch (Rep(rde) | Osz(rde)) {
     case 0:
       memcpy(q16, GetModrmRegisterXmmPointerRead8(A), 8);
@@ -154,12 +163,14 @@ void OpShuffle(P) {
     default:
       __builtin_unreachable();
   }
+  IGNORE_RACES_END();
 }
 
 static void Shufps(P) {
   u8 *p;
   union FloatPun x[4], y[4], z[4];
   p = GetModrmRegisterXmmPointerRead16(A);
+  IGNORE_RACES_START();
   y[0].i = Read32(p + 0 * 4);
   y[1].i = Read32(p + 1 * 4);
   y[2].i = Read32(p + 2 * 4);
@@ -177,12 +188,14 @@ static void Shufps(P) {
   Write32(p + 1 * 4, z[1].i);
   Write32(p + 2 * 4, z[2].i);
   Write32(p + 3 * 4, z[3].i);
+  IGNORE_RACES_END();
 }
 
 static void Shufpd(P) {
   u8 *p;
   union DoublePun x[2], y[2], z[2];
   p = GetModrmRegisterXmmPointerRead16(A);
+  IGNORE_RACES_START();
   y[0].i = Read64(p + 0 * 4);
   y[1].i = Read64(p + 1 * 4);
   p = XmmRexrReg(m, rde);
@@ -192,6 +205,7 @@ static void Shufpd(P) {
   z[1].f = x[(uimm0 & 0002) >> 1].f;
   Write64(p + 0 * 4, z[0].i);
   Write64(p + 1 * 4, z[1].i);
+  IGNORE_RACES_END();
 }
 
 void OpShufpsd(P) {
@@ -204,13 +218,17 @@ void OpShufpsd(P) {
 
 static void Movmskps(P) {
   u8 *p = GetModrmRegisterXmmPointerRead16(A);
+  IGNORE_RACES_START();
   Put64(RegRexrReg(m, rde), (!!(p[15] & 0x80) << 3 | !!(p[11] & 0x80) << 2 |
                              !!(p[7] & 0x80) << 1 | !!(p[3] & 0x80)));
+  IGNORE_RACES_END();
 }
 
 static void Movmskpd(P) {
   u8 *p = GetModrmRegisterXmmPointerRead16(A);
+  IGNORE_RACES_START();
   Put64(RegRexrReg(m, rde), !!(p[15] & 0x80) << 1 | !!(p[7] & 0x80));
+  IGNORE_RACES_END();
 }
 
 void OpMovmskpsd(P) {
@@ -222,6 +240,7 @@ void OpMovmskpsd(P) {
 }
 
 void OpSqrtpsd(P) {
+  IGNORE_RACES_START();
   switch (Rep(rde) | Osz(rde)) {
     case 0: {
       int i;
@@ -270,9 +289,11 @@ void OpSqrtpsd(P) {
     default:
       __builtin_unreachable();
   }
+  IGNORE_RACES_END();
 }
 
 void OpRsqrtps(P) {
+  IGNORE_RACES_START();
   if (Rep(rde) != 3) {
     int i;
     u8 *p;
@@ -294,9 +315,11 @@ void OpRsqrtps(P) {
     u.f = 1.f / sqrtf(u.f);
     Write32(XmmRexrReg(m, rde), u.i);
   }
+  IGNORE_RACES_END();
 }
 
 void OpRcpps(P) {
+  IGNORE_RACES_START();
   if (Rep(rde) != 3) {
     int i;
     u8 *p;
@@ -318,9 +341,11 @@ void OpRcpps(P) {
     u.f = 1.f / u.f;
     Write32(XmmRexrReg(m, rde), u.i);
   }
+  IGNORE_RACES_END();
 }
 
 void OpComissVsWs(P) {
+  IGNORE_RACES_START();
   u8 zf, cf, pf, ie;
   if (!Osz(rde)) {
     union FloatPun xf, yf;
@@ -361,16 +386,23 @@ void OpComissVsWs(P) {
       }
     }
   }
+  IGNORE_RACES_END();
 }
 
-static inline void OpPsd(P, float fs(float x, float y),
-                         double fd(double x, double y)) {
+static void OpPsd(P, float fs(float x, float y), double fd(double x, double y),
+                  void d1(u8 *, struct Machine *, long)) {
+  IGNORE_RACES_START();
   if (Rep(rde) == 2) {
-    union DoublePun x, y;
-    y.i = Read64(GetModrmRegisterXmmPointerRead8(A));
-    x.i = Read64(XmmRexrReg(m, rde));
-    x.f = fd(x.f, y.f);
-    Write64(XmmRexrReg(m, rde), x.i);
+    d1(GetModrmRegisterXmmPointerRead8(A), m, RexrReg(rde));
+    if (IsMakingPath(m)) {
+      Jitter(A,
+             "P"      // res0 = GetXmmOrMemPointer(RexbRm)
+             "a2i"    // arg2 = RexrReg(rde)
+             "s0a1="  // arg1 = machine
+             "t"      // arg0 = res0
+             "m",     // call function (d1)
+             RexrReg(rde), d1);
+    }
   } else if (Rep(rde) == 3) {
     union FloatPun x, y;
     y.i = Read32(GetModrmRegisterXmmPointerRead4(A));
@@ -412,6 +444,7 @@ static inline void OpPsd(P, float fs(float x, float y),
     Write32(p + 2 * 4, x[2].i);
     Write32(p + 3 * 4, x[3].i);
   }
+  IGNORE_RACES_END();
 }
 
 static inline float Adds(float x, float y) {
@@ -423,7 +456,7 @@ static inline double Addd(double x, double y) {
 }
 
 void OpAddpsd(P) {
-  OpPsd(A, Adds, Addd);
+  OpPsd(A, Adds, Addd, OpPsdAddd1);
 }
 
 static inline float Subs(float x, float y) {
@@ -435,7 +468,7 @@ static inline double Subd(double x, double y) {
 }
 
 void OpSubpsd(P) {
-  OpPsd(A, Subs, Subd);
+  OpPsd(A, Subs, Subd, OpPsdSubd1);
 }
 
 static inline float Muls(float x, float y) {
@@ -447,7 +480,7 @@ static inline double Muld(double x, double y) {
 }
 
 void OpMulpsd(P) {
-  OpPsd(A, Muls, Muld);
+  OpPsd(A, Muls, Muld, OpPsdMuld1);
 }
 
 static inline float Divs(float x, float y) {
@@ -459,7 +492,7 @@ static inline double Divd(double x, double y) {
 }
 
 void OpDivpsd(P) {
-  OpPsd(A, Divs, Divd);
+  OpPsd(A, Divs, Divd, OpPsdDivd1);
 }
 
 static inline float Mins(float x, float y) {
@@ -471,7 +504,7 @@ static inline double Mind(double x, double y) {
 }
 
 void OpMinpsd(P) {
-  OpPsd(A, Mins, Mind);
+  OpPsd(A, Mins, Mind, OpPsdMind1);
 }
 
 static inline float Maxs(float x, float y) {
@@ -483,7 +516,7 @@ static inline double Maxd(double x, double y) {
 }
 
 void OpMaxpsd(P) {
-  OpPsd(A, Maxs, Maxd);
+  OpPsd(A, Maxs, Maxd, OpPsdMaxd1);
 }
 
 static int Cmps(int imm, float x, float y) {
@@ -533,6 +566,7 @@ static i32 Cmpd(int imm, double x, double y) {
 }
 
 void OpCmppsd(P) {
+  IGNORE_RACES_START();
   int imm = uimm0;
   if (Rep(rde) == 2) {
     union DoublePun x, y;
@@ -581,45 +615,55 @@ void OpCmppsd(P) {
     Write32(p + 2 * 4, x[2].i);
     Write32(p + 3 * 4, x[3].i);
   }
+  IGNORE_RACES_END();
 }
 
 void OpAndpsd(P) {
+  IGNORE_RACES_START();
   u64 x[2], y[2];
   memcpy(x, XmmRexrReg(m, rde), 16);
   memcpy(y, GetModrmRegisterXmmPointerRead16(A), 16);
   x[0] &= y[0];
   x[1] &= y[1];
   memcpy(XmmRexrReg(m, rde), x, 16);
+  IGNORE_RACES_END();
 }
 
 void OpAndnpsd(P) {
+  IGNORE_RACES_START();
   u64 x[2], y[2];
   memcpy(x, XmmRexrReg(m, rde), 16);
   memcpy(y, GetModrmRegisterXmmPointerRead16(A), 16);
   x[0] = ~x[0] & y[0];
   x[1] = ~x[1] & y[1];
   memcpy(XmmRexrReg(m, rde), x, 16);
+  IGNORE_RACES_END();
 }
 
 void OpOrpsd(P) {
+  IGNORE_RACES_START();
   u64 x[2], y[2];
   memcpy(x, XmmRexrReg(m, rde), 16);
   memcpy(y, GetModrmRegisterXmmPointerRead16(A), 16);
   x[0] |= y[0];
   x[1] |= y[1];
   memcpy(XmmRexrReg(m, rde), x, 16);
+  IGNORE_RACES_END();
 }
 
 void OpXorpsd(P) {
+  IGNORE_RACES_START();
   u64 x[2], y[2];
   memcpy(x, XmmRexrReg(m, rde), 16);
   memcpy(y, GetModrmRegisterXmmPointerRead16(A), 16);
   x[0] ^= y[0];
   x[1] ^= y[1];
   memcpy(XmmRexrReg(m, rde), x, 16);
+  IGNORE_RACES_END();
 }
 
 void OpHaddpsd(P) {
+  IGNORE_RACES_START();
   u8 *p;
   if (Rep(rde) == 2) {
     union FloatPun x[4], y[4], z[4];
@@ -656,9 +700,11 @@ void OpHaddpsd(P) {
   } else {
     OpUdImpl(m);
   }
+  IGNORE_RACES_END();
 }
 
 void OpHsubpsd(P) {
+  IGNORE_RACES_START();
   u8 *p;
   if (Rep(rde) == 2) {
     union FloatPun x[4], y[4], z[4];
@@ -695,9 +741,11 @@ void OpHsubpsd(P) {
   } else {
     OpUdImpl(m);
   }
+  IGNORE_RACES_END();
 }
 
 void OpAddsubpsd(P) {
+  IGNORE_RACES_START();
   u8 *p;
   if (Rep(rde) == 2) {
     union FloatPun x[4], y[4], z[4];
@@ -734,4 +782,5 @@ void OpAddsubpsd(P) {
   } else {
     OpUdImpl(m);
   }
+  IGNORE_RACES_END();
 }

@@ -1089,7 +1089,7 @@ static u64 AluLzcnt16(u64 x, struct Machine *m) {
 }
 static u64 AluBsf(u64 x, struct Machine *m) {
   m->flags = SetFlag(m->flags, FLAGS_ZF, !x);
-  return bsf(x);
+  return x ? bsf(x) : 0;
 }
 
 static u64 AluTzcnt(u64 x, struct Machine *m, int bits) {
@@ -1109,7 +1109,7 @@ static u64 AluTzcnt16(u64 x, struct Machine *m) {
 }
 static u64 AluBsr(u64 x, struct Machine *m) {
   m->flags = SetFlag(m->flags, FLAGS_ZF, !x);
-  return bsr(x);
+  return x ? bsr(x) : 0;
 }
 
 static void Bitscan(P, u64 op(u64, struct Machine *)) {
@@ -1563,8 +1563,14 @@ int ClassifyOp(u64 rde) {
         default:
           return kOpNormal;
       }
+    case 0x0F1:  // OpInterrupt1
+    case 0x0CC:  // OpInterrupt3
+    case 0x0CD:  // OpInterruptImm
     case 0x105:  // OpSyscall
-      // We don't want clone() to fork JIT pathmaking.
+      // precious ops are excluded from jit pathmaking entirely. not
+      // doing this would be inviting disaster, since system calls and
+      // longjmp could do anything. for example, we don't want clone()
+      // to fork a jit path under construction.
       return kOpPrecious;
   }
 }
@@ -2173,16 +2179,22 @@ void GeneralDispatch(P) {
   opclass = ClassifyOp(rde);
   if (IsMakingPath(m) ||
       (opclass != kOpPrecious && CanJit(m) && CreatePath(A))) {
-    if (opclass == kOpNormal || opclass == kOpBranching) {
+    if (opclass == kOpPrecious) {
+      // we don't want to be constructing a path upon syscall entry
+      CompletePath(A);
+    } else {
+      // begin creating new element in jit path
+      unassert(opclass == kOpNormal || opclass == kOpBranching);
       ++m->path.elements;
       STATISTIC(++path_elements);
       AddPath_StartOp(A);
+      jitpc = GetJitPc(m->path.jb);
+      JIT_LOGF("adding [%s] from address %" PRIx64
+               " to path starting at %" PRIx64,
+               DescribeOp(m, GetPc(m)), GetPc(m), m->path.start);
     }
-    jitpc = GetJitPc(m->path.jb);
-    JIT_LOGF("adding [%s] from address %" PRIx64
-             " to path starting at %" PRIx64,
-             DescribeOp(m, GetPc(m)), GetPc(m), m->path.start);
   }
+  // call naive opcode implementation
   m->oplen = Oplength(rde);
   m->ip += Oplength(rde);
   GetOp(Mopcode(rde))(A);
@@ -2190,19 +2202,19 @@ void GeneralDispatch(P) {
     CommitStash(m);
   }
   if (IsMakingPath(m)) {
-    if (GetJitPc(m->path.jb) == jitpc) {
-      if (opclass == kOpNormal || opclass == kOpBranching) {
-        STATISTIC(++path_elements_auto);
-        AddPath(A);
-        AddPath_EndOp(A);
-      } else {
-        JIT_LOGF("won't add [%" PRIx64 " %s] so path started at %" PRIx64,
-                 GetPc(m), DescribeOp(m, GetPc(m)), m->path.start);
-      }
-    } else {
+    // finish creating new element in jit path
+    unassert(opclass == kOpNormal || opclass == kOpBranching);
+    if (GetJitPc(m->path.jb) != jitpc) {
+      // the op generated its jit code
       AddPath_EndOp(A);
+    } else {
+      // emit the "one size fits all" jit operation
+      AddPath(A);
+      AddPath_EndOp(A);
+      STATISTIC(++path_elements_auto);
     }
-    if (opclass == kOpPrecious || opclass == kOpBranching) {
+    if (opclass == kOpBranching) {
+      // branches, calls, and jumps always force end of path
       CompletePath(A);
     }
   }
@@ -2256,7 +2268,12 @@ void ExecuteInstruction(struct Machine *m) {
 
 static void CheckForSignals(struct Machine *m) {
   int sig;
-  if (VERY_UNLIKELY(m->signals) && (sig = ConsumeSignal(m))) {
+  if (VERY_UNLIKELY(atomic_load_explicit(&m->killed, memory_order_relaxed))) {
+    SysExit(m, 0);
+  }
+  if (VERY_UNLIKELY(m->signals) &&   //
+      (m->signals & ~m->sigmask) &&  //
+      (sig = ConsumeSignal(m))) {
     TerminateSignal(m, sig);
   }
 }
@@ -2266,8 +2283,5 @@ void Actor(struct Machine *m) {
     STATISTIC(++interps);
     ExecuteInstruction(m);
     CheckForSignals(m);
-    if (VERY_UNLIKELY(atomic_load_explicit(&m->killed, memory_order_relaxed))) {
-      SysExit(m, 0);
-    }
   }
 }

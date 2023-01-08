@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include "blink/assert.h"
+#include "blink/builtin.h"
 #include "blink/case.h"
 #include "blink/debug.h"
 #include "blink/dll.h"
@@ -68,19 +69,26 @@ void TerminateSignal(struct Machine *m, int sig) {
   sigemptyset(&sa.sa_mask);
   unassert(!sigaction(syssig, &sa, 0));
   unassert(!kill(getpid(), syssig));
-  abort();
+  Abort();
 }
 
-static void OnSigSegv(int sig, siginfo_t *si, void *uc) {
+static void OnSigSegv(int sig, siginfo_t *si, void *ptr) {
+  int sig_linux;
   RestoreIp(g_machine);
   g_machine->faultaddr = ToGuest(si->si_addr);
-  LOGF("SEGMENTATION FAULT AT ADDRESS %" PRIx64 "\n\t%s", g_machine->faultaddr,
-       GetBacktrace(g_machine));
-  DeliverSignalToUser(g_machine, SIGSEGV_LINUX);
+  LOGF("SEGMENTATION FAULT (%s) AT ADDRESS %" PRIx64 "\n\t%s", strsignal(sig),
+       g_machine->faultaddr, GetBacktrace(g_machine));
+#ifdef DEBUG
+  PrintBacktrace();
+#endif
+  if ((sig_linux = UnXlatSignal(sig)) != -1) {
+    DeliverSignalToUser(g_machine, sig_linux);
+  }
   siglongjmp(g_machine->onhalt, kMachineSegmentationFault);
 }
 
 static int Exec(char *prog, char **argv, char **envp) {
+  int i;
   struct Machine *old;
   if ((old = g_machine)) KillOtherThreads(old->system);
   unassert((g_machine = NewMachine(NewSystem(), 0)));
@@ -92,9 +100,9 @@ static int Exec(char *prog, char **argv, char **envp) {
   g_machine->system->nolinear = FLAG_nolinear;
   if (!old) {
     LoadProgram(g_machine, prog, argv, envp);
-    AddStdFd(&g_machine->system->fds, 0);
-    AddStdFd(&g_machine->system->fds, 1);
-    AddStdFd(&g_machine->system->fds, 2);
+    for (i = 0; i < 10; ++i) {
+      AddStdFd(&g_machine->system->fds, i);
+    }
   } else {
     LoadProgram(g_machine, prog, argv, envp);
     LOCK(&old->system->fds.lock);
@@ -107,6 +115,9 @@ static int Exec(char *prog, char **argv, char **envp) {
     if (!sigsetjmp(g_machine->onhalt, 1)) {
       g_machine->canhalt = true;
       Actor(g_machine);
+    }
+    if (IsMakingPath(g_machine)) {
+      AbandonPath(g_machine);
     }
   }
 }
@@ -125,6 +136,12 @@ _Noreturn static void PrintUsage(int argc, char *argv[], int rc, int fd) {
 static void GetOpts(int argc, char *argv[]) {
   int opt;
   FLAG_nolinear = !CanHaveLinearMemory();
+#ifdef __COSMOPOLITAN__
+  if (IsWindows()) {
+    FLAG_nojit = true;
+    FLAG_nolinear = true;
+  }
+#endif
   while ((opt = GetOpt(argc, argv, OPTS)) != -1) {
     switch (opt) {
       case 'j':
@@ -150,10 +167,12 @@ static void HandleSigs(void) {
   sa.sa_flags = 0;
   sa.sa_handler = OnSigSys;
   unassert(!sigaction(SIGSYS, &sa, 0));
-#ifndef __SANITIZE_THREAD__
+#if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__)
   sa.sa_sigaction = OnSigSegv;
   sa.sa_flags = SA_SIGINFO;
+  unassert(!sigaction(SIGBUS, &sa, 0));
   unassert(!sigaction(SIGILL, &sa, 0));
+  unassert(!sigaction(SIGTRAP, &sa, 0));
   unassert(!sigaction(SIGSEGV, &sa, 0));
 #endif
 }

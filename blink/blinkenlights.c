@@ -64,7 +64,6 @@
 #include "blink/stats.h"
 #include "blink/strwidth.h"
 #include "blink/syscall.h"
-#include "blink/termios.h"
 #include "blink/thompike.h"
 #include "blink/timespec.h"
 #include "blink/tsan.h"
@@ -713,11 +712,9 @@ static void TuiRejuvinate(void) {
   term.c_cflag &= ~(CSIZE | PARENB);
   term.c_cflag |= CS8 | CREAD;
   term.c_oflag |= OPOST | ONLCR;
+  term.c_lflag &= ~ECHOK;
 #ifdef IMAXBEL
   term.c_iflag &= ~IMAXBEL;
-#endif
-#ifdef ECHOK
-  term.c_lflag &= ~ECHOK;
 #endif
 #ifdef PENDIN
   term.c_lflag &= ~PENDIN;
@@ -725,7 +722,7 @@ static void TuiRejuvinate(void) {
 #ifdef IUTF8
   term.c_iflag |= IUTF8;
 #endif
-  ioctl(ttyout, TCSETS, &term);
+  tcsetattr(ttyout, TCSANOW, &term);
   memset(&sa, 0, sizeof(sa));
   sa.sa_handler = OnSigBusted;
   sa.sa_flags = SA_NODEFER;
@@ -775,7 +772,7 @@ static void TtyRestore1(void) {
 
 static void TtyRestore2(void) {
   LOGF("TtyRestore2");
-  ioctl(ttyout, TCSETS, &oldterm);
+  tcsetattr(ttyout, TCSANOW, &oldterm);
   DisableMouseTracking();
 }
 
@@ -839,7 +836,10 @@ static int DrainInput(int fd) {
   for (;;) {
     fds[0].fd = fd;
     fds[0].events = POLLIN;
-    if (poll(fds, ARRAYLEN(fds), 0) == -1) return -1;
+#ifdef __COSMOPOLITAN__
+    if (!IsWindows())
+#endif
+      if (poll(fds, ARRAYLEN(fds), 0) == -1) return -1;
     if (!(fds[0].revents & POLLIN)) break;
     if (read(fd, buf, sizeof(buf)) == -1) return -1;
   }
@@ -893,7 +893,7 @@ void TuiSetup(void) {
   if (!once) {
     /* LOGF("loaded program %s\n%s", codepath, gc(FormatPml4t(m))); */
     CommonSetup();
-    ioctl(ttyout, TCGETS, &oldterm);
+    tcgetattr(ttyout, &oldterm);
     atexit(TtyRestore2);
     once = true;
     report = true;
@@ -1628,7 +1628,7 @@ static void DrawMemoryUnzoomed(struct Panel *p, struct MemoryView *view,
           } else if (!sc || (sc > 0 && (k & 7) < sc)) {
             x = 22; /* GREEN: valid address */
           } else {
-            abort();
+            Abort();
           }
         }
         AppendFmt(&p->lines[i], "\033[38;5;253;48;5;%dm", x);
@@ -2153,7 +2153,10 @@ static bool HasPendingInput(int fd) {
   fds[0].fd = fd;
   fds[0].events = POLLIN;
   fds[0].revents = 0;
-  poll(fds, ARRAYLEN(fds), 0);
+#ifdef __COSMOPOLITAN__
+  if (!IsWindows())
+#endif
+    poll(fds, ARRAYLEN(fds), 0);
   return fds[0].revents & (POLLIN | POLLERR);
 }
 
@@ -2344,15 +2347,81 @@ static int OnPtyFdTiocgwinsz(int fd, struct winsize *ws) {
   return 0;
 }
 
-static int OnPtyFdTcgets(int fd, struct termios *c) {
+static int OnPtyFdTcsets(int fd, u64 request, struct termios *c) {
+  return 0;
+}
+
+static int OnPtyFdIoctl(int fd, unsigned long request, ...) {
+  va_list va;
+  struct winsize *ws;
+  if (request == TIOCGWINSZ) {
+    va_start(va, request);
+    ws = va_arg(va, struct winsize *);
+    va_end(va);
+    return OnPtyFdTiocgwinsz(fd, ws);
+  } else {
+    return einval();
+  }
+}
+
+static int OnPtyTcgetattr(int fd, struct termios *c) {
+  // TODO(jart): We should just use the Linux ABI for these.
   memset(c, 0, sizeof(*c));
+  c->c_iflag = ICRNL | IXON
+#ifdef IUTF8
+               | IUTF8
+#endif
+      ;
+  c->c_oflag = 0
+#ifdef ONLCR
+               | ONLCR
+#endif
+      ;
+  c->c_cflag = CREAD | CS8;
+  c->c_lflag = ISIG | ECHOE | IEXTEN | ECHOK
+#ifdef ECHOCTL
+               | ECHOCTL
+#endif
+#ifdef ECHOKE
+               | ECHOKE
+#endif
+      ;
+  c->c_cc[VMIN] = 1;
+  c->c_cc[VTIME] = 0;
+  c->c_cc[VINTR] = Ctrl('C');
+  c->c_cc[VQUIT] = Ctrl('\\');
+  c->c_cc[VERASE] = Ctrl('?');
+  c->c_cc[VKILL] = Ctrl('U');
+  c->c_cc[VEOF] = Ctrl('D');
+  c->c_cc[VSTART] = Ctrl('Q');
+  c->c_cc[VSTOP] = Ctrl('S');
+  c->c_cc[VSUSP] = Ctrl('Z');
+  c->c_cc[VEOL] = Ctrl('@');
+#ifdef VSWTC
+  c->c_cc[VSWTC] = Ctrl('@');
+#endif
+#ifdef VREPRINT
+  c->c_cc[VREPRINT] = Ctrl('R');
+#endif
+#ifdef VDISCARD
+  c->c_cc[VDISCARD] = Ctrl('O');
+#endif
+#ifdef VWERASE
+  c->c_cc[VWERASE] = Ctrl('W');
+#endif
+#ifdef VLNEXT
+  c->c_cc[VLNEXT] = Ctrl('V');
+#endif
+#ifdef VEOL2
+  c->c_cc[VEOL2] = Ctrl('@');
+#endif
   if (!(pty->conf & kPtyNocanon)) c->c_iflag |= ICANON;
   if (!(pty->conf & kPtyNoecho)) c->c_iflag |= ECHO;
   if (!(pty->conf & kPtyNoopost)) c->c_oflag |= OPOST;
   return 0;
 }
 
-static int OnPtyFdTcsets(int fd, u64 request, struct termios *c) {
+static int OnPtyTcsetattr(int fd, int cmd, const struct termios *c) {
   if (c->c_iflag & ICANON) {
     pty->conf &= ~kPtyNocanon;
   } else {
@@ -2371,29 +2440,14 @@ static int OnPtyFdTcsets(int fd, u64 request, struct termios *c) {
   return 0;
 }
 
-static int OnPtyFdIoctl(int fd, unsigned long request, ...) {
-  va_list va;
-  va_start(va, request);
-  if (request == TIOCGWINSZ) {
-    return OnPtyFdTiocgwinsz(fd, va_arg(va, struct winsize *));
-  } else if (request == TCGETS) {
-    return OnPtyFdTcgets(fd, va_arg(va, struct termios *));
-  } else if (request == TCSETS || request == TCSETSW || request == TCSETSF) {
-    return OnPtyFdTcsets(fd, request, va_arg(va, struct termios *));
-  } else {
-    errno = EINVAL;
-    return -1;
-  }
-  va_end(va);
-  return 0;
-}
-
 static const struct FdCb kFdCbPty = {
     .close = OnPtyFdClose,
     .readv = OnPtyFdReadv,
     .writev = OnPtyFdWritev,
     .ioctl = OnPtyFdIoctl,
     .poll = OnPtyFdPoll,
+    .tcgetattr = OnPtyTcgetattr,
+    .tcsetattr = OnPtyTcsetattr,
 };
 
 static void LaunchDebuggerReactively(void) {
@@ -2982,7 +3036,10 @@ static bool HasPendingKeyboard(void) {
 }
 
 static void Sleep(int ms) {
-  poll((struct pollfd[]){{ttyin, POLLIN}}, 1, ms);
+#ifdef __COSMOPOLITAN__
+  if (!IsWindows())
+#endif
+    poll((struct pollfd[]){{ttyin, POLLIN}}, 1, ms);
 }
 
 static void OnMouseWheelUp(struct Panel *p, int y, int x) {
@@ -3339,6 +3396,9 @@ static void Exec(void) {
       }
     }
   } else {
+    if (IsMakingPath(m)) {
+      AbandonPath(m);
+    }
     if (OnHalt(interrupt)) {
       if (!tuimode) {
         goto KeepGoing;
@@ -3485,6 +3545,9 @@ static void Tui(void) {
       }
     } while (tuimode);
   } else {
+    if (IsMakingPath(m)) {
+      AbandonPath(m);
+    }
     if (OnHalt(interrupt)) {
       ReactiveDraw();
       ScrollMemoryViews();
@@ -3516,10 +3579,10 @@ static void GetOpts(int argc, char *argv[]) {
       case 'm':
         wantunsafe = true;
         if (!CanHaveLinearMemory()) {
-          fprintf(
-              stderr,
-              "linearization not possible on this system, page size is %ld\n",
-              sysconf(_SC_PAGESIZE));
+          fprintf(stderr,
+                  "linearization not possible on this system"
+                  " (word size is %d bits and page size is %ld)\n",
+                  LONG_BIT, sysconf(_SC_PAGESIZE));
           exit(1);
         }
         break;
@@ -3661,6 +3724,7 @@ int main(int argc, char *argv[]) {
   int rc;
   struct System *s;
   static struct sigaction sa;
+  g_exitdontabort = true;
   SetupWeb();
   g_blink_path = argc > 0 ? argv[0] : 0;
   react = true;

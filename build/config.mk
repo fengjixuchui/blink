@@ -4,7 +4,6 @@
 TAGS ?= /usr/bin/ctags
 
 IMAGE_BASE_VIRTUAL = 0x23000000
-# IMAGE_BASE_VIRTUAL = 0x7e0000000000
 
 CFLAGS +=				\
 	-g				\
@@ -41,8 +40,8 @@ LDFLAGS_STATIC =			\
 	-fno-unwind-tables		\
 	-fno-asynchronous-unwind-tables	\
 	-Wl,-z,norelro			\
-	-Wl,-z,max-page-size=65536	\
-	-Wl,-z,common-page-size=65536	\
+	-Wl,-z,max-page-size=4096	\
+	-Wl,-z,common-page-size=4096	\
 	-Wl,-Ttext-segment=$(IMAGE_BASE_VIRTUAL)
 
 TAGSFLAGS =				\
@@ -72,9 +71,43 @@ CFLAGS +=				\
 	-Wno-unused-function
 endif
 
+ifeq ($(MODE), cosmo)
+CC = cosmocc
+endif
+
+ifeq ($(MODE), dbg)
+CFLAGS += -O0
+CPPFLAGS += -DDEBUG
+ifeq ($(HOST_OS), Linux)
+CFLAGS += -fno-pie
+LDFLAGS += -static -no-pie
+endif
+ifneq ($(HOST_OS), Darwin)
+LDLIBS += -lunwind -llzma
+endif
+endif
+
 ifeq ($(MODE), rel)
 CPPFLAGS += -DNDEBUG
+CFLAGS += -O2 -mtune=generic -fno-align-functions -fno-align-jumps -fno-align-labels -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables
+endif
+
+ifeq ($(MODE), rel-llvm)
+CC = clang
+CPPFLAGS += -DNDEBUG
 CFLAGS += -O2 -mtune=generic
+endif
+
+ifeq ($(MODE), tiny)
+CPPFLAGS += -DNDEBUG -DTINY
+CFLAGS += -Os -mtune=generic -fno-align-functions -fno-align-jumps -fno-align-labels -fno-align-loops -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables
+LDFLAGS += #-Wl,--cref,-Map=$@.map
+endif
+
+ifeq ($(MODE), tiny-llvm)
+CC = clang
+CPPFLAGS += -DNDEBUG -DTINY
+CFLAGS += -Oz
 endif
 
 ifeq ($(MODE), opt)
@@ -82,25 +115,16 @@ CPPFLAGS += -DNDEBUG
 CFLAGS += -O3 -march=native
 endif
 
-# ifeq ($(MODE), opt)
-# CC = clang
-# CPPFLAGS += -DNDEBUG
-# CFLAGS += -O2
-# TARGET_ARCH = -march=native
-# endif
-
-ifeq ($(MODE), dbg)
-CFLAGS += -O0
-CPPFLAGS += -DDEBUG
-endif
-
-ifeq ($(MODE), cosmo)
-CC = cosmocc
+ifeq ($(MODE), opt-llvm)
+CC = clang
+CPPFLAGS += -DNDEBUG
+CFLAGS += -O2
+TARGET_ARCH = -march=native
 endif
 
 # make m=prof o/prof/blink
-# o/prof/blink third_party/cosmo/mu_test.com
-# gprof o/prof/blink gmon.out | less
+# o/prof/blink/blink third_party/cosmo/mu_test.com
+# gprof o/prof/blink/blink gmon.out | less
 ifeq ($(MODE), prof)
 CFLAGS += -pg
 LDFLAGS += -pg
@@ -124,7 +148,7 @@ endif
 
 ifeq ($(MODE), ubsan)
 CC = clang
-CPPFLAGS += -DDEBUG -DNOJIT
+CPPFLAGS += -DDEBUG -DNOJIT -DUBSAN
 CFLAGS += -Werror -Wno-unused-parameter -Wno-missing-field-initializers
 CFLAGS += -fsanitize=undefined
 LDLIBS += -fsanitize=undefined
@@ -144,25 +168,6 @@ CPPFLAGS += -DDEBUG
 CFLAGS += -Werror -Wno-unused-parameter -Wno-missing-field-initializers
 CFLAGS += -fsanitize=memory
 LDLIBS += -fsanitize=memory
-endif
-
-ifeq ($(MODE), tiny)
-CPPFLAGS += -DNDEBUG -DTINY
-CFLAGS += -Os -mtune=generic -fno-align-functions -fno-align-jumps -fno-align-labels -fno-align-loops -fno-pie -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables
-LDFLAGS += -no-pie -Wl,--cref,-Map=$@.map
-endif
-
-# ifeq ($(MODE), tiny)
-# CC = clang
-# CPPFLAGS += -DNDEBUG -DTINY
-# CFLAGS += -Oz -fno-pie
-# LDFLAGS += -no-pie -Wl,--cref,-Map=$@.map
-# endif
-
-ifeq ($(MODE), tiny-llvm)
-CC = clang
-CPPFLAGS += -DNDEBUG -DTINY
-CFLAGS += -Oz
 endif
 
 ifeq ($(MODE), llvm)

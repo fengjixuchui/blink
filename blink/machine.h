@@ -228,6 +228,7 @@ struct System {
   _Atomic(int) *fun;
   unsigned long codesize;
   struct MachineMemstat memstat;
+  pthread_cond_t machines_cond;
   pthread_mutex_t machines_lock;
   struct Dll *machines GUARDED_BY(machines_lock);
   unsigned next_tid GUARDED_BY(machines_lock);
@@ -373,6 +374,7 @@ _Noreturn void Actor(struct Machine *);
 void SetMachineMode(struct Machine *, int);
 void ChangeMachineMode(struct Machine *, int);
 struct Machine *NewMachine(struct System *, struct Machine *);
+bool IsOrphan(struct Machine *);
 void Jitter(P, const char *, ...);
 void FreeMachine(struct Machine *);
 void InvalidateSystem(struct System *, bool, bool);
@@ -606,6 +608,20 @@ void OpTest(P);
 void OpAlui(P);
 i64 FastAnd8(struct Machine *, u64, u64);
 i64 FastSub8(struct Machine *, u64, u64);
+
+i32 Imul32(i32, i32, struct Machine *);
+i64 Imul64(i64, i64, struct Machine *);
 void Mulx64(u64, struct Machine *, long, long);
+
+void OpPsdMuld1(u8 *, struct Machine *, long);
+void OpPsdAddd1(u8 *, struct Machine *, long);
+void OpPsdSubd1(u8 *, struct Machine *, long);
+void OpPsdDivd1(u8 *, struct Machine *, long);
+void OpPsdMind1(u8 *, struct Machine *, long);
+void OpPsdMaxd1(u8 *, struct Machine *, long);
+
+void Int64ToDouble(i64, struct Machine *, long);
+void Int32ToDouble(i32, struct Machine *, long);
+void MovsdWpsVpsOp(u8 *, struct Machine *, long);
 
 #endif /* BLINK_MACHINE_H_ */

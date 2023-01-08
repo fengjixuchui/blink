@@ -26,17 +26,8 @@
 #include "blink/debug.h"
 #include "blink/endian.h"
 #include "blink/log.h"
-#include "blink/machine.h"
 #include "blink/macros.h"
-
-int asan_backtrace_index;
-int asan_backtrace_buffer[1];
-
-static void PrintBacktraceUsingAsan(void) {
-  volatile int x;
-  x = asan_backtrace_buffer[asan_backtrace_index + 1];
-  (void)x;
-}
+#include "blink/util.h"
 
 void AssertFailed(const char *file, int line, const char *msg) {
   _Thread_local static bool noreentry;
@@ -52,6 +43,6 @@ void AssertFailed(const char *file, int line, const char *msg) {
     WriteErrorString(GetBacktrace(g_machine));
     WriteErrorString("\n");
   }
-  PrintBacktraceUsingAsan();
-  abort();
+  PrintBacktrace();
+  Abort();
 }

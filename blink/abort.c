@@ -1,7 +1,7 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
 │vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
 ╞══════════════════════════════════════════════════════════════════════════════╡
-│ Copyright 2022 Justine Alexandra Roberts Tunney                              │
+│ Copyright 2023 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
 │ Permission to use, copy, modify, and/or distribute this software for         │
 │ any purpose with or without fee is hereby granted, provided that the         │
@@ -16,34 +16,16 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
-#include <errno.h>
-#include <fcntl.h>
-#include <stdatomic.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
+#include <stdlib.h>
 
-#include "blink/debug.h"
-#include "blink/errno.h"
-#include "blink/fds.h"
-#include "blink/log.h"
-#include "blink/syscall.h"
-#include "blink/xlat.h"
+#include "blink/machine.h"
 
-int SysOpenat(struct Machine *m, i32 dirfildes, i64 pathaddr, i32 oflags,
-              i32 mode) {
-  int fildes;
-  const char *path;
-  if ((oflags = XlatOpenFlags(oflags)) == -1) return -1;
-  if (!(path = LoadStr(m, pathaddr))) return efault();
-  SYS_LOGF("Openat(%s)", path);
-  INTERRUPTIBLE(fildes = openat(GetDirFildes(dirfildes), path, oflags, mode));
-  if (fildes != -1) {
-    LockFds(&m->system->fds);
-    unassert(AddFd(&m->system->fds, fildes, oflags));
-    UnlockFds(&m->system->fds);
+bool g_exitdontabort;
+
+void Abort(void) {
+  if (g_exitdontabort) {
+    exit(1);
   } else {
-    SYS_LOGF("%s(%s) failed: %s", "openat", path, strerror(errno));
+    abort();
   }
-  return fildes;
 }
