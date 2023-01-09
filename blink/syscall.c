@@ -39,7 +39,6 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
-#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/times.h>
 #include <sys/types.h>
@@ -959,11 +958,13 @@ static int XlatSendFlags(int flags) {
   int supported, hostflags;
   supported = MSG_OOB_LINUX |        //
               MSG_DONTROUTE_LINUX |  //
-              MSG_DONTWAIT_LINUX |   //
 #ifdef MSG_NOSIGNAL
               MSG_NOSIGNAL_LINUX |  //
 #endif
-              MSG_EOR_LINUX;
+#ifdef MSG_EOR
+              MSG_EOR_LINUX |
+#endif
+              MSG_DONTWAIT_LINUX;
   if (flags & ~supported) {
     LOGF("unsupported %s flags %#x", "send", flags & ~supported);
     return einval();
@@ -975,7 +976,9 @@ static int XlatSendFlags(int flags) {
 #ifdef MSG_NOSIGNAL
   if (flags & MSG_NOSIGNAL_LINUX) hostflags |= MSG_NOSIGNAL;
 #endif
+#ifdef MSG_EOR
   if (flags & MSG_EOR_LINUX) hostflags |= MSG_EOR;
+#endif
   return hostflags;
 }
 
@@ -1055,7 +1058,7 @@ static i64 SysRecvfrom(struct Machine *m,  //
 }
 
 static int SysConnectBind(struct Machine *m, i32 fildes, i64 aa, u32 as,
-                          int impl(int, const struct sockaddr *, u32)) {
+                          int impl(int, const struct sockaddr *, socklen_t)) {
   int rc;
   struct sockaddr_in addr;
   if (LoadSockaddr(m, aa, as, &addr) == -1) return -1;
@@ -1441,6 +1444,8 @@ static int SysIoctl(struct Machine *m, int fildes, u64 request, i64 addr) {
     unassert(tcsetattr_impl = fd->cb->tcsetattr);
   } else {
     ioctl_impl = 0;
+    tcsetattr_impl = 0;
+    tcgetattr_impl = 0;
   }
   UnlockFds(&m->system->fds);
   if (!fd) return -1;
@@ -1653,7 +1658,10 @@ static int SysFcntl(struct Machine *m, i32 fildes, i32 cmd, i64 arg) {
     fl = XlatOpenFlags(arg & (O_APPEND_LINUX | O_ASYNC_LINUX | O_DIRECT_LINUX |
                               O_NOATIME_LINUX | O_NDELAY_LINUX));
     if (fcntl(fd->fildes, F_SETFL, fl) != -1) {
-      fd->oflags &= ~(O_APPEND | O_ASYNC |
+      fd->oflags &= ~(O_APPEND |
+#ifdef O_ASYNC
+                      O_ASYNC |
+#endif
 #ifdef O_DIRECT
                       O_DIRECT |
 #endif
@@ -1958,8 +1966,10 @@ static int SysSigaction(struct Machine *m, int sig, i64 act, i64 old,
                   SA_NODEFER_LINUX |    //
                   SA_RESTORER_LINUX |   //
                   SA_RESETHAND_LINUX |  //
-                  SA_NOCLDSTOP_LINUX |  //
-                  SA_NOCLDWAIT_LINUX;
+#ifdef SA_NOCLDWAIT
+                  SA_NOCLDWAIT_LINUX |  //
+#endif
+                  SA_NOCLDSTOP_LINUX;
   if (sigsetsize != 8) return einval();
   if (!(1 <= sig && sig <= 64)) return einval();
   if (sig == SIGKILL_LINUX || sig == SIGSTOP_LINUX) return einval();
@@ -1998,7 +2008,9 @@ static int SysSigaction(struct Machine *m, int sig, i64 act, i64 old,
       syshand.sa_flags = SA_SIGINFO;
       if (flags & SA_RESTART_LINUX) syshand.sa_flags |= SA_RESTART;
       if (flags & SA_NOCLDSTOP_LINUX) syshand.sa_flags |= SA_NOCLDSTOP;
+#ifdef SA_NOCLDWAIT
       if (flags & SA_NOCLDWAIT_LINUX) syshand.sa_flags |= SA_NOCLDWAIT;
+#endif
       switch (handler) {
         case SIG_DFL_LINUX:
           syshand.sa_handler = SIG_DFL;
