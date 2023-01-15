@@ -96,7 +96,12 @@
 #define EMEDIUMTYPE_LINUX     124
 #define EBADFD_LINUX          77
 
-#define AT_FDCWD_LINUX -100
+#define AT_FDCWD_LINUX            -100
+#define AT_SYMLINK_NOFOLLOW_LINUX 0x0100
+#define AT_REMOVEDIR_LINUX        0x0200
+#define AT_EACCESS_LINUX          0x0200
+#define AT_SYMLINK_FOLLOW_LINUX   0x0400
+#define AT_EMPTY_PATH_LINUX       0x1000
 
 #define O_RDONLY_LINUX  0
 #define O_WRONLY_LINUX  1
@@ -110,6 +115,8 @@
 #define O_NDELAY_LINUX    0x000800
 #define O_DIRECT_LINUX    0x004000
 #define O_DIRECTORY_LINUX 0x010000
+#define __O_TMPFILE_LINUX 0x400000
+#define O_TMPFILE_LINUX   (__O_TMPFILE_LINUX | O_DIRECTORY_LINUX)
 #define O_NOFOLLOW_LINUX  0x020000
 #define O_CLOEXEC_LINUX   0x080000
 #define O_NOCTTY_LINUX    0x000100
@@ -264,6 +271,7 @@
 #define AF_UNSPEC_LINUX 0
 #define AF_UNIX_LINUX   1
 #define AF_INET_LINUX   2
+#define AF_INET6_LINUX  10
 
 #define SOL_SOCKET_LINUX 1
 #define SOL_TCP_LINUX    6
@@ -325,26 +333,151 @@
 #define GRND_NONBLOCK_LINUX 1
 #define GRND_RANDOM_LINUX   2
 
-#define VMIN_LINUX     7
-#define VTIME_LINUX    6
-#define NCCS_LINUX     20
-#define VINTR_LINUX    1
-#define VQUIT_LINUX    2
-#define VERASE_LINUX   3
-#define VKILL_LINUX    4
-#define VEOF_LINUX     5
-#define VSWTC_LINUX    8
-#define VSTART_LINUX   9
-#define VSTOP_LINUX    10
-#define VSUSP_LINUX    11
-#define VEOL_LINUX     12
-#define VREPRINT_LINUX 13
-#define VDISCARD_LINUX 14
-#define VWERASE_LINUX  15
-#define VLNEXT_LINUX   16
-#define VEOL2_LINUX    17
+#define NCCS_LINUX     19
+#define VINTR_LINUX    0
+#define VQUIT_LINUX    1
+#define VERASE_LINUX   2
+#define VKILL_LINUX    3
+#define VEOF_LINUX     4
+#define VTIME_LINUX    5
+#define VMIN_LINUX     6
+#define VSWTC_LINUX    7
+#define VSTART_LINUX   8
+#define VSTOP_LINUX    9
+#define VSUSP_LINUX    10
+#define VEOL_LINUX     11
+#define VREPRINT_LINUX 12
+#define VDISCARD_LINUX 13
+#define VWERASE_LINUX  14
+#define VLNEXT_LINUX   15
+#define VEOL2_LINUX    16
 
 #define RLIM_INFINITY_LINUX 0xffffffffffffffffull
+
+#define MINSIGSTKSZ_LINUX   2048
+#define SS_ONSTACK_LINUX    1
+#define SS_DISABLE_LINUX    2
+#define SS_AUTODISARM_LINUX 0x80000000u
+
+// termios::c_iflag
+#define IGNBRK_LINUX  0000001
+#define BRKINT_LINUX  0000002
+#define IGNPAR_LINUX  0000004
+#define PARMRK_LINUX  0000010
+#define INPCK_LINUX   0000020
+#define ISTRIP_LINUX  0000040
+#define INLCR_LINUX   0000100
+#define IGNCR_LINUX   0000200
+#define ICRNL_LINUX   0000400
+#define IUCLC_LINUX   0001000
+#define IXON_LINUX    0002000
+#define IXANY_LINUX   0004000
+#define IXOFF_LINUX   0010000
+#define IMAXBEL_LINUX 0020000
+#define IUTF8_LINUX   0040000
+
+// termios::c_oflag
+#define OPOST_LINUX  0000001
+#define OLCUC_LINUX  0000002
+#define ONLCR_LINUX  0000004
+#define OCRNL_LINUX  0000010
+#define ONOCR_LINUX  0000020
+#define ONLRET_LINUX 0000040
+#define OFILL_LINUX  0000100
+#define OFDEL_LINUX  0000200
+#define NLDLY_LINUX  0000400
+#define NL0_LINUX    0000000
+#define NL1_LINUX    0000400
+#define CRDLY_LINUX  0003000
+#define CR0_LINUX    0000000
+#define CR1_LINUX    0001000
+#define CR2_LINUX    0002000
+#define CR3_LINUX    0003000
+#define TABDLY_LINUX 0014000
+#define TAB0_LINUX   0000000
+#define TAB1_LINUX   0004000
+#define TAB2_LINUX   0010000
+#define TAB3_LINUX   0014000
+#define XTABS_LINUX  0014000
+#define BSDLY_LINUX  0020000
+#define BS0_LINUX    0000000
+#define BS1_LINUX    0020000
+#define VTDLY_LINUX  0040000
+#define VT0_LINUX    0000000
+#define VT1_LINUX    0040000
+#define FFDLY_LINUX  0100000
+#define FF0_LINUX    0000000
+#define FF1_LINUX    0100000
+
+// termios::c_cflag
+#define CBAUD_LINUX    0010017
+#define B0_LINUX       0000000  // shut it down
+#define B50_LINUX      0000001
+#define B75_LINUX      0000002
+#define B110_LINUX     0000003
+#define B134_LINUX     0000004
+#define B150_LINUX     0000005
+#define B200_LINUX     0000006
+#define B300_LINUX     0000007
+#define B600_LINUX     0000010
+#define B1200_LINUX    0000011
+#define B1800_LINUX    0000012
+#define B2400_LINUX    0000013
+#define B4800_LINUX    0000014
+#define B9600_LINUX    0000015
+#define B19200_LINUX   0000016
+#define B38400_LINUX   0000017
+#define EXTA_LINUX     B19200
+#define EXTB_LINUX     B38400
+#define CSIZE_LINUX    0000060
+#define CS5_LINUX      0000000
+#define CS6_LINUX      0000020
+#define CS7_LINUX      0000040
+#define CS8_LINUX      0000060
+#define CSTOPB_LINUX   0000100
+#define CREAD_LINUX    0000200
+#define PARENB_LINUX   0000400
+#define PARODD_LINUX   0001000
+#define HUPCL_LINUX    0002000
+#define CLOCAL_LINUX   0004000
+#define CBAUDEX_LINUX  0010000
+#define B57600_LINUX   0010001
+#define B115200_LINUX  0010002
+#define B230400_LINUX  0010003
+#define B460800_LINUX  0010004
+#define B500000_LINUX  0010005
+#define B576000_LINUX  0010006
+#define B921600_LINUX  0010007
+#define B1000000_LINUX 0010010
+#define B1152000_LINUX 0010011
+#define B1500000_LINUX 0010012
+#define B2000000_LINUX 0010013
+#define B2500000_LINUX 0010014
+#define B3000000_LINUX 0010015
+#define B3500000_LINUX 0010016
+#define B4000000_LINUX 0010017
+#define CIBAUD_LINUX   002003600000  // input baud rate (isn't used)
+#define CMSPAR_LINUX   010000000000  // sticky parity
+#define CRTSCTS_LINUX  020000000000  // flow control
+
+// termios::c_lflag
+#define ISIG_LINUX    0000001
+#define ICANON_LINUX  0000002
+#define XCASE_LINUX   0000004
+#define ECHO_LINUX    0000010
+#define ECHOE_LINUX   0000020
+#define ECHOK_LINUX   0000040
+#define ECHONL_LINUX  0000100
+#define NOFLSH_LINUX  0000200
+#define TOSTOP_LINUX  0000400
+#define ECHOCTL_LINUX 0001000
+#define ECHOPRT_LINUX 0002000
+#define ECHOKE_LINUX  0004000
+#define FLUSHO_LINUX  0010000
+#define PENDIN_LINUX  0040000
+#define IEXTEN_LINUX  0100000
+
+#define FD_SETSIZE_LINUX 1024
 
 struct iovec_linux {
   u8 iov_base[8];
@@ -391,9 +524,12 @@ struct termios_linux {
   u8 c_oflag[4];
   u8 c_cflag[4];
   u8 c_lflag[4];
-  u8 c_cc[32];
-  u8 c_ispeed[4];
-  u8 c_ospeed[4];
+  u8 c_line;
+  u8 c_cc[NCCS_LINUX];
+};
+
+struct sockaddr_linux {
+  u8 sa_family[2];
 };
 
 struct sockaddr_un_linux {
@@ -410,10 +546,17 @@ struct sockaddr_in_linux {
 
 struct sockaddr_in6_linux {
   u8 sin6_family[2];
-  u8 sin6_port[2];
+  u16 sin6_port;
   u8 sin6_flowinfo[4];
   u8 sin6_addr[16];
   u8 sin6_scope_id[4];
+};
+
+struct sockaddr_storage_linux {
+  union {
+    u8 ss_family[2];
+    char ss_storage[128];
+  };
 };
 
 struct stat_linux {
@@ -587,6 +730,22 @@ struct tms_linux {
   u8 tms_stime[8];   // system time
   u8 tms_cutime[8];  // user time of children
   u8 tms_cstime[8];  // system time of children
+};
+
+struct sigaltstack_linux {
+  u8 ss_sp[8];     // base address of stack
+  u8 ss_flags[4];  // SS_???_LINUX flags
+  u8 pad1_[4];     //
+  u8 ss_size[8];   // size of stack
+};
+
+struct pselect6_linux {
+  u8 sigmaskaddr[8];
+  u8 sigmasksize[8];
+};
+
+struct sigset_linux {
+  u8 sigmask[8];
 };
 
 int sysinfo_linux(struct sysinfo_linux *);

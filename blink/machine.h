@@ -15,6 +15,7 @@
 #include "blink/fds.h"
 #include "blink/jit.h"
 #include "blink/linux.h"
+#include "blink/log.h"
 #include "blink/tsan.h"
 #include "blink/x86.h"
 
@@ -250,6 +251,7 @@ struct System {
 };
 
 struct JitPath {
+  int skip;
   int skew;
   i64 start;
   int elements;
@@ -357,6 +359,7 @@ struct Machine {                           //
   bool metal;                              //
   bool interrupted;                        //
   sigjmp_buf onhalt;                       //
+  struct sigaltstack_linux sigaltstack;    //
   i64 ctid;                                //
   int tid;                                 //
   sigset_t spawn_sigmask;                  //
@@ -412,6 +415,8 @@ bool OverlapsPrecious(i64, i64) pureconst;
 char **CopyStrList(struct Machine *, i64);
 char *CopyStr(struct Machine *, i64);
 char *LoadStr(struct Machine *, i64);
+const void *Schlep(struct Machine *, i64, size_t);
+bool IsValidMemory(struct Machine *, i64, i64, int);
 int RegisterMemory(struct Machine *, i64, void *, size_t);
 u8 *GetPageAddress(struct System *, u64);
 u8 *GetHostAddress(struct Machine *, u64, long);
@@ -453,6 +458,9 @@ void FastJmp(struct Machine *, u64);
 void FastJmpAbs(u64, struct Machine *);
 void FastLeave(struct Machine *);
 void FastRet(struct Machine *);
+
+typedef void (*putreg64_f)(u64, struct Machine *);
+extern const putreg64_f kPutReg64[16];
 
 u64 Pick(u32, u64, u64);
 typedef u32 (*cc_f)(struct Machine *);
@@ -598,29 +606,38 @@ extern void (*AddPath_StartOp_Hook)(P);
 bool AddPath(P);
 void FlushSkew(P);
 bool CreatePath(P);
+void Connect(P, u64);
 void CompletePath(P);
 void AddPath_EndOp(P);
+bool FuseBranchTest(P);
 void AddPath_StartOp(P);
 long GetPrologueSize(void);
+bool FuseBranchCmp(P, bool);
+i64 GetIp(struct Machine *);
 void FinishPath(struct Machine *);
+void FuseOp(struct Machine *, i64);
 void AbandonPath(struct Machine *);
 void AddIp(struct Machine *, long);
+void BeginCod(struct Machine *, i64);
 void AdvanceIp(struct Machine *, long);
 void SkewIp(struct Machine *, long, long);
 
+void Op2f01(P);
 void OpTest(P);
 void OpAlui(P);
 void LoadAluArgs(P);
 void LoadAluFlipArgs(P);
 i64 FastAnd8(struct Machine *, u64, u64);
 i64 FastSub8(struct Machine *, u64, u64);
-
-void ZeroReg(struct Machine *, long);
 void ZeroRegFlags(struct Machine *, long);
 
 i32 Imul32(i32, i32, struct Machine *);
 i64 Imul64(i64, i64, struct Machine *);
 void Mulx64(u64, struct Machine *, long, long);
+u32 JustMul32(u32, u32, struct Machine *);
+u64 JustMul64(u64, u64, struct Machine *);
+void MulAxDx(u64, struct Machine *);
+void JustMulAxDx(u64, struct Machine *);
 
 void OpPsdMuld1(u8 *, struct Machine *, long);
 void OpPsdAddd1(u8 *, struct Machine *, long);
@@ -633,6 +650,13 @@ void Int64ToDouble(i64, struct Machine *, long);
 void Int32ToDouble(i32, struct Machine *, long);
 void MovsdWpsVpsOp(u8 *, struct Machine *, long);
 
-void SetupClog(struct Machine *);
+void SetupCod(struct Machine *);
+void WriteCod(const char *, ...);
+void FlushCod(struct JitBlock *);
+#if LOG_COD
+void LogCodOp(struct Machine *, const char *);
+#else
+#define LogCodOp(m, s) (void)0
+#endif
 
 #endif /* BLINK_MACHINE_H_ */

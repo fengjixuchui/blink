@@ -67,12 +67,16 @@ static size_t GetBigSize(size_t n) {
 
 void FreeBig(void *p, size_t n) {
   if (!p) return;
+#if defined(__CYGWIN__) || defined(__EMSCRIPTEN__)
+  unassert(!munmap(p, n));
+#else
   unassert(!munmap(p, GetBigSize(n)));
+#endif
 }
 
 void *AllocateBig(size_t n) {
   void *p;
-#if defined(__EMSCRIPTEN__)
+#if defined(__CYGWIN__) || defined(__EMSCRIPTEN__)
   p = Mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0,
            "big");
   return p != MAP_FAILED ? p : 0;
@@ -232,6 +236,7 @@ struct Machine *NewMachine(struct System *system, struct Machine *parent) {
   m->nolinear = system->nolinear;
   m->codesize = system->codesize;
   m->codestart = system->codestart;
+  Write32(m->sigaltstack.ss_flags, SS_DISABLE_LINUX);
   m->fun = system->fun ? system->fun - system->codestart : 0;
   if (parent) {
     m->tid = (system->next_tid++ & (kMaxThreadIds - 1)) + kMinThreadId;

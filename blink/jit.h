@@ -12,6 +12,8 @@
 #define kJitFit          1000
 #define kJitAlign        16
 #define kJitJumpTries    16
+#define kJitMemorySize   32505856
+#define kJitMemoryAlign  65536
 #define kJitMinBlockSize 262144
 
 #ifdef __x86_64__
@@ -115,7 +117,7 @@ struct JitStage {
 
 struct JitBlock {
   u8 *addr;
-  long clog;
+  long cod;
   long start;
   long index;
   long committed;
@@ -127,8 +129,8 @@ struct JitBlock {
 
 struct Jit {
   long pagesize;
-  _Atomic(int) blocksize;
   _Atomic(bool) disabled;
+  _Atomic(long) blocksize;
   pthread_mutex_t lock;
   struct Dll *blocks;
   struct Dll *jumps;
@@ -147,7 +149,7 @@ bool AppendJit(struct JitBlock *, const void *, long);
 int AbandonJit(struct Jit *, struct JitBlock *);
 int FlushJit(struct Jit *);
 struct JitBlock *StartJit(struct Jit *);
-bool AlignJit(struct JitBlock *, int);
+bool AlignJit(struct JitBlock *, int, int);
 bool AppendJitRet(struct JitBlock *);
 bool AppendJitNop(struct JitBlock *);
 bool AppendJitTrap(struct JitBlock *);

@@ -22,6 +22,7 @@
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
 #include <signal.h>
+#include <stddef.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
@@ -29,6 +30,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -39,6 +41,7 @@
 #include "blink/errno.h"
 #include "blink/linux.h"
 #include "blink/log.h"
+#include "blink/macros.h"
 #include "blink/map.h"
 #include "blink/sigwinch.h"
 #include "blink/xlat.h"
@@ -318,6 +321,7 @@ int XlatSocketFamily(int x) {
     XLAT(AF_UNSPEC_LINUX, AF_UNSPEC);
     XLAT(AF_UNIX_LINUX, AF_UNIX);
     XLAT(AF_INET_LINUX, AF_INET);
+    XLAT(AF_INET6_LINUX, AF_INET6);
     default:
       LOGF("%s %d not supported yet", "socket family", x);
       errno = ENOPROTOOPT;
@@ -329,6 +333,7 @@ int UnXlatSocketFamily(int x) {
   if (x == AF_UNSPEC) return AF_UNSPEC_LINUX;
   if (x == AF_UNIX) return AF_UNIX_LINUX;
   if (x == AF_INET) return AF_INET_LINUX;
+  if (x == AF_INET6) return AF_INET6_LINUX;
   LOGF("don't know how to translate %s %d", "socket family", x);
   return x;
 }
@@ -510,18 +515,6 @@ int XlatClock(int x) {
   }
 }
 
-int XlatAtf(int x) {
-  int res = 0;
-  if (x & 0x0100) res |= AT_SYMLINK_NOFOLLOW, x &= ~0x0100;
-  if (x & 0x0200) res |= AT_REMOVEDIR, x &= ~0x0200;
-  if (x & 0x0400) res |= AT_SYMLINK_FOLLOW, x &= ~0x0400;
-  if (x) {
-    LOGF("%s %d not supported yet", "atf", x);
-    return einval();
-  }
-  return res;
-}
-
 int XlatAccMode(int x) {
   switch (x & O_ACCMODE_LINUX) {
     case O_RDONLY_LINUX:
@@ -574,6 +567,13 @@ int XlatOpenFlags(int x) {
 #ifdef O_DIRECT
   if (x & O_DIRECT_LINUX) res |= O_DIRECT, x &= ~O_DIRECT_LINUX;
 #endif
+#ifdef O_TMPFILE
+  if ((x & O_TMPFILE_LINUX) == O_TMPFILE_LINUX) {
+    res |= O_TMPFILE;
+    x &= ~O_TMPFILE_LINUX;
+  }
+  // order matters: O_DIRECTORY ⊂ O_TMPFILE
+#endif
   if (x & O_DIRECTORY_LINUX) {
     res |= O_DIRECTORY;
     x &= ~O_DIRECTORY_LINUX;
@@ -620,6 +620,12 @@ int UnXlatOpenFlags(int x) {
 #ifdef O_DIRECT
   if (x & O_DIRECT) res |= O_DIRECT_LINUX;
 #endif
+#ifdef O_TMPFILE
+  if ((x & O_TMPFILE) == O_TMPFILE) {
+    res |= O_TMPFILE_LINUX;
+  }
+  // order matters: O_DIRECTORY ⊂ O_TMPFILE
+#endif
   if (x & O_DIRECTORY) res |= O_DIRECTORY_LINUX;
 #ifdef O_NOFOLLOW
   if (x & O_NOFOLLOW) res |= O_NOFOLLOW_LINUX;
@@ -638,23 +644,136 @@ int UnXlatOpenFlags(int x) {
   return res;
 }
 
-int XlatSockaddrToHost(struct sockaddr_in *dst,
-                       const struct sockaddr_in_linux *src) {
-  int family;
-  if ((family = XlatSocketFamily(Read16(src->sin_family))) == -1) return -1;
-  memset(dst, 0, sizeof(*dst));
-  dst->sin_family = family;
-  dst->sin_port = src->sin_port;
-  dst->sin_addr.s_addr = src->sin_addr;
-  return 0;
+int XlatSockaddrToHost(struct sockaddr_storage *dst,
+                       const struct sockaddr_linux *src, u32 srclen) {
+  if (srclen < 2) {
+    LOGF("sockaddr size too small for %s", "family");
+    return einval();
+  }
+  switch (Read16(src->sa_family)) {
+    case AF_UNIX_LINUX: {
+      size_t n;
+      struct sockaddr_un *dst_un;
+      const struct sockaddr_un_linux *src_un;
+      if (srclen < offsetof(struct sockaddr_un_linux, sun_path)) {
+        LOGF("sockaddr size too small for %s", "sockaddr_un_linux");
+        return einval();
+      }
+      dst_un = (struct sockaddr_un *)dst;
+      src_un = (const struct sockaddr_un_linux *)src;
+      n = strnlen(src_un->sun_path,
+                  MIN(srclen - offsetof(struct sockaddr_un_linux, sun_path),
+                      sizeof(src_un->sun_path)));
+      if (n >= sizeof(dst_un->sun_path)) {
+        LOGF("sockaddr_un path too long for host");
+        return einval();
+      }
+      memset(dst_un, 0, sizeof(*dst_un));
+      dst_un->sun_family = AF_UNIX;
+      if (n) memcpy(dst_un->sun_path, src_un->sun_path, n);
+      dst_un->sun_path[n] = 0;
+      return sizeof(struct sockaddr_un);
+    }
+    case AF_INET_LINUX: {
+      struct sockaddr_in *dst_in;
+      const struct sockaddr_in_linux *src_in;
+      if (srclen < sizeof(struct sockaddr_in_linux)) {
+        LOGF("sockaddr size too small for %s", "sockaddr_in_linux");
+        return einval();
+      }
+      dst_in = (struct sockaddr_in *)dst;
+      src_in = (const struct sockaddr_in_linux *)src;
+      memset(dst_in, 0, sizeof(*dst_in));
+      dst_in->sin_family = AF_INET;
+      dst_in->sin_port = src_in->sin_port;
+      dst_in->sin_addr.s_addr = src_in->sin_addr;
+      return sizeof(struct sockaddr_in);
+    }
+    case AF_INET6_LINUX: {
+      struct sockaddr_in6 *dst_in;
+      const struct sockaddr_in6_linux *src_in;
+      _Static_assert(sizeof(dst_in->sin6_addr) == 16, "");
+      _Static_assert(sizeof(src_in->sin6_addr) == 16, "");
+      if (srclen < sizeof(struct sockaddr_in6_linux)) {
+        LOGF("sockaddr size too small for %s", "sockaddr_in6_linux");
+        return einval();
+      }
+      dst_in = (struct sockaddr_in6 *)dst;
+      src_in = (const struct sockaddr_in6_linux *)src;
+      memset(dst_in, 0, sizeof(*dst_in));
+      dst_in->sin6_family = AF_INET6;
+      dst_in->sin6_port = src_in->sin6_port;
+      memcpy(&dst_in->sin6_addr, src_in->sin6_addr, 16);
+      return sizeof(struct sockaddr_in6);
+    }
+    default:
+      LOGF("%s %d not supported yet", "socket family", Read16(src->sa_family));
+      errno = ENOPROTOOPT;
+      return -1;
+  }
 }
 
-void XlatSockaddrToLinux(struct sockaddr_in_linux *dst,
-                         const struct sockaddr_in *src) {
-  memset(dst, 0, sizeof(*dst));
-  Write16(dst->sin_family, UnXlatSocketFamily(src->sin_family));
-  dst->sin_port = src->sin_port;
-  dst->sin_addr = src->sin_addr.s_addr;
+int XlatSockaddrToLinux(struct sockaddr_storage_linux *dst,
+                        const struct sockaddr *src, socklen_t srclen) {
+  if (srclen < 2) {
+    LOGF("sockaddr size too small for %s", "family");
+    return einval();
+  }
+  if (src->sa_family == AF_UNIX) {
+    size_t n;
+    struct sockaddr_un_linux *dst_un;
+    const struct sockaddr_un *src_un;
+    if (srclen < offsetof(struct sockaddr_un, sun_path)) {
+      LOGF("sockaddr size too small for %s", "sockaddr_un");
+      return einval();
+    }
+    dst_un = (struct sockaddr_un_linux *)dst;
+    src_un = (const struct sockaddr_un *)src;
+    n = strnlen(src_un->sun_path,
+                MIN(srclen - offsetof(struct sockaddr_un, sun_path),
+                    sizeof(src_un->sun_path)));
+    if (n >= sizeof(dst_un->sun_path)) {
+      LOGF("sockaddr_un path too long for linux");
+      return einval();
+    }
+    memset(dst_un, 0, sizeof(*dst_un));
+    Write16(dst_un->sun_family, AF_UNIX_LINUX);
+    if (n) memcpy(dst_un->sun_path, src_un->sun_path, n);
+    dst_un->sun_path[n] = 0;
+    return offsetof(struct sockaddr_un, sun_path) + n + 1;
+  } else if (src->sa_family == AF_INET) {
+    struct sockaddr_in_linux *dst_in;
+    const struct sockaddr_in *src_in;
+    if (srclen < sizeof(struct sockaddr_in)) {
+      LOGF("sockaddr size too small for %s", "sockaddr_in");
+      return einval();
+    }
+    dst_in = (struct sockaddr_in_linux *)dst;
+    src_in = (const struct sockaddr_in *)src;
+    memset(dst_in, 0, sizeof(*dst_in));
+    Write16(dst_in->sin_family, AF_INET_LINUX);
+    dst_in->sin_port = src_in->sin_port;
+    dst_in->sin_addr = src_in->sin_addr.s_addr;
+    return sizeof(struct sockaddr_in_linux);
+  } else if (src->sa_family == AF_INET6) {
+    struct sockaddr_in6_linux *dst_in;
+    const struct sockaddr_in6 *src_in;
+    if (srclen < sizeof(struct sockaddr_in6)) {
+      LOGF("sockaddr size too small for %s", "sockaddr_in6");
+      return einval();
+    }
+    dst_in = (struct sockaddr_in6_linux *)dst;
+    src_in = (const struct sockaddr_in6 *)src;
+    memset(dst_in, 0, sizeof(*dst_in));
+    Write16(dst_in->sin6_family, AF_INET6_LINUX);
+    dst_in->sin6_port = src_in->sin6_port;
+    memcpy(dst_in->sin6_addr, &src_in->sin6_addr, 16);
+    return sizeof(struct sockaddr_in6_linux);
+  } else {
+    LOGF("%s %d not supported yet", "socket family", src->sa_family);
+    errno = ENOPROTOOPT;
+    return -1;
+  }
 }
 
 void XlatStatToLinux(struct stat_linux *dst, const struct stat *src) {
@@ -783,17 +902,19 @@ void XlatLinuxToSigset(sigset_t *dst, const u8 src[8]) {
 
 static int XlatTermiosCflag(int x) {
   int r = 0;
-  if (x & 0x0040) r |= CSTOPB;
-  if (x & 0x0080) r |= CREAD;
-  if (x & 0x0100) r |= PARENB;
-  if (x & 0x0200) r |= PARODD;
-  if (x & 0x0400) r |= HUPCL;
-  if (x & 0x0800) r |= CLOCAL;
-  if ((x & 0x0030) == 0x0010) {
+  if (x & CSTOPB_LINUX) r |= CSTOPB;
+  if (x & CREAD_LINUX) r |= CREAD;
+  if (x & PARENB_LINUX) r |= PARENB;
+  if (x & PARODD_LINUX) r |= PARODD;
+  if (x & HUPCL_LINUX) r |= HUPCL;
+  if (x & CLOCAL_LINUX) r |= CLOCAL;
+  if ((x & CSIZE_LINUX) == CS5_LINUX) {
+    r |= CS5;
+  } else if ((x & CSIZE_LINUX) == CS6_LINUX) {
     r |= CS6;
-  } else if ((x & 0x0030) == 0x0020) {
+  } else if ((x & CSIZE_LINUX) == CS7_LINUX) {
     r |= CS7;
-  } else if ((x & 0x0030) == 0x0030) {
+  } else if ((x & CSIZE_LINUX) == CS8_LINUX) {
     r |= CS8;
   }
   return r;
@@ -801,224 +922,216 @@ static int XlatTermiosCflag(int x) {
 
 static int UnXlatTermiosCflag(int x) {
   int r = 0;
-  if (x & CSTOPB) r |= 0x0040;
-  if (x & CREAD) r |= 0x0080;
-  if (x & PARENB) r |= 0x0100;
-  if (x & PARODD) r |= 0x0200;
-  if (x & HUPCL) r |= 0x0400;
-  if (x & CLOCAL) r |= 0x0800;
+  if (x & CSTOPB) r |= CSTOPB_LINUX;
+  if (x & CREAD) r |= CREAD_LINUX;
+  if (x & PARENB) r |= PARENB_LINUX;
+  if (x & PARODD) r |= PARODD_LINUX;
+  if (x & HUPCL) r |= HUPCL_LINUX;
+  if (x & CLOCAL) r |= CLOCAL_LINUX;
   if ((x & CSIZE) == CS5) {
-    r |= 0x0000;
+    r |= CS5_LINUX;
   } else if ((x & CSIZE) == CS6) {
-    r |= 0x0010;
+    r |= CS6_LINUX;
   } else if ((x & CSIZE) == CS7) {
-    r |= 0x0020;
+    r |= CS7_LINUX;
   } else if ((x & CSIZE) == CS8) {
-    r |= 0x0030;
+    r |= CS8_LINUX;
   }
   return r;
 }
 
 static int XlatTermiosLflag(int x) {
   int r = 0;
-  if (x & 0x0001) r |= ISIG;
-  if (x & 0x0002) r |= ICANON;
-  if (x & 0x0008) r |= ECHO;
-  if (x & 0x0010) r |= ECHOE;
-  if (x & 0x0020) r |= ECHOK;
-  if (x & 0x0040) r |= ECHONL;
-  if (x & 0x0080) r |= NOFLSH;
-  if (x & 0x0100) r |= TOSTOP;
-  if (x & 0x8000) r |= IEXTEN;
+  if (x & ISIG_LINUX) r |= ISIG;
+  if (x & ICANON_LINUX) r |= ICANON;
+  if (x & ECHO_LINUX) r |= ECHO;
+  if (x & ECHOE_LINUX) r |= ECHOE;
+  if (x & ECHOK_LINUX) r |= ECHOK;
+  if (x & ECHONL_LINUX) r |= ECHONL;
+  if (x & NOFLSH_LINUX) r |= NOFLSH;
+  if (x & TOSTOP_LINUX) r |= TOSTOP;
+  if (x & IEXTEN_LINUX) r |= IEXTEN;
 #ifdef ECHOCTL
-  if (x & 0x0200) r |= ECHOCTL;
+  if (x & ECHOCTL_LINUX) r |= ECHOCTL;
 #endif
 #ifdef ECHOPRT
-  if (x & 0x0400) r |= ECHOPRT;
+  if (x & ECHOPRT_LINUX) r |= ECHOPRT;
 #endif
 #ifdef ECHOKE
-  if (x & 0x0800) r |= ECHOKE;
+  if (x & ECHOKE_LINUX) r |= ECHOKE;
 #endif
 #ifdef FLUSHO
-  if (x & 0x1000) r |= FLUSHO;
+  if (x & FLUSHO_LINUX) r |= FLUSHO;
 #endif
 #ifdef PENDIN
-  if (x & 0x4000) r |= PENDIN;
+  if (x & PENDIN_LINUX) r |= PENDIN;
 #endif
 #ifdef XCASE
-  if (x & 0x0004) r |= XCASE;
+  if (x & XCASE_LINUX) r |= XCASE;
 #endif
   return r;
 }
 
 static int UnXlatTermiosLflag(int x) {
   int r = 0;
-  if (x & ISIG) r |= 0x0001;
-  if (x & ICANON) r |= 0x0002;
-  if (x & ECHO) r |= 0x0008;
-  if (x & ECHOE) r |= 0x0010;
-  if (x & ECHOK) r |= 0x0020;
-  if (x & ECHONL) r |= 0x0040;
-  if (x & NOFLSH) r |= 0x0080;
-  if (x & TOSTOP) r |= 0x0100;
-  if (x & IEXTEN) r |= 0x8000;
+  if (x & ISIG) r |= ISIG_LINUX;
+  if (x & ICANON) r |= ICANON_LINUX;
+  if (x & ECHO) r |= ECHO_LINUX;
+  if (x & ECHOE) r |= ECHOE_LINUX;
+  if (x & ECHOK) r |= ECHOK_LINUX;
+  if (x & ECHONL) r |= ECHONL_LINUX;
+  if (x & NOFLSH) r |= NOFLSH_LINUX;
+  if (x & TOSTOP) r |= TOSTOP_LINUX;
+  if (x & IEXTEN) r |= IEXTEN_LINUX;
 #ifdef ECHOCTL
-  if (x & ECHOCTL) r |= 0x0200;
+  if (x & ECHOCTL) r |= ECHOCTL_LINUX;
 #endif
 #ifdef ECHOPRT
-  if (x & ECHOPRT) r |= 0x0400;
+  if (x & ECHOPRT) r |= ECHOPRT_LINUX;
 #endif
 #ifdef ECHOKE
-  if (x & ECHOKE) r |= 0x0800;
+  if (x & ECHOKE) r |= ECHOKE_LINUX;
 #endif
 #ifdef FLUSHO
-  if (x & FLUSHO) r |= 0x1000;
+  if (x & FLUSHO) r |= FLUSHO_LINUX;
 #endif
 #ifdef PENDIN
-  if (x & PENDIN) r |= 0x4000;
+  if (x & PENDIN) r |= PENDIN_LINUX;
 #endif
 #ifdef XCASE
-  if (x & XCASE) r |= 0x0004;
+  if (x & XCASE) r |= XCASE_LINUX;
 #endif
   return r;
 }
 
 static int XlatTermiosIflag(int x) {
   int r = 0;
-  if (x & 0x0001) r |= IGNBRK;
-  if (x & 0x0002) r |= BRKINT;
-  if (x & 0x0004) r |= IGNPAR;
-  if (x & 0x0008) r |= PARMRK;
-  if (x & 0x0010) r |= INPCK;
-  if (x & 0x0020) r |= ISTRIP;
-  if (x & 0x0040) r |= INLCR;
-  if (x & 0x0080) r |= IGNCR;
-  if (x & 0x0100) r |= ICRNL;
-  if (x & 0x0400) r |= IXON;
+  if (x & IGNBRK_LINUX) r |= IGNBRK;
+  if (x & BRKINT_LINUX) r |= BRKINT;
+  if (x & IGNPAR_LINUX) r |= IGNPAR;
+  if (x & PARMRK_LINUX) r |= PARMRK;
+  if (x & INPCK_LINUX) r |= INPCK;
+  if (x & ISTRIP_LINUX) r |= ISTRIP;
+  if (x & INLCR_LINUX) r |= INLCR;
+  if (x & IGNCR_LINUX) r |= IGNCR;
+  if (x & ICRNL_LINUX) r |= ICRNL;
+  if (x & IXON_LINUX) r |= IXON;
 #ifdef IXANY
-  if (x & 0x0800) r |= IXANY;
+  if (x & IXANY_LINUX) r |= IXANY;
 #endif
-  if (x & 0x1000) r |= IXOFF;
+  if (x & IXOFF_LINUX) r |= IXOFF;
 #ifdef IMAXBEL
-  if (x & 0x2000) r |= IMAXBEL;
+  if (x & IMAXBEL_LINUX) r |= IMAXBEL;
 #endif
 #ifdef IUTF8
-  if (x & 0x4000) r |= IUTF8;
+  if (x & IUTF8_LINUX) r |= IUTF8;
 #endif
 #ifdef IUCLC
-  if (x & 0x0200) r |= IUCLC;
+  if (x & IUCLC_LINUX) r |= IUCLC;
 #endif
   return r;
 }
 
 static int UnXlatTermiosIflag(int x) {
   int r = 0;
-  if (x & IGNBRK) r |= 0x0001;
-  if (x & BRKINT) r |= 0x0002;
-  if (x & IGNPAR) r |= 0x0004;
-  if (x & PARMRK) r |= 0x0008;
-  if (x & INPCK) r |= 0x0010;
-  if (x & ISTRIP) r |= 0x0020;
-  if (x & INLCR) r |= 0x0040;
-  if (x & IGNCR) r |= 0x0080;
-  if (x & ICRNL) r |= 0x0100;
-  if (x & IXON) r |= 0x0400;
+  if (x & IGNBRK) r |= IGNBRK_LINUX;
+  if (x & BRKINT) r |= BRKINT_LINUX;
+  if (x & IGNPAR) r |= IGNPAR_LINUX;
+  if (x & PARMRK) r |= PARMRK_LINUX;
+  if (x & INPCK) r |= INPCK_LINUX;
+  if (x & ISTRIP) r |= ISTRIP_LINUX;
+  if (x & INLCR) r |= INLCR_LINUX;
+  if (x & IGNCR) r |= IGNCR_LINUX;
+  if (x & ICRNL) r |= ICRNL_LINUX;
+  if (x & IXON) r |= IXON_LINUX;
 #ifdef IXANY
-  if (x & IXANY) r |= 0x0800;
+  if (x & IXANY) r |= IXANY_LINUX;
 #endif
-  if (x & IXOFF) r |= 0x1000;
+  if (x & IXOFF) r |= IXOFF_LINUX;
 #ifdef IMAXBEL
-  if (x & IMAXBEL) r |= 0x2000;
+  if (x & IMAXBEL) r |= IMAXBEL_LINUX;
 #endif
 #ifdef IUTF8
-  if (x & IUTF8) r |= 0x4000;
+  if (x & IUTF8) r |= IUTF8_LINUX;
 #endif
 #ifdef IUCLC
-  if (x & IUCLC) r |= 0x0200;
+  if (x & IUCLC) r |= IUCLC_LINUX;
 #endif
   return r;
 }
 
 static int XlatTermiosOflag(int x) {
   int r = 0;
-  if (x & 0x0001) r |= OPOST;
+  if (x & OPOST_LINUX) r |= OPOST;
 #ifdef ONLCR
-  if (x & 0x0004) r |= ONLCR;
+  if (x & ONLCR_LINUX) r |= ONLCR;
 #endif
 #ifdef OCRNL
-  if (x & 0x0008) r |= OCRNL;
+  if (x & OCRNL_LINUX) r |= OCRNL;
 #endif
 #ifdef ONOCR
-  if (x & 0x0010) r |= ONOCR;
+  if (x & ONOCR_LINUX) r |= ONOCR;
 #endif
 #ifdef ONLRET
-  if (x & 0x0020) r |= ONLRET;
+  if (x & ONLRET_LINUX) r |= ONLRET;
 #endif
 #ifdef OFILL
-  if (x & 0x0040) r |= OFILL;
+  if (x & OFILL_LINUX) r |= OFILL;
 #endif
 #ifdef OFDEL
-  if (x & 0x0080) r |= OFDEL;
+  if (x & OFDEL_LINUX) r |= OFDEL;
 #endif
 #ifdef NLDLY
-  if ((x & 0x0100) == 0x0000) {
+  if ((x & NLDLY_LINUX) == NL0_LINUX) {
     r |= NL0;
-  } else if ((x & 0x0100) == 0x0100) {
+  } else if ((x & NLDLY_LINUX) == NL1_LINUX) {
     r |= NL1;
-#ifdef NL2
-  } else if ((x & 0x0100) == 0x0000) {
-    r |= NL2;
-#endif
-#ifdef NL3
-  } else if ((x & 0x0100) == 0x0000) {
-    r |= NL3;
-#endif
   }
 #endif
 #ifdef CRDLY
-  if ((x & 0x0600) == 0x0000) {
+  if ((x & CRDLY_LINUX) == CR0_LINUX) {
     r |= CR0;
-  } else if ((x & 0x0600) == 0x0200) {
+  } else if ((x & CRDLY_LINUX) == CR1_LINUX) {
     r |= CR1;
-  } else if ((x & 0x0600) == 0x0400) {
+  } else if ((x & CRDLY_LINUX) == CR2_LINUX) {
     r |= CR2;
-  } else if ((x & 0x0600) == 0x0600) {
+  } else if ((x & CRDLY_LINUX) == CR3_LINUX) {
     r |= CR3;
   }
 #endif
 #ifdef TABDLY
-  if ((x & 0x1800) == 0x0000) {
+  if ((x & TABDLY_LINUX) == TAB0_LINUX) {
     r |= TAB0;
 #ifdef TAB1
-  } else if ((x & 0x1800) == 0x0800) {
+  } else if ((x & TABDLY_LINUX) == TAB1_LINUX) {
     r |= TAB1;
 #endif
 #ifdef TAB1
-  } else if ((x & 0x1800) == 0x1000) {
+  } else if ((x & TABDLY_LINUX) == TAB2_LINUX) {
     r |= TAB2;
 #endif
-  } else if ((x & 0x1800) == 0x1800) {
+  } else if ((x & TABDLY_LINUX) == TAB3_LINUX) {
     r |= TAB3;
   }
 #endif
 #ifdef BSDLY
-  if ((x & 0x2000) == 0x0000) {
+  if ((x & BSDLY_LINUX) == BS0_LINUX) {
     r |= BS0;
-  } else if ((x & 0x2000) == 0x2000) {
+  } else if ((x & BSDLY_LINUX) == BS1_LINUX) {
     r |= BS1;
   }
 #endif
 #ifdef VTBDLY
-  if ((x & 0x4000) == 0x0000) {
+  if ((x & VTDLY_LINUX) == VT0_LINUX) {
     r |= VT0;
-  } else if ((x & 0x4000) == 0x4000) {
+  } else if ((x & VTDLY_LINUX) == VT1_LINUX) {
     r |= VT1;
   }
 #endif
 #ifdef FFBDLY
-  if ((x & 0x8000) == 0x0000) {
+  if ((x & FFDLY_LINUX) == FF0_LINUX) {
     r |= FF0;
-  } else if ((x & 0x8000) == 0x8000) {
+  } else if ((x & FFDLY_LINUX) == FF1_LINUX) {
     r |= FF1;
   }
 #endif
@@ -1030,89 +1143,89 @@ static int XlatTermiosOflag(int x) {
 
 static int UnXlatTermiosOflag(int x) {
   int r = 0;
-  if (x & OPOST) r |= 0x0001;
+  if (x & OPOST) r |= OPOST_LINUX;
 #ifdef ONLCR
-  if (x & ONLCR) r |= 0x0004;
+  if (x & ONLCR) r |= ONLCR_LINUX;
 #endif
 #ifdef OCRNL
-  if (x & OCRNL) r |= 0x0008;
+  if (x & OCRNL) r |= OCRNL_LINUX;
 #endif
 #ifdef ONOCR
-  if (x & ONOCR) r |= 0x0010;
+  if (x & ONOCR) r |= ONOCR_LINUX;
 #endif
 #ifdef ONLRET
-  if (x & ONLRET) r |= 0x0020;
+  if (x & ONLRET) r |= ONLRET_LINUX;
 #endif
 #ifdef OFILL
-  if (x & OFILL) r |= 0x0040;
+  if (x & OFILL) r |= OFILL_LINUX;
 #endif
 #ifdef OFDEL
-  if (x & OFDEL) r |= 0x0080;
+  if (x & OFDEL) r |= OFDEL_LINUX;
 #endif
 #ifdef NLDLY
   if ((x & NLDLY) == NL0) {
-    r |= 0x0000;
+    r |= NL0_LINUX;
   } else if ((x & NLDLY) == NL1) {
-    r |= 0x0100;
+    r |= NL1_LINUX;
 #ifdef NL2
   } else if ((x & NLDLY) == NL2) {
-    r |= 0x0000;
+    r |= 0x0000;  // ???
 #endif
 #ifdef NL3
   } else if ((x & NLDLY) == NL3) {
-    r |= 0x0000;
+    r |= 0x0000;  // ???
 #endif
   }
 #endif
 #ifdef CRDLY
   if ((x & CRDLY) == CR0) {
-    r |= 0x0000;
+    r |= CR0_LINUX;
   } else if ((x & CRDLY) == CR1) {
-    r |= 0x0200;
+    r |= CR1_LINUX;
   } else if ((x & CRDLY) == CR2) {
-    r |= 0x0400;
+    r |= CR2_LINUX;
   } else if ((x & CRDLY) == CR3) {
-    r |= 0x0600;
+    r |= CR3_LINUX;
   }
 #endif
 #ifdef TABDLY
   if ((x & TABDLY) == TAB0) {
-    r |= 0x0000;
+    r |= TAB0_LINUX;
 #ifdef TAB1
   } else if ((x & TABDLY) == TAB1) {
-    r |= 0x0800;
+    r |= TAB1_LINUX;
 #endif
 #ifdef TAB2
   } else if ((x & TABDLY) == TAB2) {
-    r |= 0x1000;
+    r |= TAB2_LINUX;
 #endif
   } else if ((x & TABDLY) == TAB3) {
-    r |= 0x1800;
+    r |= TAB3_LINUX;
   }
 #endif
 #ifdef BSDLY
   if ((x & BSDLY) == BS0) {
-    r |= 0x0000;
+    r |= BS0_LINUX;
   } else if ((x & BSDLY) == BS1) {
-    r |= 0x2000;
+    r |= BS1_LINUX;
   }
 #endif
 #ifdef VTDLY
   if ((x & VTDLY) == VT0) {
-    r |= 0x0000;
+    r |= VT0_LINUX;
   } else if ((x & VTDLY) == VT1) {
-    r |= 0x4000;
+    r |= VT1_LINUX;
   }
 #endif
 #ifdef FFDLY
   if ((x & FFDLY) == FF0) {
-    r |= 0x0000;
+    r |= FF0_LINUX;
   } else if ((x & FFDLY) == FF1) {
-    r |= 0x8000;
+    r |= FF1_LINUX;
   }
 #endif
 #ifdef OLCUC
-  if (x & OLCUC) r |= 0x0002;
+  if (x & OLCUC) r |= OLCUC_LINUX;
 #endif
   return r;
 }

@@ -37,13 +37,13 @@
 
 void (*AddPath_StartOp_Hook)(P);
 
-#ifdef CLOG
-static int g_clog;
+#if LOG_COD
+static int g_cod;
 static struct Dis g_dis;
 #endif
 
-static void StartPath(struct Machine *m) {
-  JIX_LOGF("%" PRIx64 " <path>", m->ip);
+static void StartPath(struct Machine *m, i64 pc) {
+  JIX_LOGF("%" PRIx64 ":%" PRIx64 " <path>", GetPc(m), pc);
 }
 
 static void DebugOp(struct Machine *m, i64 expected_ip) {
@@ -54,23 +54,29 @@ static void DebugOp(struct Machine *m, i64 expected_ip) {
   unassert(m->ip == expected_ip);
 }
 
-static void StartOp(struct Machine *m) {
-  JIX_LOGF("%" PRIx64 "   <op>", GetPc(m));
-  JIX_LOGF("%" PRIx64 "     %s", GetPc(m), DescribeOp(m, GetPc(m)));
+static void StartOp(struct Machine *m, i64 pc) {
+  JIX_LOGF("%" PRIx64 ":%" PRIx64 "   <op>", GetPc(m), pc);
+  JIX_LOGF("%" PRIx64 ":%" PRIx64 "     %s", GetPc(m), pc, DescribeOp(m, pc));
   unassert(!IsMakingPath(m));
 }
 
-static void EndOp(struct Machine *m) {
-  JIX_LOGF("%" PRIx64 "   </op>", GetPc(m));
+static void EndOp(struct Machine *m, i64 pc) {
+  JIX_LOGF("%" PRIx64 ":%" PRIx64 "   </op>", GetPc(m), pc);
   m->oplen = 0;
   if (m->stashaddr) {
     CommitStash(m);
   }
 }
 
-static void EndPath(struct Machine *m) {
-  JIX_LOGF("%" PRIx64 "   %s", GetPc(m), DescribeOp(m, GetPc(m)));
-  JIX_LOGF("%" PRIx64 " </path>", GetPc(m));
+static void EndPath(struct Machine *m, i64 pc) {
+  JIX_LOGF("%" PRIx64 ":%" PRIx64 "   %s", GetPc(m), GetPc(m),
+           DescribeOp(m, GetPc(m)));
+  JIX_LOGF("%" PRIx64 ":%" PRIx64 " </path>", GetPc(m), GetPc(m));
+}
+
+void FuseOp(struct Machine *m, i64 pc) {
+  JIX_LOGF("%" PRIx64 ":%" PRIx64 "     %s", GetPc(m), pc, DescribeOp(m, pc));
+  JIX_LOGF("%" PRIx64 ":%" PRIx64 "   </op>", GetPc(m), pc);
 }
 
 #ifdef HAVE_JIT
@@ -121,34 +127,40 @@ long GetPrologueSize(void) {
 #endif
 }
 
-void SetupClog(struct Machine *m) {
-#ifdef CLOG
+void SetupCod(struct Machine *m) {
+#if LOG_COD
   LoadDebugSymbols(&m->system->elf);
   DisLoadElf(&g_dis, &m->system->elf);
-  g_clog = open("/tmp/blink.s", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-  g_clog = fcntl(g_clog, F_DUPFD_CLOEXEC, kMinBlinkFd);
+  g_cod = open("/tmp/blink.s", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  g_cod = fcntl(g_cod, F_DUPFD_CLOEXEC, kMinBlinkFd);
 #endif
 }
 
-static void WriteClog(const char *fmt, ...) {
-#ifdef CLOG
+void(LogCodOp)(struct Machine *m, const char *s) {
+#if LOG_COD
+  WriteCod("/\t%s\n", s);
+#endif
+}
+
+void WriteCod(const char *fmt, ...) {
+#if LOG_COD
   int n;
   va_list va;
   char buf[256];
-  if (!g_clog) return;
+  if (!g_cod) return;
   va_start(va, fmt);
   n = vsnprintf(buf, sizeof(buf), fmt, va);
   va_end(va);
-  write(g_clog, buf, MIN(n, sizeof(buf)));
+  write(g_cod, buf, MIN(n, sizeof(buf)));
 #endif
 }
 
-static void BeginClog(struct Machine *m, i64 pc) {
-#ifdef CLOG
+void BeginCod(struct Machine *m, i64 pc) {
+#if LOG_COD
   char b[256];
   char spec[64];
   int i, o = 0, n = sizeof(b);
-  if (!g_clog) return;
+  if (!g_cod) return;
   DISABLE_HIGHLIGHT_BEGIN;
   APPEND("/\t");
   unassert(!GetInstruction(m, pc, g_dis.xedd));
@@ -158,29 +170,30 @@ static void BeginClog(struct Machine *m, i64 pc) {
   for (i = 0; i < g_dis.xedd->length; ++i) {
     APPEND(" %02x", g_dis.xedd->bytes[i]);
   }
+  APPEND(" @ %" PRIx64, m->ip);
   APPEND("\n");
-  write(g_clog, b, MIN(o, n));
+  write(g_cod, b, MIN(o, n));
   DISABLE_HIGHLIGHT_END;
 #endif
 }
 
-static void FlushClog(struct JitBlock *jb) {
-#ifdef CLOG
+void FlushCod(struct JitBlock *jb) {
+#if LOG_COD
   char b[256];
   char spec[64];
-  if (!g_clog) return;
+  if (!g_cod) return;
   if (jb->index == jb->blocksize + 1) {
-    WriteClog("/\tOOM!\n");
-    jb->clog = jb->index;
+    WriteCod("/\tOOM!\n");
+    jb->cod = jb->index;
     return;
   }
   DISABLE_HIGHLIGHT_BEGIN;
-  for (; jb->clog < jb->index; jb->clog += g_dis.xedd->length) {
-    unassert(!DecodeInstruction(g_dis.xedd, jb->addr + jb->clog,
-                                jb->index - jb->clog, XED_MODE_LONG));
-    g_dis.addr = (intptr_t)jb->addr + jb->clog;
+  for (; jb->cod < jb->index; jb->cod += g_dis.xedd->length) {
+    unassert(!DecodeInstruction(g_dis.xedd, jb->addr + jb->cod,
+                                jb->index - jb->cod, XED_MODE_LONG));
+    g_dis.addr = (intptr_t)jb->addr + jb->cod;
     DisInst(&g_dis, b, DisSpec(g_dis.xedd, spec));
-    WriteClog("\t%s\n", b);
+    WriteCod("\t%s\n", b);
   }
   DISABLE_HIGHLIGHT_END;
 #endif
@@ -204,20 +217,6 @@ static bool IsPure(u64 rde) {
     case 0x035:  // OpAluRaxIvds
     case 0x03C:  // OpCmpAlIb
     case 0x03D:  // OpCmpRaxIvds
-    case 0x070:  // jo
-    case 0x071:  // jno
-    case 0x072:  // jb
-    case 0x073:  // jnb
-    case 0x074:  // jz
-    case 0x075:  // jnz
-    case 0x076:  // jbe
-    case 0x077:  // jnbe
-    case 0x078:  // js
-    case 0x079:  // jns
-    case 0x07c:  // jl
-    case 0x07d:  // jnl
-    case 0x07e:  // jle
-    case 0x07f:  // jnle
     case 0x090:  // OpNop
     case 0x091:  // OpXchgZvqp
     case 0x092:  // OpXchgZvqp
@@ -255,20 +254,6 @@ static bool IsPure(u64 rde) {
     case 0x0F8:  // OpClc
     case 0x0F9:  // OpStc
     case 0x11F:  // OpNopEv
-    case 0x180:  // jo
-    case 0x181:  // jno
-    case 0x182:  // jb
-    case 0x183:  // jnb
-    case 0x184:  // jz
-    case 0x185:  // jnz
-    case 0x186:  // jbe
-    case 0x187:  // jnbe
-    case 0x188:  // js
-    case 0x189:  // jns
-    case 0x18c:  // jl
-    case 0x18d:  // jnl
-    case 0x18e:  // jle
-    case 0x18f:  // jnle
     case 0x150:  // OpMovmskpsd
     case 0x1C8:  // OpBswapZvqp
     case 0x1C9:  // OpBswapZvqp
@@ -384,6 +369,95 @@ static bool IsPure(u64 rde) {
     case 0x1BD:  // OpBsr
     case 0x1BE:  // OpMovsbGvqpEb
     case 0x1BF:  // OpMovswGvqpEw
+    case 0x110:  // sse moves
+    case 0x111:  // sse moves
+    case 0x112:  // sse moves
+    case 0x113:  // sse moves
+    case 0x114:  // unpcklpsd
+    case 0x115:  // unpckhpsd
+    case 0x116:  // sse moves
+    case 0x117:  // sse moves
+    case 0x128:  // sse moves
+    case 0x129:  // sse moves
+    case 0x12A:  // sse convs
+    case 0x12B:  // sse moves
+    case 0x12C:  // sse convs
+    case 0x12D:  // sse convs
+    case 0x160:  // OpSsePunpcklbw
+    case 0x161:  // OpSsePunpcklwd
+    case 0x162:  // OpSsePunpckldq
+    case 0x163:  // OpSsePacksswb
+    case 0x164:  // OpSsePcmpgtb
+    case 0x165:  // OpSsePcmpgtw
+    case 0x166:  // OpSsePcmpgtd
+    case 0x167:  // OpSsePackuswb
+    case 0x168:  // OpSsePunpckhbw
+    case 0x169:  // OpSsePunpckhwd
+    case 0x16A:  // OpSsePunpckhdq
+    case 0x16B:  // OpSsePackssdw
+    case 0x16C:  // OpSsePunpcklqdq
+    case 0x16D:  // OpSsePunpckhqdq
+    case 0x16E:  // OpMov0f6e
+    case 0x16F:  // OpMov0f6f
+    case 0x170:  // OpShuffle
+    case 0x171:  // Op171
+    case 0x172:  // Op172
+    case 0x173:  // Op173
+    case 0x174:  // OpSsePcmpeqb
+    case 0x175:  // OpSsePcmpeqw
+    case 0x176:  // OpSsePcmpeqd
+    case 0x1D1:  // OpSsePsrlwv
+    case 0x1D2:  // OpSsePsrldv
+    case 0x1D3:  // OpSsePsrlqv
+    case 0x1D4:  // OpSsePaddq
+    case 0x1D5:  // OpSsePmullw
+    case 0x1D8:  // OpSsePsubusb
+    case 0x1D9:  // OpSsePsubusw
+    case 0x1DA:  // OpSsePminub
+    case 0x1DB:  // OpSsePand
+    case 0x1DC:  // OpSsePaddusb
+    case 0x1DD:  // OpSsePaddusw
+    case 0x1DE:  // OpSsePmaxub
+    case 0x1DF:  // OpSsePandn
+    case 0x1E0:  // OpSsePavgb
+    case 0x1E1:  // OpSsePsrawv
+    case 0x1E2:  // OpSsePsradv
+    case 0x1E3:  // OpSsePavgw
+    case 0x1E4:  // OpSsePmulhuw
+    case 0x1E5:  // OpSsePmulhw
+    case 0x1E8:  // OpSsePsubsb
+    case 0x1E9:  // OpSsePsubsw
+    case 0x1EA:  // OpSsePminsw
+    case 0x1EB:  // OpSsePor
+    case 0x1EC:  // OpSsePaddsb
+    case 0x1ED:  // OpSsePaddsw
+    case 0x1EE:  // OpSsePmaxsw
+    case 0x1EF:  // OpSsePxor
+    case 0x1F1:  // OpSsePsllwv
+    case 0x1F2:  // OpSsePslldv
+    case 0x1F3:  // OpSsePsllqv
+    case 0x1F4:  // OpSsePmuludq
+    case 0x1F5:  // OpSsePmaddwd
+    case 0x1F6:  // OpSsePsadbw
+    case 0x1F8:  // OpSsePsubb
+    case 0x1F9:  // OpSsePsubw
+    case 0x1FA:  // OpSsePsubd
+    case 0x1FB:  // OpSsePsubq
+    case 0x1FC:  // OpSsePaddb
+    case 0x1FD:  // OpSsePaddw
+    case 0x1FE:  // OpSsePaddd
+    case 0x200:  // OpSsePshufb
+    case 0x201:  // OpSsePhaddw
+    case 0x202:  // OpSsePhaddd
+    case 0x203:  // OpSsePhaddsw
+    case 0x204:  // OpSsePmaddubsw
+    case 0x205:  // OpSsePhsubw
+    case 0x206:  // OpSsePhsubd
+    case 0x207:  // OpSsePhsubsw
+    case 0x208:  // OpSsePsignb
+    case 0x209:  // OpSsePsignw
+    case 0x20A:  // OpSsePsignd
+    case 0x20B:  // OpSsePmulhrsw
     case 0x2F6:  // adcx, adox, mulx
       return IsModrmRegister(rde);
     case 0x08D:  // OpLeaGvqpM
@@ -407,7 +481,7 @@ static void InitPaths(struct System *s) {
   struct JitBlock *jb;
   if (!s->ender) {
     unassert((jb = StartJit(&s->jit)));
-    WriteClog("\nJit_%" PRIx64 ":\n", jb->addr + jb->index);
+    WriteCod("\nJit_%" PRIx64 ":\n", jb->addr + jb->index);
     s->ender = GetJitPc(jb);
 #if LOG_JIX
     AppendJitMovReg(jb, kJitArg0, kJitSav0);
@@ -415,7 +489,7 @@ static void InitPaths(struct System *s) {
 #endif
     AppendJit(jb, kLeave, sizeof(kLeave));
     AppendJitRet(jb);
-    FlushClog(jb);
+    FlushCod(jb);
     unassert(FinishJit(&s->jit, jb, 0));
   }
 #endif
@@ -427,28 +501,32 @@ bool CreatePath(P) {
   i64 pc, jpc;
   unassert(!IsMakingPath(m));
   InitPaths(m->system);
+  if (m->path.skip > 0) {
+    --m->path.skip;
+    return false;
+  }
   if ((pc = GetPc(m))) {
     if ((m->path.jb = StartJit(&m->system->jit))) {
       JIT_LOGF("starting new path jit_pc:%" PRIxPTR " at pc:%" PRIx64,
                GetJitPc(m->path.jb), pc);
-      FlushClog(m->path.jb);
+      FlushCod(m->path.jb);
       jpc = (intptr_t)m->path.jb->addr + m->path.jb->index;
       AppendJit(m->path.jb, kEnter, sizeof(kEnter));
 #if LOG_JIX
       Jitter(A,
-             "q"   // arg0 = machine
-             "c"   // call function (StartPath)
-             "q",  // arg0 = machine
-             StartPath);
+             "a1i"  // arg1 = ip
+             "q"    // arg0 = machine
+             "c"    // call function (StartPath)
+             "q",   // arg0 = machine
+             GetPc(m), StartPath);
 #endif
-      WriteClog("\nJit_%" PRIx64 "_%" PRIx64 ":\n", pc, jpc);
-      FlushClog(m->path.jb);
+      WriteCod("\nJit_%" PRIx64 "_%" PRIx64 ":\n", pc, jpc);
+      FlushCod(m->path.jb);
       m->path.start = pc;
       m->path.elements = 0;
       SetHook(m, pc, JitlessDispatch);
       res = true;
     } else {
-      LOGF("jit failed: %s", strerror(errno));
       res = false;
     }
   } else {
@@ -469,7 +547,7 @@ void CompletePath(P) {
 
 void FinishPath(struct Machine *m) {
   unassert(IsMakingPath(m));
-  FlushClog(m->path.jb);
+  FlushCod(m->path.jb);
   STATISTIC(path_longest_bytes =
                 MAX(path_longest_bytes, m->path.jb->index - m->path.jb->start));
   STATISTIC(path_longest = MAX(path_longest, m->path.elements));
@@ -487,7 +565,7 @@ void FinishPath(struct Machine *m) {
 }
 
 void AbandonPath(struct Machine *m) {
-  WriteClog("/\tABANDONED\n");
+  WriteCod("/\tABANDONED\n");
   unassert(IsMakingPath(m));
   STATISTIC(++path_abandoned);
   JIT_LOGF("abandoning path jit_pc:%" PRIxPTR " which started at pc:%" PRIx64,
@@ -512,7 +590,10 @@ void FlushSkew(P) {
 }
 
 void AddPath_StartOp(P) {
-  BeginClog(m, GetPc(m));
+#if LOG_CPU
+  Jitter(A, "qmq", LogCpu);
+#endif
+  BeginCod(m, GetPc(m));
 #ifndef NDEBUG
   if (FLAG_statistics) {
     Jitter(A,
@@ -529,14 +610,14 @@ void AddPath_StartOp(P) {
          "a1i"  // arg1 = m->ip
          "q"    // arg0 = machine
          "c",   // call function (DebugOp)
-         m->ip, DebugOp);
+         m->ip - m->path.skew, DebugOp);
 #endif
 #if LOG_JIX
   Jitter(A,
-         "a1i"  // arg1 = Oplength(rde)
+         "a1i"  // arg1 = pc
          "q"    // arg0 = machine
          "c",   // call function (StartOp)
-         Oplength(rde), StartOp);
+         m->ip, StartOp);
 #endif
   if (MustUpdateIp(A)) {
     if (!m->path.skew) {
@@ -566,7 +647,7 @@ void AddPath_StartOp(P) {
 void AddPath_EndOp(P) {
   _Static_assert(offsetof(struct Machine, stashaddr) < 128, "");
   if (m->reserving) {
-    WriteClog("/\tflush reserve\n");
+    WriteCod("/\tflush reserve\n");
   }
 #if !LOG_JIX && defined(__x86_64__)
   if (m->reserving) {
@@ -592,18 +673,21 @@ void AddPath_EndOp(P) {
   }
 #else
   Jitter(A,
-         "q"   // arg0 = machine
-         "c",  // call function (EndOp)
-         EndOp);
+         "a1i"  // arg1 = pc
+         "q"    // arg0 = machine
+         "c",   // call function (EndOp)
+         m->ip, EndOp);
 #endif
-  FlushClog(m->path.jb);
+  FlushCod(m->path.jb);
 }
 
 bool AddPath(P) {
   unassert(IsMakingPath(m));
-  AppendJitSetReg(m->path.jb, kJitArg[kArgRde], rde);
-  AppendJitSetReg(m->path.jb, kJitArg[kArgDisp], disp);
-  AppendJitSetReg(m->path.jb, kJitArg[kArgUimm0], uimm0);
-  AppendJitCall(m->path.jb, (void *)GetOp(Mopcode(rde)));
+  Jitter(A,
+         "a3i"  // arg2 = uimm0
+         "a2i"  // arg2 = disp
+         "a1i"  // arg1 = rde
+         "c",   // call function
+         uimm0, disp, rde, GetOp(Mopcode(rde)));
   return true;
 }

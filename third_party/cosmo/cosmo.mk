@@ -120,6 +120,8 @@ o/$(MODE)/third_party/cosmo:									\
 		o/$(MODE)/third_party/cosmo/2/test_suite_mpi.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/test_suite_md.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/crc32_test.com.ok					\
+		o/$(MODE)/third_party/cosmo/2/crc32c_test.com.ok				\
+		o/$(MODE)/third_party/cosmo/2/crc32z_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/lock2_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/lock_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/sigaction_test.com.ok				\
@@ -137,7 +139,6 @@ o/$(MODE)/third_party/cosmo:									\
 		o/$(MODE)/third_party/cosmo/2/fmemopen_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/fmt_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/fputc_test.com.ok					\
-		o/$(MODE)/third_party/cosmo/2/ftruncate_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/gamma_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/tgamma_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/gclongjmp_test.com.ok				\
@@ -158,7 +159,7 @@ o/$(MODE)/third_party/cosmo:									\
 		o/$(MODE)/third_party/cosmo/2/cv_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/writev_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/setsockopt_test.com.ok				\
-		o/$(MODE)/third_party/cosmo/2/sqlite_test.com.ok				\
+		o/$(MODE)/third_party/cosmo/3/sqlite_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/sched_yield_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/pwrite_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/pread_test.com.ok					\
@@ -171,7 +172,7 @@ o/$(MODE)/third_party/cosmo:									\
 		o/$(MODE)/third_party/cosmo/2/ftell_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/fseeko_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/fputs_test.com.ok					\
-		o/$(MODE)/third_party/cosmo/2/pipe_test.com.ok					\
+		o/$(MODE)/third_party/cosmo/3/pipe_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/fork_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/execve_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/arena_test.com.ok					\
@@ -186,19 +187,24 @@ o/$(MODE)/third_party/cosmo:									\
 		o/$(MODE)/third_party/cosmo/2/cosh_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/complex_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/countbits_test.com.ok				\
-		o/$(MODE)/third_party/cosmo/2/crc32c_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/cv_wait_example_test.com.ok			\
 		o/$(MODE)/third_party/cosmo/2/daemon_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/dtoa_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/expm1_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/fgetln_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/getcontext_test.com.ok				\
-		o/$(MODE)/third_party/cosmo/2/getenv_test.com.ok
+		o/$(MODE)/third_party/cosmo/2/getenv_test.com.ok				\
+		o/$(MODE)/third_party/cosmo/3/ftruncate_test.com.ok				\
+		o/$(MODE)/third_party/cosmo/2/socket_test.com.ok				\
+		o/$(MODE)/third_party/cosmo/3/unix_test.com.ok					\
+		o/$(MODE)/third_party/cosmo/2/tmpfile_test.com.ok				\
+		o/$(MODE)/third_party/cosmo/2/select_test.com.ok
 	@mkdir -p $(@D)
 	@touch $@
 
 DARWIN_PROBLEMATIC_TESTS =									\
-		o/$(MODE)/third_party/cosmo/2/sched_getaffinity_test.com.ok
+		o/$(MODE)/third_party/cosmo/2/sched_getaffinity_test.com.ok			\
+		o/$(MODE)/third_party/cosmo/2/backtrace_test.com.ok
 
 o/$(MODE)/third_party/cosmo/emulates:								\
 		o/$(MODE)/aarch64/third_party/cosmo/2/intrin_test.com.emulates			\

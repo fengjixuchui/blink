@@ -42,15 +42,17 @@
 #include "blink/web.h"
 #include "blink/xlat.h"
 
-#define OPTS "hjms"
+#define OPTS "hjms0"
 #define USAGE \
   " [-" OPTS "] PROG [ARGS...]\n\
   -h        help\n\
   -j        disable jit\n\
+  -0        to specify argv[0]\n\
   -m        enable memory safety\n\
   -s        print statistics on exit\n"
 
 extern char **environ;
+static bool FLAG_zero;
 static bool FLAG_nojit;
 static bool FLAG_nolinear;
 
@@ -100,7 +102,7 @@ static int Exec(char *prog, char **argv, char **envp) {
   g_machine->system->nolinear = FLAG_nolinear;
   if (!old) {
     LoadProgram(g_machine, prog, argv, envp);
-    SetupClog(g_machine);
+    SetupCod(g_machine);
     for (i = 0; i < 10; ++i) {
       AddStdFd(&g_machine->system->fds, i);
     }
@@ -149,6 +151,9 @@ static void GetOpts(int argc, char *argv[]) {
 #endif
   while ((opt = GetOpt(argc, argv, OPTS)) != -1) {
     switch (opt) {
+      case '0':
+        FLAG_zero = true;
+        break;
       case 'j':
         FLAG_nojit = true;
         break;
@@ -182,6 +187,12 @@ static void HandleSigs(void) {
 #endif
 }
 
+#if defined(__EMSCRIPTEN__)
+void exit(int status) {
+  EM_ASM({ throw new ExitStatus(status); });
+}
+#endif
+
 int main(int argc, char *argv[]) {
   SetupWeb();
   g_blink_path = argc > 0 ? argv[0] : 0;
@@ -189,5 +200,5 @@ int main(int argc, char *argv[]) {
   if (optind_ == argc) PrintUsage(argc, argv, 48, 2);
   WriteErrorInit();
   HandleSigs();
-  return Exec(argv[optind_], argv + optind_, environ);
+  return Exec(argv[optind_], argv + optind_ + FLAG_zero, environ);
 }
