@@ -142,6 +142,8 @@
 #define TCSETS_LINUX        0x5402
 #define TCSETSW_LINUX       0x5403
 #define TCSETSF_LINUX       0x5404
+#define TIOCGPGRP_LINUX     0x540f
+#define TIOCSPGRP_LINUX     0x5410
 #define ARCH_SET_GS_LINUX   0x1001
 #define ARCH_SET_FS_LINUX   0x1002
 #define ARCH_GET_FS_LINUX   0x1003
@@ -155,6 +157,8 @@
 #define POLLNVAL_LINUX      0x20
 #define TIMER_ABSTIME_LINUX 0x01
 
+#define MAP_TYPE_LINUX            0x0000000f
+#define MAP_FILE_LINUX            0x00000000
 #define MAP_SHARED_LINUX          0x00000001
 #define MAP_PRIVATE_LINUX         0x00000002
 #define MAP_FIXED_LINUX           0x00000010
@@ -479,6 +483,10 @@
 
 #define FD_SETSIZE_LINUX 1024
 
+#define FUTEX_WAITERS_LINUX    0x80000000
+#define FUTEX_OWNER_DIED_LINUX 0x40000000
+#define FUTEX_TID_MASK_LINUX   0x3fffffff
+
 struct iovec_linux {
   u8 iov_base[8];
   u8 iov_len[8];
@@ -746,6 +754,12 @@ struct pselect6_linux {
 
 struct sigset_linux {
   u8 sigmask[8];
+};
+
+struct robust_list_linux {
+  u8 next[8];
+  u8 offset[8];
+  u8 pending[8];
 };
 
 int sysinfo_linux(struct sysinfo_linux *);

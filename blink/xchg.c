@@ -20,6 +20,7 @@
 #include <stdatomic.h>
 
 #include "blink/assert.h"
+#include "blink/builtin.h"
 #include "blink/endian.h"
 #include "blink/lock.h"
 #include "blink/machine.h"
@@ -48,7 +49,7 @@ void OpXchgGvqpEvqp(P) {
   u8 *q = RegRexrReg(m, rde);
   u8 *p = GetModrmRegisterWordPointerWriteOszRexw(A);
   if (Rexw(rde)) {
-#if LONG_BIT >= 64
+#if CAN_64BIT
     if (!IsModrmRegister(rde) && !((intptr_t)p & 7)) {
       atomic_store_explicit(
           (_Atomic(u64) *)q,
@@ -68,8 +69,8 @@ void OpXchgGvqpEvqp(P) {
       Put64(p, x);
     } else {
       LockBus(p);
-      x = Get64(q);
       y = Load64Unlocked(p);
+      x = Get64(q);
       Put64(q, y);
       Store64Unlocked(p, x);
       UnlockBus(p);
@@ -86,8 +87,8 @@ void OpXchgGvqpEvqp(P) {
     } else {
       u32 x, y;
       if (!IsModrmRegister(rde)) LockBus(p);
-      x = Read32(q);
       y = Load32(p);
+      x = Read32(q);
       Write32(q, y);
       Store32(p, x);
       if (!IsModrmRegister(rde)) UnlockBus(p);
@@ -108,8 +109,8 @@ void OpXchgGvqpEvqp(P) {
     } else {
       u16 x, y;
       if (!IsModrmRegister(rde)) LockBus(p);
-      x = Read16(q);
       y = Load16(p);
+      x = Read16(q);
       Write16(q, y);
       Store16(p, x);
       if (!IsModrmRegister(rde)) UnlockBus(p);

@@ -26,7 +26,6 @@
 #include "blink/endian.h"
 #include "blink/errno.h"
 #include "blink/likely.h"
-#include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/mop.h"
@@ -51,7 +50,7 @@ u8 *GetPageAddress(struct System *s, u64 entry) {
   unassert(entry & PAGE_V);
   unassert(~entry & PAGE_RSRV);
   if (entry & PAGE_HOST) {
-    return ToHost(entry & PAGE_TA);
+    return (u8 *)(intptr_t)(entry & PAGE_TA);
   } else if ((entry & PAGE_TA) + 4096 <= kRealSize) {
     return s->real + (entry & PAGE_TA);
   } else {
@@ -62,11 +61,12 @@ u8 *GetPageAddress(struct System *s, u64 entry) {
 u64 HandlePageFault(struct Machine *m, u64 entry, u64 table, unsigned index) {
   u64 x;
   u64 page;
+  unassert(entry & PAGE_RSRV);
+  unassert(!(entry & (PAGE_HOST | PAGE_MAP | PAGE_MUG)));
   if ((page = AllocatePage(m->system)) != -1) {
     --m->system->memstat.reserved;
     ++m->system->memstat.committed;
-    x = (page & (PAGE_TA | PAGE_HOST | PAGE_MAP)) |
-        (entry & ~(PAGE_TA | PAGE_RSRV));
+    x = (page & (PAGE_TA | PAGE_HOST)) | (entry & ~(PAGE_TA | PAGE_RSRV));
     Store64(GetPageAddress(m->system, table) + index * 8, x);
     return x;
   } else {
@@ -329,11 +329,10 @@ void *AddToFreeList(struct Machine *m, void *mem) {
 // Returns pointer to memory in guest memory. If the memory overlaps a
 // page boundary, then it's copied, and the temporary memory is pushed
 // to the free list. Returns NULL w/ EFAULT or ENOMEM on error.
-const void *Schlep(struct Machine *m, i64 addr, size_t size) {
+void *Schlep(struct Machine *m, i64 addr, size_t size) {
   char *copy;
   size_t have;
-  const void *res;
-  const void *page;
+  void *res, *page;
   if (!size) return 0;
   if (!(page = LookupAddress(m, addr))) return 0;
   have = 4096 - (addr & 4095);

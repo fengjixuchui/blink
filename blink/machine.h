@@ -44,7 +44,7 @@
 #define kMachineProtectionFault      -8
 #define kMachineSimdException        -9
 
-#if LONG_BIT == 64
+#if CAN_64BIT
 #ifndef __SANITIZE_ADDRESS__
 #define kSkew 0x088800000000
 #else
@@ -79,9 +79,10 @@
 #define PAGE_2MB  0x0180
 #define PAGE_1GB  0x0180
 #define PAGE_RSRV 0x0200  // no actual memory associated
-#define PAGE_HOST 0x0400  // PAGE_TA bits point to host memory
+#define PAGE_HOST 0x0400  // PAGE_TA bits point to host (not real) memory
 #define PAGE_MAP  0x0800  // PAGE_TA bits were mmmap()'d
 #define PAGE_EOF  0x0010000000000000
+#define PAGE_MUG  0x0020000000000000  // each 4096 byte page is a system page
 #define PAGE_XD   0x8000000000000000
 #define PAGE_TA   0x00007ffffffff000
 
@@ -96,7 +97,7 @@
 #if defined(NOLINEAR) || defined(__SANITIZE_THREAD__)
 #define CanHaveLinearMemory() false
 #else
-#define CanHaveLinearMemory() (LONG_BIT == 64)
+#define CanHaveLinearMemory() CAN_64BIT
 #endif
 
 #ifdef HAVE_JIT
@@ -107,7 +108,7 @@
 
 #define HasLinearMapping(x) (CanHaveLinearMemory() && !(x)->nolinear)
 
-#if LONG_BIT >= 64
+#if CAN_64BIT
 #define _Atomicish(t) _Atomic(t)
 #else
 #define _Atomicish(t) t
@@ -130,11 +131,6 @@ static inline i64 ToGuest(void *r) {
 
 struct Machine;
 typedef void (*nexgen32e_f)(P);
-
-struct Xmm {
-  u64 lo;
-  u64 hi;
-};
 
 struct FreeList {
   int n;
@@ -252,9 +248,9 @@ struct System {
 
 struct JitPath {
   int skip;
-  int skew;
-  i64 start;
   int elements;
+  u64 skew;
+  i64 start;
   struct JitBlock *jb;
 };
 
@@ -360,6 +356,7 @@ struct Machine {                           //
   bool interrupted;                        //
   sigjmp_buf onhalt;                       //
   struct sigaltstack_linux sigaltstack;    //
+  i64 robust_list;                         //
   i64 ctid;                                //
   int tid;                                 //
   sigset_t spawn_sigmask;                  //
@@ -409,13 +406,14 @@ _Noreturn void OpUd(P);
 _Noreturn void OpHlt(P);
 void JitlessDispatch(P);
 void RestoreIp(struct Machine *);
+void UnlockRobustFutexes(struct Machine *);
 
 bool IsValidAddrSize(i64, i64) pureconst;
 bool OverlapsPrecious(i64, i64) pureconst;
 char **CopyStrList(struct Machine *, i64);
 char *CopyStr(struct Machine *, i64);
 char *LoadStr(struct Machine *, i64);
-const void *Schlep(struct Machine *, i64, size_t);
+void *Schlep(struct Machine *, i64, size_t);
 bool IsValidMemory(struct Machine *, i64, i64, int);
 int RegisterMemory(struct Machine *, i64, void *, size_t);
 u8 *GetPageAddress(struct System *, u64);
@@ -443,7 +441,6 @@ void SetReadAddr(struct Machine *, i64, u32);
 void SetWriteAddr(struct Machine *, i64, u32);
 int ProtectVirtual(struct System *, i64, i64, int);
 int CheckVirtual(struct System *, i64, i64);
-void SyncVirtual(struct Machine *, i64, i64, int, i64);
 int GetProtection(u64);
 u64 SetProtection(int);
 int ClassifyOp(u64) pureconst;
@@ -537,8 +534,8 @@ void Op2f6(P);
 void OpShx(P);
 void OpRorx(P);
 
-void *AllocateBig(size_t);
 void FreeBig(void *, size_t);
+void *AllocateBig(size_t, int, int, int, off_t);
 
 bool HasHook(struct Machine *, u64);
 nexgen32e_f GetHook(struct Machine *, u64);
@@ -651,7 +648,7 @@ void Int32ToDouble(i32, struct Machine *, long);
 void MovsdWpsVpsOp(u8 *, struct Machine *, long);
 
 void SetupCod(struct Machine *);
-void WriteCod(const char *, ...);
+void WriteCod(const char *, ...) printfesque(1);
 void FlushCod(struct JitBlock *);
 #if LOG_COD
 void LogCodOp(struct Machine *, const char *);

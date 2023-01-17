@@ -1,7 +1,7 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
 │vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
 ╞══════════════════════════════════════════════════════════════════════════════╡
-│ Copyright 2022 Justine Alexandra Roberts Tunney                              │
+│ Copyright 2023 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
 │ Permission to use, copy, modify, and/or distribute this software for         │
 │ any purpose with or without fee is hereby granted, provided that the         │
@@ -16,51 +16,62 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include <assert.h>
 #include <errno.h>
-#include <inttypes.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#include "blink/assert.h"
-#include "blink/log.h"
-#include "blink/macros.h"
-#include "blink/map.h"
-#include "blink/types.h"
-#include "blink/util.h"
+#define PCHECK(x)  \
+  do {             \
+    int rc_ = (x); \
+    if (rc_) {     \
+      errno = rc_; \
+      perror(#x);  \
+      exit(1);     \
+    }              \
+  } while (0)
 
-long GetSystemPageSize(void) {
-#ifdef __EMSCRIPTEN__
-  // "pages" in Emscripten only refer to the granularity the memory
-  // buffer can be grown at but does not affect functions like mmap.
-  return 4096;
-#endif
-  long z;
-  unassert((z = sysconf(_SC_PAGESIZE)) > 0);
-  unassert(IS2POW(z));
-  return MAX(4096, z);
+static pthread_mutex_t mtx;
+
+static void *OriginalOwnerThread(void *ptr) {
+  pthread_mutex_lock(&mtx);
+  pthread_exit(NULL);
 }
 
-void *Mmap(void *addr,     //
-           size_t length,  //
-           int prot,       //
-           int flags,      //
-           int fd,         //
-           off_t offset,   //
-           const char *owner) {
-  void *res = mmap(addr, length, prot, flags, fd, offset);
-#if LOG_MEM
-  char szbuf[16];
-  FormatSize(szbuf, length, 1024);
-  if (res != MAP_FAILED) {
-    MEM_LOGF("%s created %s byte %smap [%p,%p) fd=%d offset=%#" PRIx64, owner,
-             szbuf, (flags & MAP_SHARED) ? "shared " : "", res,
-             (u8 *)res + length, fd, (i64)offset);
-  } else {
-    MEM_LOGF("%s failed to create %s map [%p,%p) prot %#x flags %#x: %s "
-             "(system page size is %ld)",
-             owner, szbuf, (u8 *)addr, (u8 *)addr + length, prot, flags,
-             strerror(errno), GetSystemPageSize());
+static void WaitForOriginalOwnerThreadToDie(pthread_t thr) {
+  int rc;
+  for (;;) {
+    rc = pthread_kill(thr, 0);
+    if (rc == ESRCH) break;
+    assert(!rc);
   }
-#endif
-  return res;
+}
+
+int main(int argc, char *argv[]) {
+  int rc;
+  pthread_t thr;
+  pthread_mutexattr_t attr;
+  PCHECK(pthread_mutexattr_init(&attr));
+  PCHECK(pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST));
+  PCHECK(pthread_mutex_init(&mtx, &attr));
+  PCHECK(pthread_mutexattr_destroy(&attr));
+  PCHECK(pthread_create(&thr, 0, OriginalOwnerThread, 0));
+  WaitForOriginalOwnerThreadToDie(thr);
+  rc = pthread_mutex_lock(&mtx);
+  if (rc == EOWNERDEAD) {
+    PCHECK(pthread_mutex_consistent(&mtx));
+    PCHECK(pthread_mutex_unlock(&mtx));
+    exit(EXIT_SUCCESS);
+  } else if (!rc) {
+    fprintf(stderr, "pthread_mutex_lock() unexpectedly succeeded\n");
+    exit(EXIT_FAILURE);
+  } else {
+    fprintf(stderr, "pthread_mutex_lock() unexpectedly failed: %s\n",
+            strerror(rc));
+    exit(1);
+  }
 }

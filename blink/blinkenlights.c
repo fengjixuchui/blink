@@ -37,6 +37,7 @@
 #include <wctype.h>
 
 #include "blink/assert.h"
+#include "blink/bitscan.h"
 #include "blink/breakpoint.h"
 #include "blink/builtin.h"
 #include "blink/case.h"
@@ -1451,9 +1452,9 @@ static void DrawXmm(struct Panel *p, i64 i, i64 r) {
         }
         if (xmmdisp == kXmmHex || xmmdisp == kXmmChar) {
           if (xmmdisp == kXmmChar && iswalnum(ival)) {
-            sprintf(buf, "%lc", ival);
+            sprintf(buf, "%lc", (wint_t)ival);
           } else {
-            sprintf(buf, "%.*x", xmmtype.size[r] * 8 / 4, ival);
+            sprintf(buf, "%.*x", xmmtype.size[r] * 8 / 4, (unsigned)ival);
           }
         } else {
           sprintf(buf, "%" PRId64, SignExtend(ival, xmmtype.size[r] * 8));
@@ -1562,8 +1563,8 @@ static void DrawMemoryZoomed(struct Panel *p, struct MemoryView *view,
   free(ranges.p);
   high = false;
   for (c = i = 0; i < p->bottom - p->top; ++i) {
-    AppendFmt(&p->lines[i], "%0*lx ", GetAddrHexWidth(),
-              ((view->start + i) * DUMPWIDTH * (1ull << view->zoom)) &
+    AppendFmt(&p->lines[i], "%0*" PRIx64 " ", GetAddrHexWidth(),
+              ((view->start + i) * DUMPWIDTH * ((u64)1 << view->zoom)) &
                   0x0000ffffffffffff);
     for (j = 0; j < DUMPWIDTH; ++j, ++c) {
       a = ((view->start + i) * DUMPWIDTH + j + 0) * (1ull << view->zoom);
@@ -3582,7 +3583,7 @@ static void GetOpts(int argc, char *argv[]) {
           fprintf(stderr,
                   "linearization not possible on this system"
                   " (word size is %d bits and page size is %ld)\n",
-                  LONG_BIT, sysconf(_SC_PAGESIZE));
+                  bsr(UINTPTR_MAX) + 1, sysconf(_SC_PAGESIZE));
           exit(1);
         }
         break;
@@ -3650,8 +3651,9 @@ int VirtualMachine(int argc, char *argv[]) {
     action = 0;
     LoadProgram(m, codepath, argv + optind_ - 1, environ);
     if (m->system->codesize) {
-      ophits = (unsigned long *)AllocateBig(m->system->codesize *
-                                            sizeof(unsigned long));
+      ophits = (unsigned long *)AllocateBig(
+          m->system->codesize * sizeof(unsigned long), PROT_READ | PROT_WRITE,
+          MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     }
     ScrollMemoryViews();
     AddStdFd(&m->system->fds, 0);
@@ -3713,9 +3715,10 @@ void TerminateSignal(struct Machine *m, int sig) {
 static void OnSigSegv(int sig, siginfo_t *si, void *uc) {
   LOGF("OnSigSegv(%p)", si->si_addr);
   RestoreIp(g_machine);
+  // TODO(jart): Fix address translation in non-linear mode.
   g_machine->faultaddr = ToGuest(si->si_addr);
-  LOGF("SIGSEGV AT ADDRESS %" PRIx64 " (OR %" PRIx64 ")\n\t%s",
-       g_machine->faultaddr, si->si_addr, GetBacktrace(g_machine));
+  LOGF("SIGSEGV AT ADDRESS %" PRIx64 " (OR %p)\n\t%s", g_machine->faultaddr,
+       si->si_addr, GetBacktrace(g_machine));
   if (!react) DeliverSignalToUser(g_machine, SIGSEGV_LINUX);
   siglongjmp(g_machine->onhalt, kMachineSegmentationFault);
 }

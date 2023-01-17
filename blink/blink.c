@@ -63,13 +63,18 @@ static void OnSigSys(int sig) {
 void TerminateSignal(struct Machine *m, int sig) {
   int syssig;
   struct sigaction sa;
+  unassert(!IsSignalIgnoredByDefault(sig));
   LOGF("terminating due to signal %s", DescribeSignal(sig));
   if ((syssig = XlatSignal(sig)) == -1) syssig = SIGTERM;
-  LOCK(&m->system->sig_lock);
+  KillOtherThreads(m->system);
+  FreeMachine(m);
+  ShutdownJit();
   sa.sa_flags = 0;
   sa.sa_handler = SIG_DFL;
   sigemptyset(&sa.sa_mask);
-  unassert(!sigaction(syssig, &sa, 0));
+  if (syssig != SIGKILL && syssig != SIGSTOP) {
+    unassert(!sigaction(syssig, &sa, 0));
+  }
   unassert(!kill(getpid(), syssig));
   Abort();
 }
@@ -77,6 +82,7 @@ void TerminateSignal(struct Machine *m, int sig) {
 static void OnSigSegv(int sig, siginfo_t *si, void *ptr) {
   int sig_linux;
   RestoreIp(g_machine);
+  // TODO(jart): Fix address translation in non-linear mode.
   g_machine->faultaddr = ToGuest(si->si_addr);
   LOGF("SEGMENTATION FAULT (%s) AT ADDRESS %" PRIx64 "\n\t%s", strsignal(sig),
        g_machine->faultaddr, GetBacktrace(g_machine));
@@ -177,6 +183,14 @@ static void HandleSigs(void) {
   sa.sa_flags = 0;
   sa.sa_handler = OnSigSys;
   unassert(!sigaction(SIGSYS, &sa, 0));
+  sa.sa_sigaction = OnSignal;
+  unassert(!sigaction(SIGHUP, &sa, 0));
+  unassert(!sigaction(SIGINT, &sa, 0));
+  unassert(!sigaction(SIGQUIT, &sa, 0));
+  unassert(!sigaction(SIGPIPE, &sa, 0));
+  unassert(!sigaction(SIGTERM, &sa, 0));
+  unassert(!sigaction(SIGXCPU, &sa, 0));
+  unassert(!sigaction(SIGXFSZ, &sa, 0));
 #if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__)
   sa.sa_sigaction = OnSigSegv;
   sa.sa_flags = SA_SIGINFO;
@@ -189,7 +203,8 @@ static void HandleSigs(void) {
 
 #if defined(__EMSCRIPTEN__)
 void exit(int status) {
-  EM_ASM({ throw new ExitStatus(status); });
+  // main is called multiple times - don't perform cleanup
+  _exit(status);
 }
 #endif
 

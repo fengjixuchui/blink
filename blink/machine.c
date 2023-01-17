@@ -943,7 +943,7 @@ void Terminate(P, void uop(struct Machine *, u64)) {
            "m"    // call micro-op
            "q",   // arg0 = sav0 (machine)
            disp, uop);
-    AlignJit(m->path.jb, 4, 0);
+    AlignJit(m->path.jb, 8, 0);
     Connect(A, m->ip);
     FinishPath(m);
   }
@@ -969,7 +969,7 @@ static void OpJcc(P) {
     FlushSkew(A);
 #ifdef __x86_64__
     Jitter(A, "mq", cc);
-    AlignJit(m->path.jb, 4, 0);
+    AlignJit(m->path.jb, 8, 4);
     u8 code[] = {
         0x85, 0300 | kJitRes0 << 3 | kJitRes0,  // test %eax,%eax
         0x75, 5,                                // jnz  +5
@@ -991,7 +991,7 @@ static void OpJcc(P) {
            "m"    // call micro-op
            "q",   // arg0 = machine
            disp, FastJmp);
-    AlignJit(m->path.jb, 4, 0);
+    AlignJit(m->path.jb, 8, 0);
     Connect(A, m->ip + disp);
     FinishPath(m);
   }
@@ -1186,9 +1186,31 @@ static void Op1b8(P) {
 }
 
 static relegated void LoadFarPointer(P, u64 *seg) {
-  u32 fp = Load32(ComputeReserveAddressRead4(A));
-  *seg = (fp & 0x0000ffff) << 4;
-  Put16(RegRexrReg(m, rde), fp >> 16);
+  unsigned n;
+  u8 *p;
+  u64 fp;
+  switch (Eamode(rde)) {
+    case XED_MODE_LONG:
+    case XED_MODE_LEGACY:
+      OpUdImpl(m);
+      break;
+    case XED_MODE_REAL:
+      n = 1 << RegLog2(rde);
+      p = ComputeReserveAddressRead(A, n + 2);
+      LockBus(p);
+      fp = Load32(p);
+      if (n >= 4) {
+        fp |= (u64)Load16(p + 4) << 32;
+        *seg = (fp >> 32 & 0x0000ffff) << 4;
+      } else {
+        *seg = (fp >> 16 & 0x0000ffff) << 4;
+      }
+      UnlockBus(p);
+      WriteRegister(rde, RegRexrReg(m, rde), fp);  // offset portion
+      break;
+    default:
+      __builtin_unreachable();
+  }
 }
 
 static relegated void OpLes(P) {

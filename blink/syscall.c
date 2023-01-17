@@ -211,11 +211,9 @@ _Noreturn void SysExitGroup(struct Machine *m, int rc) {
     _Exit(rc);
   } else {
     THR_LOGF("calling exit(%d)", rc);
-#if defined(__SANITIZE_ADDRESS__) || defined(DEBUG)
     KillOtherThreads(m->system);
     FreeMachine(m);
     ShutdownJit();
-#endif
     exit(rc);
   }
 }
@@ -244,10 +242,11 @@ static int SysFork(struct Machine *m) {
   UNLOCK(&m->system->mmap_lock);
   UNLOCK(&m->system->sig_lock);
   if (!pid) {
-    m->tid = m->system->pid = newpid = getpid();
+    newpid = getpid();
     InitBus();  // TODO(jart): use shared memory for g_bus
     THR_LOGF("pid=%d tid=%d SysFork -> pid=%d tid=%d",  //
              m->system->pid, m->tid, newpid, newpid);
+    m->tid = m->system->pid = newpid;
     m->system->isfork = true;
     RemoveOtherThreads(m->system);
   }
@@ -286,6 +285,11 @@ static int SysSpawn(struct Machine *m, u64 flags, u64 stack, u64 ptid, u64 ctid,
   atomic_int *ctid_ptr;
   struct Machine *m2 = 0;
   THR_LOGF("pid=%d tid=%d SysSpawn", m->system->pid, m->tid);
+  if ((flags & 255) != 0 && (flags & 255) != SIGCHLD_LINUX) {
+    LOGF("unsupported clone() signal: %" PRId64, flags & 255);
+    return einval();
+  }
+  flags &= ~255;
   supported = CLONE_THREAD_LINUX | CLONE_VM_LINUX | CLONE_FS_LINUX |
               CLONE_FILES_LINUX | CLONE_SIGHAND_LINUX | CLONE_SETTLS_LINUX |
               CLONE_PARENT_SETTID_LINUX | CLONE_CHILD_CLEARTID_LINUX |
@@ -295,12 +299,13 @@ static int SysSpawn(struct Machine *m, u64 flags, u64 stack, u64 ptid, u64 ctid,
   ignored = CLONE_DETACHED_LINUX;
   flags &= ~ignored;
   if (flags & ~supported) {
-    LOGF("unsupported clone() flags: %#x", flags & ~supported);
+    LOGF("unsupported clone() flags: %#" PRIx64, flags & ~supported);
     return einval();
   }
   if ((flags & mandatory) != mandatory) {
-    LOGF("missing mandatory clone() thread flags: %#x",
-         (flags & mandatory) ^ mandatory);
+    LOGF("missing mandatory clone() thread flags: %#" PRIx64
+         " out of %#" PRIx64,
+         (flags & mandatory) ^ mandatory, flags);
     return einval();
   }
   if (((flags & CLONE_PARENT_SETTID_LINUX) &&
@@ -309,7 +314,7 @@ static int SysSpawn(struct Machine *m, u64 flags, u64 stack, u64 ptid, u64 ctid,
       ((flags & CLONE_CHILD_SETTID_LINUX) &&
        ((ctid & (sizeof(int) - 1)) ||
         !(ctid_ptr = (atomic_int *)LookupAddress(m, ctid))))) {
-    LOGF("bad clone() ptid / ctid pointers: %#x", flags);
+    LOGF("bad clone() ptid / ctid pointers: %#" PRIx64, flags);
     return efault();
   }
   if (!(m2 = NewMachine(m->system, m))) {
@@ -486,6 +491,136 @@ static int SysFutex(struct Machine *m,  //
   }
 }
 
+static void UnlockRobustFutex(struct Machine *m, u64 futex_addr,
+                              bool ispending) {
+  int owner;
+  u32 value, replace;
+  _Atomic(u32) *futex;
+  if (futex_addr & 3) {
+    LOGF("robust futex isn't aligned");
+    return;
+  }
+  if (!(futex = (_Atomic(u32) *)Schlep(m, futex_addr, 4))) {
+    LOGF("encountered efault in robust futex list");
+    return;
+  }
+  for (value = atomic_load_explicit(futex, memory_order_acquire);;) {
+    owner = value & FUTEX_TID_MASK_LINUX;
+    if (ispending && !owner) {
+      THR_LOGF("unlocking pending ownerless futex");
+      SysFutexWake(m, futex_addr, 1);
+      return;
+    }
+    if (owner && owner != m->tid) {
+      THR_LOGF("robust futex 0x%08" PRIx32
+               " was owned by %d but we're tid=%d pid=%d",
+               value, owner, m->tid, m->system->pid);
+      return;
+    }
+    replace = FUTEX_OWNER_DIED_LINUX | (value & FUTEX_WAITERS_LINUX);
+    if (atomic_compare_exchange_weak_explicit(futex, &value, replace,
+                                              memory_order_release,
+                                              memory_order_acquire)) {
+      THR_LOGF("successfully unlocked robust futex");
+      if (value & FUTEX_WAITERS_LINUX) {
+        THR_LOGF("waking robust futex waiters");
+        SysFutexWake(m, futex_addr, 1);
+      }
+      return;
+    } else {
+      THR_LOGF("robust futex cas failed");
+    }
+  }
+}
+
+void UnlockRobustFutexes(struct Machine *m) {
+  if (1) return;  // TODO: Figure out how these work.
+  int limit = 1000;
+  bool once = false;
+  u64 list, item, pending;
+  struct robust_list_linux *data;
+  if (!(item = list = m->robust_list)) return;
+  m->robust_list = 0;
+  pending = 0;
+  do {
+    if (!(data = (struct robust_list_linux *)Schlep(m, item, sizeof(*data)))) {
+      LOGF("encountered efault in robust futex list");
+      break;
+    }
+    THR_LOGF("unlocking robust futex %#" PRIx64 " {.next=%#" PRIx64
+             " .offset=%" PRId64 " .pending=%#" PRIx64 "}",
+             item, Read64(data->next), Read64(data->offset),
+             Read64(data->pending));
+    if (!once) {
+      pending = Read64(data->pending);
+      once = true;
+    }
+    if (!--limit) {
+      LOGF("encountered cycle or limit in robust futex list");
+      break;
+    }
+    if (item != pending) {
+      UnlockRobustFutex(m, item + Read64(data->offset), false);
+    }
+    item = Read64(data->next);
+  } while (item != list);
+  if (!pending) return;
+  if (!(data = (struct robust_list_linux *)Schlep(m, pending, sizeof(*data)))) {
+    LOGF("encountered efault in robust futex list");
+    return;
+  }
+  THR_LOGF("unlocking pending robust futex %#" PRIx64 " {.next=%#" PRIx64
+           " .offset=%" PRId64 " .pending=%#" PRIx64 "}",
+           item, Read64(data->next), Read64(data->offset),
+           Read64(data->pending));
+  UnlockRobustFutex(m, pending + Read64(data->offset), true);
+}
+
+static i32 ReturnRobustList(struct Machine *m, i64 head_ptr_addr,
+                            i64 len_ptr_addr) {
+  u8 buf[8];
+  Write64(buf, m->robust_list);
+  CopyToUserWrite(m, head_ptr_addr, buf, sizeof(buf));
+  Write64(buf, sizeof(struct robust_list_linux));
+  CopyToUserWrite(m, len_ptr_addr, buf, sizeof(buf));
+  return 0;
+}
+
+static i32 SysGetRobustList(struct Machine *m, int pid, i64 head_ptr_addr,
+                            i64 len_ptr_addr) {
+  int rc;
+  struct Dll *e;
+  struct Machine *m2;
+  if (!pid || pid == m->tid) {
+    rc = ReturnRobustList(m, head_ptr_addr, len_ptr_addr);
+  } else {
+    rc = -1;
+    errno = ESRCH;
+    LOCK(&m->system->machines_lock);
+    for (e = dll_first(m->system->machines); e;
+         e = dll_next(m->system->machines, e)) {
+      m2 = MACHINE_CONTAINER(e);
+      if (m2->tid == pid) {
+        rc = ReturnRobustList(m2, head_ptr_addr, len_ptr_addr);
+        break;
+      }
+    }
+    UNLOCK(&m->system->machines_lock);
+  }
+  return rc;
+}
+
+static i32 SysSetRobustList(struct Machine *m, i64 head_addr, u64 len) {
+  if (len != sizeof(struct robust_list_linux)) {
+    return einval();
+  }
+  if (!IsValidMemory(m, head_addr, len, PROT_READ | PROT_WRITE)) {
+    return efault();
+  }
+  m->robust_list = head_addr;
+  return 0;
+}
+
 static int ValidateAffinityPid(struct Machine *m, int pid) {
   if (pid < 0) return esrch();
   if (pid && pid != m->tid && pid != m->system->pid) return eperm();
@@ -624,7 +759,7 @@ static int SysMprotect(struct Machine *m, i64 addr, u64 size, int prot) {
   UNLOCK(&m->system->mmap_lock);
   if (gotsome) {
     STATISTIC(++smc_resets);
-    LOGF("mprotect(PROT_EXEC) reset %ld JIT hooks", gotsome);
+    JIT_LOGF("mprotect(PROT_EXEC) reset %ld JIT hooks", gotsome);
     InvalidateSystem(m->system, false, true);
   }
   return rc;
@@ -670,14 +805,36 @@ static i64 SysMmap(struct Machine *m, i64 virt, size_t size, int prot,
                    int flags, int fildes, i64 offset) {
   u64 key;
   ssize_t rc;
+  int oflags;
+  struct Fd *fd;
   long pagesize;
   if (!IsValidAddrSize(virt, size)) return einval();
   if (flags & MAP_GROWSDOWN_LINUX) return enotsup();
   if ((key = Prot2Page(prot)) == -1) return einval();
   if (flags & MAP_FIXED_NOREPLACE_LINUX) return enotsup();
-  if (fildes != -1) {
-    if (flags & MAP_ANONYMOUS_LINUX) {
+  if (flags & MAP_ANONYMOUS_LINUX) {
+    fildes = -1;
+    if ((flags & MAP_TYPE_LINUX) == MAP_FILE_LINUX) {
       return einval();
+    }
+  }
+  if (fildes != -1) {
+    LockFds(&m->system->fds);
+    if ((fd = GetFd(&m->system->fds, fildes))) {
+      oflags = fd->oflags;
+    } else {
+      oflags = 0;
+    }
+    UnlockFds(&m->system->fds);
+    if (!fd) return -1;
+    if ((oflags & O_ACCMODE) == O_WRONLY ||  //
+        ((prot & PROT_WRITE) &&              //
+         (oflags & O_APPEND)) ||             //
+        ((prot & PROT_WRITE) &&              //
+         (flags & MAP_SHARED_LINUX) &&       //
+         (oflags & O_ACCMODE) != O_RDWR)) {  //
+      errno = EACCES;
+      return -1;
     }
   }
   LOCK(&m->system->mmap_lock);
@@ -699,13 +856,7 @@ static i64 SysMmap(struct Machine *m, i64 virt, size_t size, int prot,
   rc = ReserveVirtual(m->system, virt, size, key, fildes, offset,
                       !!(flags & MAP_SHARED_LINUX));
   UNLOCK(&m->system->mmap_lock);
-  if (rc != -1) {
-    if (!HasLinearMapping(m->system) && fildes != -1) {
-      SyncVirtual(m, virt, size, fildes, offset);
-    }
-  } else {
-    virt = -1;
-  }
+  if (rc == -1) virt = -1;
 Finished:
   return virt;
 }
@@ -719,6 +870,12 @@ static int SysDup1(struct Machine *m, i32 fildes) {
   int oflags;
   int newfildes;
   struct Fd *fd;
+#ifdef __CYGWIN__
+  if (fildes < 0) {
+    LOGF("dup() ebadf");
+    return ebadf();
+  }
+#endif
   if ((newfildes = dup(fildes)) != -1) {
     LockFds(&m->system->fds);
     if ((fd = GetFd(&m->system->fds, fildes))) {
@@ -1159,6 +1316,7 @@ static i64 SysRead(struct Machine *m, i32 fildes, i64 addr, u64 size) {
 
 static i64 SysWrite(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   i64 rc;
+  int oflags;
   struct Fd *fd;
   struct Iovs iv;
   ssize_t (*writev_impl)(int, const struct iovec *, int);
@@ -1166,11 +1324,14 @@ static i64 SysWrite(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   if ((fd = GetFd(&m->system->fds, fildes))) {
     unassert(fd->cb);
     unassert(writev_impl = fd->cb->writev);
+    oflags = fd->oflags;
   } else {
     writev_impl = 0;
+    oflags = 0;
   }
   UnlockFds(&m->system->fds);
   if (!fd) return -1;
+  if ((oflags & O_ACCMODE) == O_RDONLY) return ebadf();  // due to cygwin
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size)) != -1) {
@@ -1205,7 +1366,18 @@ static i64 SysPread(struct Machine *m, i32 fildes, i64 addr, u64 size,
 static i64 SysPwrite(struct Machine *m, i32 fildes, i64 addr, u64 size,
                      u64 offset) {
   i64 rc;
+  int oflags;
+  struct Fd *fd;
   const void *mem;
+  LockFds(&m->system->fds);
+  if ((fd = GetFd(&m->system->fds, fildes))) {
+    oflags = fd->oflags;
+  } else {
+    oflags = 0;
+  }
+  UnlockFds(&m->system->fds);
+  if (!fd) return -1;
+  if ((oflags & O_ACCMODE) == O_RDONLY) return ebadf();  // due to cygwin
   mem = Schlep(m, addr, size);
   INTERRUPTIBLE(rc = pwrite(fildes, mem, size, offset));
   return rc;
@@ -1239,6 +1411,7 @@ static i64 SysReadv(struct Machine *m, i32 fildes, i64 iovaddr, i32 iovlen) {
 
 static i64 SysWritev(struct Machine *m, i32 fildes, i64 iovaddr, i32 iovlen) {
   i64 rc;
+  int oflags;
   struct Fd *fd;
   struct Iovs iv;
   ssize_t (*writev_impl)(int, const struct iovec *, int);
@@ -1246,11 +1419,14 @@ static i64 SysWritev(struct Machine *m, i32 fildes, i64 iovaddr, i32 iovlen) {
   if ((fd = GetFd(&m->system->fds, fildes))) {
     unassert(fd->cb);
     unassert(writev_impl = fd->cb->writev);
+    oflags = fd->oflags;
   } else {
     writev_impl = 0;
+    oflags = 0;
   }
   UnlockFds(&m->system->fds);
   if (!fd) return -1;
+  if ((oflags & O_ACCMODE) == O_RDONLY) return ebadf();  // due to cygwin
   if (iovlen > 0) {
     InitIovs(&iv);
     if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen)) != -1) {
@@ -1304,7 +1480,7 @@ static i64 SysGetdents(struct Machine *m, i32 fildes, i64 addr, i64 size) {
     if (!(ent = readdir(fd->dirstream))) break;
     len = strlen(ent->d_name);
     if (len + 1 > sizeof(rec.d_name)) {
-      LOGF("ignoring %ld byte d_name: %s", len, ent->d_name);
+      LOGF("ignoring %zu byte d_name: %s", len, ent->d_name);
       reclen = 0;
       continue;
     }
@@ -1363,6 +1539,21 @@ static int IoctlTcsets(struct Machine *m, int fd, int request, i64 addr,
   CopyFromUserRead(m, &gtio, addr, sizeof(gtio));
   XlatLinuxToTermios(&tio, &gtio);
   return fn(fd, request, &tio);
+}
+
+static int IoctlTiocgpgrp(struct Machine *m, int fd, i64 addr) {
+  int rc;
+  u8 *pgrp;
+  if (!(pgrp = (u8 *)Schlep(m, addr, 4))) return -1;
+  if ((rc = tcgetpgrp(fd)) == -1) return -1;
+  Write32(pgrp, rc);
+  return 0;
+}
+
+static int IoctlTiocspgrp(struct Machine *m, int fd, i64 addr) {
+  u8 *pgrp;
+  if (!(pgrp = (u8 *)Schlep(m, addr, 4))) return -1;
+  return tcsetpgrp(fd, Read32(pgrp));
 }
 
 static int IoctlSiocgifconf(struct Machine *m, int systemfd, i64 ifconf_addr) {
@@ -1499,6 +1690,12 @@ static int SysIoctl(struct Machine *m, int fildes, u64 request, i64 addr) {
     case SIOCGIFDSTADDR_LINUX:
       rc = IoctlSiocgifaddr(m, fildes, addr, SIOCGIFDSTADDR);
       break;
+    case TIOCGPGRP_LINUX:
+      rc = IoctlTiocgpgrp(m, fildes, addr);
+      break;
+    case TIOCSPGRP_LINUX:
+      rc = IoctlTiocspgrp(m, fildes, addr);
+      break;
     default:
       LOGF("missing ioctl %#" PRIx64, request);
       rc = einval();
@@ -1536,8 +1733,13 @@ static i64 SysFtruncate(struct Machine *m, i32 fd, i64 size) {
 static int XlatFaccessatFlags(int x) {
   int res = 0;
   if (x & AT_EACCESS_LINUX) {
+#if !defined(__EMSCRIPTEN__) && !defined(__CYGWIN__)
     res |= AT_EACCESS;
+#endif
     x &= ~AT_EACCESS_LINUX;
+  }
+  if (x & AT_SYMLINK_FOLLOW_LINUX) {
+    x &= ~AT_SYMLINK_FOLLOW_LINUX;  // default behavior
   }
   if (x & AT_SYMLINK_NOFOLLOW_LINUX) {
     res |= AT_SYMLINK_NOFOLLOW;
@@ -1550,8 +1752,12 @@ static int XlatFaccessatFlags(int x) {
   return res;
 }
 
-static int SysFaccessat(struct Machine *m, i32 dirfd, i64 path, i32 mode,
-                        i32 flags) {
+static int SysFaccessat(struct Machine *m, i32 dirfd, i64 path, i32 mode) {
+  return faccessat(GetDirFildes(dirfd), LoadStr(m, path), XlatAccess(mode), 0);
+}
+
+static int SysFaccessat2(struct Machine *m, i32 dirfd, i64 path, i32 mode,
+                         i32 flags) {
   return faccessat(GetDirFildes(dirfd), LoadStr(m, path), XlatAccess(mode),
                    XlatFaccessatFlags(flags));
 }
@@ -1569,6 +1775,9 @@ static int SysFstat(struct Machine *m, i32 fd, i64 staddr) {
 
 static int XlatFstatatFlags(int x) {
   int res = 0;
+  if (x & AT_SYMLINK_FOLLOW_LINUX) {
+    x &= ~AT_SYMLINK_FOLLOW_LINUX;  // default behavior
+  }
   if (x & AT_SYMLINK_NOFOLLOW_LINUX) {
     res |= AT_SYMLINK_NOFOLLOW;
     x &= ~AT_SYMLINK_NOFOLLOW_LINUX;
@@ -1647,6 +1856,9 @@ static int SysFchmod(struct Machine *m, i32 fd, u32 mode) {
 
 static int XlatFchmodatFlags(int x) {
   int res = 0;
+  if (x & AT_SYMLINK_FOLLOW_LINUX) {
+    x &= ~AT_SYMLINK_FOLLOW_LINUX;  // default behavior
+  }
   if (x & AT_SYMLINK_NOFOLLOW_LINUX) {
     res |= AT_SYMLINK_NOFOLLOW;
     x &= ~AT_SYMLINK_NOFOLLOW_LINUX;
@@ -2051,7 +2263,7 @@ static ssize_t SysGetrandom(struct Machine *m, i64 a, size_t n, int f) {
   return rc;
 }
 
-static void OnSignal(int sig, siginfo_t *si, void *uc) {
+void OnSignal(int sig, siginfo_t *si, void *uc) {
   EnqueueSignal(g_machine, UnXlatSignal(sig));
 }
 
@@ -2080,6 +2292,9 @@ static int SysSigaction(struct Machine *m, int sig, i64 act, i64 old,
     CopyFromUserRead(m, &hand, act, sizeof(hand));
     flags = Read64(hand.flags);
     handler = Read64(hand.handler);
+    if (handler == SIG_IGN_LINUX) {
+      flags &= ~SA_NOCLDWAIT_LINUX;
+    }
     if (flags & ~supported) {
       LOGF("unrecognized sigaction() flags: %#" PRIx64, flags & ~supported);
       return einval();
@@ -2092,6 +2307,10 @@ static int SysSigaction(struct Machine *m, int sig, i64 act, i64 old,
         isignored = true;
         break;
       default:
+        if (!(flags & SA_RESTORER_LINUX)) {
+          LOGF("sigaction() flags missing SA_RESTORER");
+          return einval();
+        }
         break;
     }
   }
@@ -2430,7 +2649,7 @@ static int SaveFdSet(struct Machine *m, int nfds, const fd_set *fds, i64 addr) {
   u8 *p;
   int n, fd;
   n = ROUNDUP(nfds, 8) / 8;
-  if (!(p = calloc(1, n))) return -1;
+  if (!(p = (u8 *)calloc(1, n))) return -1;
   for (fd = 0; fd < nfds; ++fd) {
     if (FD_ISSET(fd, fds)) {
       p[fd >> 3] |= 1 << (fd & 7);
@@ -2746,7 +2965,7 @@ static int SysSigprocmask(struct Machine *m, int how, i64 setaddr,
 }
 
 static int SysKill(struct Machine *m, int pid, int sig) {
-  return kill(pid, XlatSignal(sig));
+  return kill(pid, sig ? XlatSignal(sig) : 0);
 }
 
 static bool IsValidThreadId(struct System *s, int tid) {
@@ -2756,9 +2975,10 @@ static bool IsValidThreadId(struct System *s, int tid) {
 
 static int SysTkill(struct Machine *m, int tid, int sig) {
   int err;
+  bool found;
   struct Dll *e;
   struct Machine *m2;
-  if (!(1 <= sig && sig <= 64)) {
+  if (!(0 <= sig && sig <= 64)) {
     LOGF("tkill(%d, %d) failed due to bogus signal", tid, sig);
     return einval();
   }
@@ -2772,12 +2992,18 @@ static int SysTkill(struct Machine *m, int tid, int sig) {
        e = dll_next(m->system->machines, e)) {
     m2 = MACHINE_CONTAINER(e);
     if (m2->tid == tid) {
-      EnqueueSignal(m2, sig);
-      err = pthread_kill(m2->thread, SIGSYS);
+      if (sig) {
+        EnqueueSignal(m2, sig);
+        err = pthread_kill(m2->thread, SIGSYS);
+      } else {
+        err = pthread_kill(m2->thread, 0);
+      }
+      found = true;
       break;
     }
   }
   UNLOCK(&m->system->machines_lock);
+  if (!sig && !found) err = ESRCH;
   if (!err) {
     return 0;
   } else {
@@ -2873,7 +3099,7 @@ static int SysCreat(struct Machine *m, i64 path, int mode) {
 }
 
 static int SysAccess(struct Machine *m, i64 path, int mode) {
-  return SysFaccessat(m, AT_FDCWD_LINUX, path, mode, 0);
+  return SysFaccessat(m, AT_FDCWD_LINUX, path, mode);
 }
 
 static int SysStat(struct Machine *m, i64 path, i64 st) {
@@ -3067,8 +3293,11 @@ void OpSyscall(P) {
     SYSCALL(0x10A, SysSymlinkat, (m, di, si, dx));
     SYSCALL(0x10B, SysReadlinkat, (m, di, si, dx, r0));
     SYSCALL(0x10C, SysFchmodat, (m, di, si, dx, r0));
-    SYSCALL(0x10D, SysFaccessat, (m, di, si, dx, r0));
+    SYSCALL(0x10D, SysFaccessat, (m, di, si, dx));
+    SYSCALL(0x1b7, SysFaccessat2, (m, di, si, dx, r0));
     SYSCALL(0x120, SysAccept4, (m, di, si, dx, r0));
+    SYSCALL(0x111, SysSetRobustList, (m, di, si));
+    SYSCALL(0x112, SysGetRobustList, (m, di, si, dx));
     SYSCALL(0x12E, SysPrlimit, (m, di, si, dx, r0));
     SYSCALL(0x13E, SysGetrandom, (m, di, si, dx));
     SYSCALL(0x1B4, SysCloseRange, (m->system, di, si, dx));
@@ -3088,7 +3317,8 @@ void OpSyscall(P) {
       break;
   }
   if (!m->interrupted) {
-    SYS_LOGF("system call returned %d %s", ax, ax == -1 ? strerror(errno) : "");
+    SYS_LOGF("system call returned %" PRId64 " %s", ax,
+             ax == -1 ? strerror(errno) : "");
     Put64(m->ax, ax != -1 ? ax : -(XlatErrno(errno) & 0xfff));
   } else {
     SYS_LOGF("system call interrupted");

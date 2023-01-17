@@ -21,6 +21,7 @@
 
 #include "blink/alu.h"
 #include "blink/assert.h"
+#include "blink/builtin.h"
 #include "blink/endian.h"
 #include "blink/flags.h"
 #include "blink/lock.h"
@@ -90,7 +91,7 @@ void OpAluw(P) {
   f = kAlu[t][RegLog2(rde)];
   if (Rexw(rde)) {
     p = GetModrmRegisterWordPointerWrite8(A);
-#if LONG_BIT >= 64
+#if CAN_64BIT
     if (Lock(rde) && !((intptr_t)p & 7)) {
       u64 x, y, z;
       x = atomic_load_explicit((_Atomic(u64) *)p, memory_order_acquire);
@@ -181,7 +182,7 @@ void OpAluw(P) {
                "s0a1="  // arg1 = machine
                "a0i"    // arg0 = zero
                "m",     // call micro-op
-               0, kPutReg64[RexrReg(rde)]);
+               (u64)0, kPutReg64[RexrReg(rde)]);
       }
     } else {
       LoadAluArgs(A);

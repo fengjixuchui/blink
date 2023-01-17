@@ -40,8 +40,16 @@ o/$(MODE)/test/func/%.com:						\
 		o/$(MODE)/blink/blink
 	@mkdir -p $(@D)
 	@echo "#!/bin/sh" >$@
-	@echo "echo o/$(MODE)/blink/blink $< >&2" >>$@
-	@echo "o/$(MODE)/blink/blink $<" >>$@
+	@echo "echo [test] $(VM) $< >&2" >>$@
+	@echo "$(VM) $< || exit" >>$@
+	@echo "echo [test] o/$(MODE)/blink/blink $< >&2" >>$@
+	@echo "o/$(MODE)/blink/blink $< || exit" >>$@
+	@echo "echo [test] o/$(MODE)/blink/blink -jm $< >&2" >>$@
+	@echo "o/$(MODE)/blink/blink -jm $< || exit" >>$@
+	@echo "echo [test] o/$(MODE)/blink/blink -m $< >&2" >>$@
+	@echo "o/$(MODE)/blink/blink -m $< || exit" >>$@
+	@echo "echo [test] o/$(MODE)/blink/blink -j $< >&2" >>$@
+	@echo "o/$(MODE)/blink/blink -j $< || exit" >>$@
 	@chmod +x $@
 
 .PHONY: o/$(MODE)/test/func
