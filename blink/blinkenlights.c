@@ -54,6 +54,7 @@
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
+#include "blink/map.h"
 #include "blink/mda.h"
 #include "blink/modrm.h"
 #include "blink/mop.h"
@@ -532,7 +533,7 @@ static unsigned long TallyHits(i64 addr, int size) {
   i64 pc;
   unsigned long hits;
   for (hits = 0, pc = addr; pc < addr + size; ++pc) {
-    hits += ophits[pc - m->system->codestart];
+    hits += ophits[pc - m->system->codestart_prof];
   }
   return hits;
 }
@@ -540,12 +541,13 @@ static unsigned long TallyHits(i64 addr, int size) {
 static void GenerateProfile(void) {
   int sym;
   profsyms.i = 0;
-  profsyms.toto = TallyHits(m->system->codestart, m->system->codesize);
+  profsyms.toto =
+      TallyHits(m->system->codestart_prof, m->system->codesize_prof);
   if (!ophits) return;
   for (sym = 0; sym < dis->syms.i; ++sym) {
-    if (dis->syms.p[sym].addr >= m->system->codestart &&
+    if (dis->syms.p[sym].addr >= m->system->codestart_prof &&
         dis->syms.p[sym].addr + dis->syms.p[sym].size <
-            m->system->codestart + m->system->codesize) {
+            m->system->codestart_prof + m->system->codesize_prof) {
       AddProfSym(sym, TallyHits(dis->syms.p[sym].addr, dis->syms.p[sym].size));
     }
   }
@@ -2578,7 +2580,7 @@ static void OnDiskServiceReadSectors(void) {
     }
   } else {
     LOGF("bios read sector failed 0 <= %" PRId64 " && %" PRIx64 " + %" PRIx64
-         " <= %" PRIx64 "",
+         " <= %lx",
          sector, offset, size, m->system->elf.mapsize);
     m->al = 0x00;
     m->ah = 0x0d;
@@ -3298,10 +3300,10 @@ static void EnterWatchpoint(long bp) {
 }
 
 static void ProfileOp(struct Machine *m, u64 pc) {
-  if (ophits &&                      //
-      pc >= m->system->codestart &&  //
-      pc < m->system->codestart + m->system->codesize) {
-    ++ophits[pc - m->system->codestart];
+  if (ophits &&                           //
+      pc >= m->system->codestart_prof &&  //
+      pc < m->system->codestart_prof + m->system->codesize_prof) {
+    ++ophits[pc - m->system->codestart_prof];
   }
 }
 
@@ -3650,10 +3652,10 @@ int VirtualMachine(int argc, char *argv[]) {
   do {
     action = 0;
     LoadProgram(m, codepath, argv + optind_ - 1, environ);
-    if (m->system->codesize) {
+    if (m->system->codesize_prof) {
       ophits = (unsigned long *)AllocateBig(
-          m->system->codesize * sizeof(unsigned long), PROT_READ | PROT_WRITE,
-          MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+          m->system->codesize_prof * sizeof(unsigned long),
+          PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     }
     ScrollMemoryViews();
     AddStdFd(&m->system->fds, 0);
@@ -3687,7 +3689,7 @@ int VirtualMachine(int argc, char *argv[]) {
     } while (!(action & (RESTART | EXIT)));
   } while (action & RESTART);
   if (m->system->elf.ehdr) {
-    unassert(!munmap(m->system->elf.ehdr, m->system->elf.size));
+    unassert(!Munmap(m->system->elf.ehdr, m->system->elf.size));
   }
   DisFree(dis);
   return exitcode;
@@ -3765,7 +3767,7 @@ int main(int argc, char *argv[]) {
                           1ull << (SIGWINCH_LINUX - 1);  //
   if (optind_ == argc) PrintUsage(48, stderr);
   rc = VirtualMachine(argc, argv);
-  FreeBig(ophits, m->system->codesize * sizeof(unsigned long));
+  FreeBig(ophits, m->system->codesize_prof * sizeof(unsigned long));
   FreeMachine(m);
   ClearHistory();
   FreePanels();

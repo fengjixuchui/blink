@@ -159,7 +159,7 @@ void(LogCodOp)(struct Machine *m, const char *s) {
 #endif
 }
 
-void WriteCod(const char *fmt, ...) {
+void(WriteCod)(const char *fmt, ...) {
 #if LOG_COD
   int n;
   va_list va;
@@ -479,6 +479,10 @@ static bool IsPure(u64 rde) {
       return IsModrmRegister(rde);
     case 0x08D:  // OpLeaGvqpM
       return !IsRipRelative(rde);
+    case 0x0FF:
+      return IsModrmRegister(rde) &&  //
+             (ModrmReg(rde) == 0 ||   // inc
+              ModrmReg(rde) == 1);    // dec
     default:
       return false;
   }
@@ -528,6 +532,7 @@ bool CreatePath(P) {
                GetJitPc(m->path.jb), pc);
       FlushCod(m->path.jb);
       jpc = (intptr_t)m->path.jb->addr + m->path.jb->index;
+      (void)jpc;
       AppendJit(m->path.jb, kEnter, sizeof(kEnter));
 #if LOG_JIX
       Jitter(A,
@@ -672,8 +677,15 @@ void AddPath_EndOp(P) {
     AppendJitMovReg(m->path.jb, kJitArg0, kJitSav0);
     u8 sa = offsetof(struct Machine, stashaddr);
     u8 code[] = {
-        0x48, 0x83, 0177, sa, 0x00,  // cmpq $0x0,0x18(%rdi)
-        0x74, 0x05,                  // jz +5
+        // cmpq $0x0,0x18(%rdi)
+        0x48 | (kJitArg0 > 7 ? kAmdRexb : 0),
+        0x83,
+        0170 | (kJitArg0 & 7),
+        sa,
+        0x00,
+        // jz +5
+        0x74,
+        0x05,
     };
     AppendJit(m->path.jb, code, sizeof(code));
     AppendJitCall(m->path.jb, (void *)CommitStash);

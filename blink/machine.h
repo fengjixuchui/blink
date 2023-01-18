@@ -178,7 +178,7 @@ struct MachineState {
 
 struct Elf {
   const char *prog;
-  Elf64_Ehdr *ehdr;
+  Elf64_Ehdr_ *ehdr;
   long size;
   i64 base;
   char *map;
@@ -221,9 +221,10 @@ struct System {
   i64 brk;
   i64 automap;
   i64 codestart;
-  const char *brand;
+  i64 codestart_prof;
   _Atomic(int) *fun;
   unsigned long codesize;
+  unsigned long codesize_prof;
   struct MachineMemstat memstat;
   pthread_cond_t machines_cond;
   pthread_mutex_t machines_lock;
@@ -648,12 +649,13 @@ void Int32ToDouble(i32, struct Machine *, long);
 void MovsdWpsVpsOp(u8 *, struct Machine *, long);
 
 void SetupCod(struct Machine *);
-void WriteCod(const char *, ...) printfesque(1);
 void FlushCod(struct JitBlock *);
 #if LOG_COD
+void WriteCod(const char *, ...) printfesque(1);
 void LogCodOp(struct Machine *, const char *);
 #else
 #define LogCodOp(m, s) (void)0
+#define WriteCod(...)  (void)0
 #endif
 
 #endif /* BLINK_MACHINE_H_ */

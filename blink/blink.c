@@ -82,10 +82,12 @@ void TerminateSignal(struct Machine *m, int sig) {
 static void OnSigSegv(int sig, siginfo_t *si, void *ptr) {
   int sig_linux;
   RestoreIp(g_machine);
+  // TODO: Fix memory leak with FormatPml4t()
   // TODO(jart): Fix address translation in non-linear mode.
   g_machine->faultaddr = ToGuest(si->si_addr);
-  LOGF("SEGMENTATION FAULT (%s) AT ADDRESS %" PRIx64 "\n\t%s", strsignal(sig),
-       g_machine->faultaddr, GetBacktrace(g_machine));
+  LOGF("SEGMENTATION FAULT (%s) AT ADDRESS %" PRIx64 "\n\t%s\n%s",
+       strsignal(sig), g_machine->faultaddr, GetBacktrace(g_machine),
+       FormatPml4t(g_machine));
 #ifdef DEBUG
   PrintBacktrace();
 #endif
@@ -102,7 +104,6 @@ static int Exec(char *prog, char **argv, char **envp) {
   unassert((g_machine = NewMachine(NewSystem(), 0)));
   if (FLAG_nojit) DisableJit(&g_machine->system->jit);
   SetMachineMode(g_machine, XED_MODE_LONG);
-  g_machine->system->brand = "GenuineBlink";
   g_machine->system->exec = Exec;
   g_machine->nolinear = FLAG_nolinear;
   g_machine->system->nolinear = FLAG_nolinear;

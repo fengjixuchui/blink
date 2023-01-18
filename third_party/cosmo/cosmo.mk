@@ -124,7 +124,7 @@ o/$(MODE)/third_party/cosmo:									\
 		o/$(MODE)/third_party/cosmo/2/crc32z_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/lock2_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/lock_test.com.ok					\
-		o/$(MODE)/third_party/cosmo/4/sigaction_test.com.ok				\
+		o/$(MODE)/third_party/cosmo/5/sigaction_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/sigsetjmp_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/sigsuspend_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/escapehtml_test.com.ok				\
@@ -157,7 +157,7 @@ o/$(MODE)/third_party/cosmo:									\
 		o/$(MODE)/third_party/cosmo/2/clone_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/dup_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/cv_test.com.ok					\
-		o/$(MODE)/third_party/cosmo/2/writev_test.com.ok				\
+		o/$(MODE)/third_party/cosmo/4/writev_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/setsockopt_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/3/sqlite_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/sched_yield_test.com.ok				\
@@ -172,7 +172,7 @@ o/$(MODE)/third_party/cosmo:									\
 		o/$(MODE)/third_party/cosmo/2/ftell_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/fseeko_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/fputs_test.com.ok					\
-		o/$(MODE)/third_party/cosmo/4/pipe_test.com.ok					\
+		o/$(MODE)/third_party/cosmo/5/pipe_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/fork_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/execve_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/arena_test.com.ok					\
@@ -189,14 +189,14 @@ o/$(MODE)/third_party/cosmo:									\
 		o/$(MODE)/third_party/cosmo/2/countbits_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/cv_wait_example_test.com.ok			\
 		o/$(MODE)/third_party/cosmo/2/daemon_test.com.ok				\
-		o/$(MODE)/third_party/cosmo/2/dtoa_test.com.ok					\
+		o/$(MODE)/third_party/cosmo/4/dtoa_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/expm1_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/fgetln_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/getcontext_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/getenv_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/3/ftruncate_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/socket_test.com.ok				\
-		o/$(MODE)/third_party/cosmo/3/unix_test.com.ok					\
+		o/$(MODE)/third_party/cosmo/5/unix_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/tmpfile_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/2/select_test.com.ok
 	@mkdir -p $(@D)

@@ -26,8 +26,7 @@
 long pagesize;
 
 void SetUp(void) {
-  // older versions of musl don't pass this along to sysconf(_SC_PAGESIZE)
-  pagesize = getauxval(AT_PAGESZ);
+  pagesize = 4096;
 }
 
 void TearDown(void) {

@@ -110,6 +110,12 @@ const u8 kJitSav[5] = {kJitSav0, kJitSav1, kJitSav2, kJitSav3, kJitSav4};
 
 #ifdef HAVE_JIT
 
+#define ACTION_MOVE    0x010000
+#define ACTION(a)      ((0xff0000 & a))
+#define MOVE(dst, src) ((dst) | (src) << 8 | ACTION_MOVE)
+#define MOVE_DST(a)    ((0x0000ff & (a)) >> 0)
+#define MOVE_SRC(a)    ((0x00ff00 & (a)) >> 8)
+
 static u8 g_code[kJitMemorySize];
 
 static struct JitGlobals {
@@ -176,13 +182,13 @@ static void pthread_jit_write_protect_np_workaround(int enabled) {
       } while (count-- > 0);
       break;
     default:
-      pthread_jit_write_protect_np_workaround(enabled);
+      pthread_jit_write_protect_np(enabled);
       return;
   }
   LOGF("failed to set jit write protection");
   abort();
 #else
-  pthread_jit_write_protect_np_workaround(enabled);
+  pthread_jit_write_protect_np(enabled);
 #endif
 }
 
@@ -325,7 +331,7 @@ int InitJit(struct Jit *jit) {
 }
 
 /**
- * Destroyes initialized JIT object.
+ * Destroys initialized JIT object.
  *
  * Passing a value not previously initialized by InitJit() is undefined.
  *
@@ -384,7 +390,7 @@ static bool PrepareJitMemory(void *addr, size_t size) {
 #ifdef MAP_JIT
   // Apple M1 only permits RWX memory if we use MAP_JIT, which Apple has
   // chosen to make incompatible with MAP_FIXED.
-  if (munmap(addr, size)) {
+  if (Munmap(addr, size)) {
     LOGF("failed to munmap() jit block: %s", strerror(errno));
     return false;
   }
@@ -394,7 +400,7 @@ static bool PrepareJitMemory(void *addr, size_t size) {
 #else
   int prot;
   prot = atomic_load_explicit(&g_jit.prot, memory_order_relaxed);
-  if (!mprotect(addr, size, prot)) {
+  if (!Mprotect(addr, size, prot, "jit")) {
     return true;
   }
   if (~prot & PROT_EXEC) {
@@ -467,6 +473,7 @@ static bool OomJit(struct JitBlock *jb) {
  */
 inline bool AppendJit(struct JitBlock *jb, const void *data, long size) {
   unassert(size > 0);
+  jb->lastaction = 0;
   if (size <= GetJitRemaining(jb)) {
     memcpy(jb->addr + jb->index, data, size);
     jb->index += size;
@@ -570,7 +577,7 @@ int CommitJit_(struct Jit *jit, struct JitBlock *jb) {
       FreeJitJump(JITJUMP_CONTAINER(e));
     }
     // ask system to change the page memory protections
-    unassert(!mprotect(addr, size, PROT_READ | PROT_EXEC));
+    unassert(!Mprotect(addr, size, PROT_READ | PROT_EXEC, "jit"));
     // update interpreter hooks so our new jit code goes live
     while ((e = dll_first(jb->staged))) {
       js = JITSTAGE_CONTAINER(e);
@@ -786,8 +793,10 @@ bool AlignJit(struct JitBlock *jb, int align, int misalign) {
  * @param src is the index of the source register
  */
 bool AppendJitMovReg(struct JitBlock *jb, int dst, int src) {
+  long action;
   if (dst == src) return true;
   if (GetJitRemaining(jb) < 4) return OomJit(jb);
+  if ((action = MOVE(dst, src)) == jb->lastaction) return true;
 #if defined(__x86_64__)
   unassert(!(dst & ~15));
   unassert(!(src & ~15));
@@ -795,7 +804,6 @@ bool AppendJitMovReg(struct JitBlock *jb, int dst, int src) {
           ((kAmdRexw | (src & 8 ? kAmdRexr : 0) | (dst & 8 ? kAmdRexb : 0)) |
            0x89 << 010 | (0300 | (src & 7) << 3 | (dst & 7)) << 020));
   jb->index += 3;
-  return true;
 #elif defined(__aarch64__)
   //               src            target
   //              ┌─┴─┐           ┌─┴─┐
@@ -807,8 +815,9 @@ bool AppendJitMovReg(struct JitBlock *jb, int dst, int src) {
   unassert(!(src & ~31));
   Put32(jb->addr + jb->index, 0xaa0003e0 | src << 16 | dst);
   jb->index += 4;
-  return true;
 #endif
+  jb->lastaction = action;
+  return true;
 }
 
 /**
@@ -896,6 +905,7 @@ bool AppendJitJump(struct JitBlock *jb, void *code) {
  */
 bool AppendJitSetReg(struct JitBlock *jb, int reg, u64 value) {
   int n = 0;
+  long lastaction;
 #if defined(__x86_64__)
   u8 buf[10];
   u8 rex = 0;
@@ -964,7 +974,14 @@ bool AppendJitSetReg(struct JitBlock *jb, int reg, u64 value) {
   }
   n *= 4;
 #endif
-  return AppendJit(jb, buf, n);
+  lastaction = jb->lastaction;
+  if (!AppendJit(jb, buf, n)) return false;
+  if (ACTION(lastaction) == ACTION_MOVE &&  //
+      MOVE_DST(lastaction) != reg &&        //
+      MOVE_SRC(lastaction) != reg) {
+    jb->lastaction = lastaction;
+  }
+  return true;
 }
 
 /**

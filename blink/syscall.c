@@ -47,6 +47,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
 #include "blink/assert.h"
 #include "blink/errno.h"
 #include "blink/loader.h"
@@ -105,12 +109,45 @@ static int SystemIoctl(int fd, unsigned long request, ...) {
   return ioctl(fd, request, arg);
 }
 
+#ifdef __EMSCRIPTEN__
+// If this runs on the main thread, the browser is blocked until we return
+// back to the main loop. Yield regularly when the process waits for some
+// user input.
+
+int em_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
+  int ret = poll(fds, nfds, timeout);
+  if (ret == 0) emscripten_sleep(50);
+  return ret;
+}
+
+ssize_t em_readv(int fd, const struct iovec *iov, int iovcnt) {
+  // Handle blocking reads by waiting for POLLIN
+  if ((fcntl(fd, F_GETFL) & O_NONBLOCK) == 0) {
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    while(em_poll(&pfd, 1, 50) == 0);
+  }
+  size_t ret = readv(fd, iov, iovcnt);
+  if (ret == -1 && errno == EAGAIN) emscripten_sleep(50);
+  return ret;
+}
+#endif
+
 const struct FdCb kFdCbHost = {
     .close = close,
+#ifdef __EMSCRIPTEN__
+    .readv = em_readv,
+#else
     .readv = readv,
+#endif
     .writev = writev,
     .ioctl = SystemIoctl,
+#ifdef __EMSCRIPTEN__
+    .poll = em_poll,
+#else
     .poll = poll,
+#endif
     .tcgetattr = tcgetattr,
     .tcsetattr = tcsetattr,
 };
@@ -870,12 +907,10 @@ static int SysDup1(struct Machine *m, i32 fildes) {
   int oflags;
   int newfildes;
   struct Fd *fd;
-#ifdef __CYGWIN__
   if (fildes < 0) {
     LOGF("dup() ebadf");
     return ebadf();
   }
-#endif
   if ((newfildes = dup(fildes)) != -1) {
     LockFds(&m->system->fds);
     if ((fd = GetFd(&m->system->fds, fildes))) {
@@ -998,10 +1033,12 @@ static void FixupSock(int fd, int flags) {
 }
 
 static int SysUname(struct Machine *m, i64 utsaddr) {
+  // glibc binaries won't run unless we report blink as a
+  // modern linux kernel on top of genuine intel hardware
   struct utsname_linux uts = {
       .sysname = "blink",
-      .release = "4.0",        // or glibc whines
-      .version = "blink 4.0",  // or glibc whines
+      .release = "4.0",
+      .version = "blink 4.0",
       .machine = "x86_64",
   };
   union {
@@ -1289,6 +1326,7 @@ static int SysGetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
 
 static i64 SysRead(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   i64 rc;
+  int oflags;
   struct Fd *fd;
   struct Iovs iv;
   ssize_t (*readv_impl)(int, const struct iovec *, int);
@@ -1296,11 +1334,14 @@ static i64 SysRead(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   if ((fd = GetFd(&m->system->fds, fildes))) {
     unassert(fd->cb);
     unassert(readv_impl = fd->cb->readv);
+    oflags = fd->oflags;
   } else {
     readv_impl = 0;
+    oflags = 0;
   }
   UnlockFds(&m->system->fds);
   if (!fd) return -1;
+  if ((oflags & O_ACCMODE) == O_WRONLY) return ebadf();
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size)) != -1) {
@@ -1331,7 +1372,7 @@ static i64 SysWrite(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   }
   UnlockFds(&m->system->fds);
   if (!fd) return -1;
-  if ((oflags & O_ACCMODE) == O_RDONLY) return ebadf();  // due to cygwin
+  if ((oflags & O_ACCMODE) == O_RDONLY) return ebadf();
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size)) != -1) {
@@ -1345,10 +1386,33 @@ static i64 SysWrite(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   return rc;
 }
 
+// FreeBSD doesn't do access mode check on read/write to pipes.
+// Cygwin generally doesn't do access checks or is inconsistent.
+static long CheckFdAccess(struct Machine *m, i32 fildes, bool writable,
+                          int errno_if_check_fails) {
+  int oflags;
+  struct Fd *fd;
+  LockFds(&m->system->fds);
+  if ((fd = GetFd(&m->system->fds, fildes))) {
+    oflags = fd->oflags;
+  } else {
+    oflags = 0;
+  }
+  UnlockFds(&m->system->fds);
+  if (!fd) return -1;
+  if ((writable && ((oflags & O_ACCMODE) == O_RDONLY)) ||
+      (!writable && ((oflags & O_ACCMODE) == O_WRONLY))) {
+    errno = errno_if_check_fails;
+    return -1;
+  }
+  return 0;
+}
+
 static i64 SysPread(struct Machine *m, i32 fildes, i64 addr, u64 size,
                     u64 offset) {
   void *buf;
   ssize_t rc;
+  if (CheckFdAccess(m, fildes, false, EBADF) == -1) return -1;
   if (size) {
     if ((buf = malloc(size))) {
       INTERRUPTIBLE(rc = pread(fildes, buf, size, offset));
@@ -1366,55 +1430,49 @@ static i64 SysPread(struct Machine *m, i32 fildes, i64 addr, u64 size,
 static i64 SysPwrite(struct Machine *m, i32 fildes, i64 addr, u64 size,
                      u64 offset) {
   i64 rc;
-  int oflags;
-  struct Fd *fd;
-  const void *mem;
-  LockFds(&m->system->fds);
-  if ((fd = GetFd(&m->system->fds, fildes))) {
-    oflags = fd->oflags;
-  } else {
-    oflags = 0;
-  }
-  UnlockFds(&m->system->fds);
-  if (!fd) return -1;
-  if ((oflags & O_ACCMODE) == O_RDONLY) return ebadf();  // due to cygwin
-  mem = Schlep(m, addr, size);
-  INTERRUPTIBLE(rc = pwrite(fildes, mem, size, offset));
+  if (CheckFdAccess(m, fildes, true, EBADF) == -1) return -1;
+  INTERRUPTIBLE(rc = pwrite(fildes, Schlep(m, addr, size), size, offset));
   return rc;
 }
 
 static i64 SysReadv(struct Machine *m, i32 fildes, i64 iovaddr, i32 iovlen) {
   i64 rc;
+  int oflags;
   struct Fd *fd;
   struct Iovs iv;
   ssize_t (*readv_impl)(int, const struct iovec *, int);
+  if (iovlen <= 0 || iovlen > IOV_MAX) return einval();
   LockFds(&m->system->fds);
   if ((fd = GetFd(&m->system->fds, fildes))) {
     unassert(fd->cb);
     unassert(readv_impl = fd->cb->readv);
+    oflags = fd->oflags;
   } else {
     readv_impl = 0;
+    oflags = 0;
   }
   UnlockFds(&m->system->fds);
   if (!fd) return -1;
-  if (iovlen > 0) {
-    InitIovs(&iv);
-    if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen)) != -1) {
+  if ((oflags & O_ACCMODE) == O_WRONLY) return ebadf();
+  InitIovs(&iv);
+  if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen)) != -1) {
+    if (iv.i) {
       INTERRUPTIBLE(rc = readv_impl(fildes, iv.p, iv.i));
+    } else {
+      rc = 0;
     }
-    FreeIovs(&iv);
-  } else {
-    rc = einval();
   }
+  FreeIovs(&iv);
   return rc;
 }
 
-static i64 SysWritev(struct Machine *m, i32 fildes, i64 iovaddr, i32 iovlen) {
+static i64 SysWritev(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen) {
   i64 rc;
   int oflags;
   struct Fd *fd;
   struct Iovs iv;
   ssize_t (*writev_impl)(int, const struct iovec *, int);
+  if (iovlen <= 0 || iovlen > IOV_MAX) return einval();
   LockFds(&m->system->fds);
   if ((fd = GetFd(&m->system->fds, fildes))) {
     unassert(fd->cb);
@@ -1426,16 +1484,16 @@ static i64 SysWritev(struct Machine *m, i32 fildes, i64 iovaddr, i32 iovlen) {
   }
   UnlockFds(&m->system->fds);
   if (!fd) return -1;
-  if ((oflags & O_ACCMODE) == O_RDONLY) return ebadf();  // due to cygwin
-  if (iovlen > 0) {
-    InitIovs(&iv);
-    if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen)) != -1) {
+  if ((oflags & O_ACCMODE) == O_RDONLY) return ebadf();
+  InitIovs(&iv);
+  if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen)) != -1) {
+    if (iv.i) {
       INTERRUPTIBLE(rc = writev_impl(fildes, iv.p, iv.i));
+    } else {
+      rc = 0;
     }
-    FreeIovs(&iv);
-  } else {
-    rc = einval();
   }
+  FreeIovs(&iv);
   return rc;
 }
 
@@ -1487,7 +1545,7 @@ static i64 SysGetdents(struct Machine *m, i32 fildes, i64 addr, i64 size) {
     type = UnXlatDt(ent->d_type);
     reclen = ROUNDUP(8 + 8 + 2 + 1 + len + 1, 8);
     memset(&rec, 0, sizeof(rec));
-    Write64(rec.d_ino, 0);
+    Write64(rec.d_ino, ent->d_ino);
     Write64(rec.d_off, off);
     Write16(rec.d_reclen, reclen);
     Write8(rec.d_type, type);
@@ -1544,6 +1602,13 @@ static int IoctlTcsets(struct Machine *m, int fd, int request, i64 addr,
 static int IoctlTiocgpgrp(struct Machine *m, int fd, i64 addr) {
   int rc;
   u8 *pgrp;
+
+#ifdef __EMSCRIPTEN__
+  // Force shells to disable job control in emscripten
+  errno = ENOTTY;
+  return -1;
+#endif
+
   if (!(pgrp = (u8 *)Schlep(m, addr, 4))) return -1;
   if ((rc = tcgetpgrp(fd)) == -1) return -1;
   Write32(pgrp, rc);
@@ -1641,7 +1706,6 @@ static int IoctlSiocgifaddr(struct Machine *m, int systemfd, i64 ifreq_addr,
 }
 
 static int SysIoctl(struct Machine *m, int fildes, u64 request, i64 addr) {
-  int rc;
   struct Fd *fd;
   int (*ioctl_impl)(int, unsigned long, ...);
   int (*tcgetattr_impl)(int, struct termios *);
@@ -1661,47 +1725,33 @@ static int SysIoctl(struct Machine *m, int fildes, u64 request, i64 addr) {
   if (!fd) return -1;
   switch (request) {
     case TIOCGWINSZ_LINUX:
-      rc = IoctlTiocgwinsz(m, fildes, addr, ioctl_impl);
-      break;
+      return IoctlTiocgwinsz(m, fildes, addr, ioctl_impl);
     case TCGETS_LINUX:
-      rc = IoctlTcgets(m, fildes, addr, tcgetattr_impl);
-      break;
+      return IoctlTcgets(m, fildes, addr, tcgetattr_impl);
     case TCSETS_LINUX:
-      rc = IoctlTcsets(m, fildes, TCSANOW, addr, tcsetattr_impl);
-      break;
+      return IoctlTcsets(m, fildes, TCSANOW, addr, tcsetattr_impl);
     case TCSETSW_LINUX:
-      rc = IoctlTcsets(m, fildes, TCSADRAIN, addr, tcsetattr_impl);
-      break;
+      return IoctlTcsets(m, fildes, TCSADRAIN, addr, tcsetattr_impl);
     case TCSETSF_LINUX:
-      rc = IoctlTcsets(m, fildes, TCSAFLUSH, addr, tcsetattr_impl);
-      break;
+      return IoctlTcsets(m, fildes, TCSAFLUSH, addr, tcsetattr_impl);
     case SIOCGIFCONF_LINUX:
-      rc = IoctlSiocgifconf(m, fildes, addr);
-      break;
+      return IoctlSiocgifconf(m, fildes, addr);
     case SIOCGIFADDR_LINUX:
-      rc = IoctlSiocgifaddr(m, fildes, addr, SIOCGIFADDR);
-      break;
+      return IoctlSiocgifaddr(m, fildes, addr, SIOCGIFADDR);
     case SIOCGIFNETMASK_LINUX:
-      rc = IoctlSiocgifaddr(m, fildes, addr, SIOCGIFNETMASK);
-      break;
+      return IoctlSiocgifaddr(m, fildes, addr, SIOCGIFNETMASK);
     case SIOCGIFBRDADDR_LINUX:
-      rc = IoctlSiocgifaddr(m, fildes, addr, SIOCGIFBRDADDR);
-      break;
+      return IoctlSiocgifaddr(m, fildes, addr, SIOCGIFBRDADDR);
     case SIOCGIFDSTADDR_LINUX:
-      rc = IoctlSiocgifaddr(m, fildes, addr, SIOCGIFDSTADDR);
-      break;
+      return IoctlSiocgifaddr(m, fildes, addr, SIOCGIFDSTADDR);
     case TIOCGPGRP_LINUX:
-      rc = IoctlTiocgpgrp(m, fildes, addr);
-      break;
+      return IoctlTiocgpgrp(m, fildes, addr);
     case TIOCSPGRP_LINUX:
-      rc = IoctlTiocspgrp(m, fildes, addr);
-      break;
+      return IoctlTiocspgrp(m, fildes, addr);
     default:
       LOGF("missing ioctl %#" PRIx64, request);
-      rc = einval();
-      break;
+      return einval();
   }
-  return rc;
 }
 
 static i64 SysLseek(struct Machine *m, i32 fildes, i64 offset, int whence) {
@@ -1724,9 +1774,10 @@ static i64 SysLseek(struct Machine *m, i32 fildes, i64 offset, int whence) {
   return rc;
 }
 
-static i64 SysFtruncate(struct Machine *m, i32 fd, i64 size) {
+static i64 SysFtruncate(struct Machine *m, i32 fildes, i64 size) {
   i64 rc;
-  INTERRUPTIBLE(rc = ftruncate(fd, size));
+  if (CheckFdAccess(m, fildes, true, EINVAL) == -1) return -1;
+  INTERRUPTIBLE(rc = ftruncate(fildes, size));
   return rc;
 }
 
