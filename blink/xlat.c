@@ -46,6 +46,12 @@
 #include "blink/sigwinch.h"
 #include "blink/xlat.h"
 
+#if defined(__APPLE__) || defined(__NetBSD__)
+#define st_atim st_atimespec
+#define st_ctim st_ctimespec
+#define st_mtim st_mtimespec
+#endif
+
 int XlatErrno(int x) {
   if (x == EPERM) return EPERM_LINUX;
   if (x == ENOENT) return ENOENT_LINUX;
@@ -359,15 +365,19 @@ int XlatSocketProtocol(int x) {
   }
 }
 
-int XlatSocketLevel(int x) {
+int XlatSocketLevel(int x, int *level) {
+  // Haiku defines SOL_SOCKET as -1
+  int res;
   switch (x) {
-    XLAT(1, SOL_SOCKET);
-    XLAT(6, IPPROTO_TCP);
-    XLAT(17, IPPROTO_UDP);
+    CASE(1, res = SOL_SOCKET);
+    CASE(6, res = IPPROTO_TCP);
+    CASE(17, res = IPPROTO_UDP);
     default:
       LOGF("%s %d not supported yet", "socket level", x);
       return einval();
   }
+  *level = res;
+  return 0;
 }
 
 int XlatSocketOptname(int level, int optname) {
@@ -482,37 +492,41 @@ int XlatWait(int x) {
   return r;
 }
 
-int XlatClock(int x) {
+int XlatClock(int x, clock_t *clock) {
+  // Haiku defines CLOCK_REALTIME as -1
+  clock_t res;
   switch (x) {
-    XLAT(0, CLOCK_REALTIME);
-    XLAT(1, CLOCK_MONOTONIC);
-    XLAT(2, CLOCK_PROCESS_CPUTIME_ID);
-    XLAT(3, CLOCK_THREAD_CPUTIME_ID);
+    CASE(0, res = CLOCK_REALTIME);
+    CASE(1, res = CLOCK_MONOTONIC);
+    CASE(2, res = CLOCK_PROCESS_CPUTIME_ID);
+    CASE(3, res = CLOCK_THREAD_CPUTIME_ID);
 #ifdef CLOCK_REALTIME_COARSE
-    XLAT(5, CLOCK_REALTIME_COARSE);
+    CASE(5, res = CLOCK_REALTIME_COARSE);
 #elif defined(CLOCK_REALTIME_FAST)
-    XLAT(5, CLOCK_REALTIME_FAST);
+    CASE(5, res = CLOCK_REALTIME_FAST);
 #endif
 #ifdef CLOCK_MONOTONIC_COARSE
-    XLAT(6, CLOCK_MONOTONIC_COARSE);
+    CASE(6, res = CLOCK_MONOTONIC_COARSE);
 #elif defined(CLOCK_REALTIME_FAST)
-    XLAT(6, CLOCK_MONOTONIC_FAST);
+    CASE(6, res = CLOCK_MONOTONIC_FAST);
 #endif
 #ifdef CLOCK_MONOTONIC_RAW
-    XLAT(4, CLOCK_MONOTONIC_RAW);
+    CASE(4, res = CLOCK_MONOTONIC_RAW);
 #else
-    XLAT(4, CLOCK_MONOTONIC);
+    CASE(4, res = CLOCK_MONOTONIC);
 #endif
 #ifdef CLOCK_BOOTTIME
-    XLAT(7, CLOCK_BOOTTIME);
+    CASE(7, res = CLOCK_BOOTTIME);
 #endif
 #ifdef CLOCK_TAI
-    XLAT(11, CLOCK_TAI);
+    CASE(11, res = CLOCK_TAI);
 #endif
     default:
       LOGF("%s %d not supported yet", "clock", x);
       return einval();
   }
+  *clock = res;
+  return 0;
 }
 
 int XlatAccMode(int x) {
@@ -644,33 +658,47 @@ int UnXlatOpenFlags(int x) {
   return res;
 }
 
+int UnXlatItimer(int x) {
+  switch (x) {
+    case ITIMER_REAL_LINUX:
+      return ITIMER_REAL;
+    case ITIMER_VIRTUAL_LINUX:
+      return ITIMER_VIRTUAL;
+    case ITIMER_PROF_LINUX:
+      return ITIMER_PROF;
+    default:
+      LOGF("%s %#x not supported", "itimer", x);
+      return einval();
+  }
+}
+
 int XlatSockaddrToHost(struct sockaddr_storage *dst,
                        const struct sockaddr_linux *src, u32 srclen) {
   if (srclen < 2) {
     LOGF("sockaddr size too small for %s", "family");
     return einval();
   }
-  switch (Read16(src->sa_family)) {
+  switch (Read16(src->family)) {
     case AF_UNIX_LINUX: {
       size_t n;
       struct sockaddr_un *dst_un;
       const struct sockaddr_un_linux *src_un;
-      if (srclen < offsetof(struct sockaddr_un_linux, sun_path)) {
+      if (srclen < offsetof(struct sockaddr_un_linux, path)) {
         LOGF("sockaddr size too small for %s", "sockaddr_un_linux");
         return einval();
       }
       dst_un = (struct sockaddr_un *)dst;
       src_un = (const struct sockaddr_un_linux *)src;
-      n = strnlen(src_un->sun_path,
-                  MIN(srclen - offsetof(struct sockaddr_un_linux, sun_path),
-                      sizeof(src_un->sun_path)));
+      n = strnlen(src_un->path,
+                  MIN(srclen - offsetof(struct sockaddr_un_linux, path),
+                      sizeof(src_un->path)));
       if (n >= sizeof(dst_un->sun_path)) {
         LOGF("sockaddr_un path too long for host");
         return einval();
       }
       memset(dst_un, 0, sizeof(*dst_un));
       dst_un->sun_family = AF_UNIX;
-      if (n) memcpy(dst_un->sun_path, src_un->sun_path, n);
+      if (n) memcpy(dst_un->sun_path, src_un->path, n);
       dst_un->sun_path[n] = 0;
       return sizeof(struct sockaddr_un);
     }
@@ -685,15 +713,15 @@ int XlatSockaddrToHost(struct sockaddr_storage *dst,
       src_in = (const struct sockaddr_in_linux *)src;
       memset(dst_in, 0, sizeof(*dst_in));
       dst_in->sin_family = AF_INET;
-      dst_in->sin_port = src_in->sin_port;
-      dst_in->sin_addr.s_addr = src_in->sin_addr;
+      dst_in->sin_port = src_in->port;
+      dst_in->sin_addr.s_addr = src_in->addr;
       return sizeof(struct sockaddr_in);
     }
     case AF_INET6_LINUX: {
       struct sockaddr_in6 *dst_in;
       const struct sockaddr_in6_linux *src_in;
       _Static_assert(sizeof(dst_in->sin6_addr) == 16, "");
-      _Static_assert(sizeof(src_in->sin6_addr) == 16, "");
+      _Static_assert(sizeof(src_in->addr) == 16, "");
       if (srclen < sizeof(struct sockaddr_in6_linux)) {
         LOGF("sockaddr size too small for %s", "sockaddr_in6_linux");
         return einval();
@@ -702,12 +730,12 @@ int XlatSockaddrToHost(struct sockaddr_storage *dst,
       src_in = (const struct sockaddr_in6_linux *)src;
       memset(dst_in, 0, sizeof(*dst_in));
       dst_in->sin6_family = AF_INET6;
-      dst_in->sin6_port = src_in->sin6_port;
-      memcpy(&dst_in->sin6_addr, src_in->sin6_addr, 16);
+      dst_in->sin6_port = src_in->port;
+      memcpy(&dst_in->sin6_addr, src_in->addr, 16);
       return sizeof(struct sockaddr_in6);
     }
     default:
-      LOGF("%s %d not supported yet", "socket family", Read16(src->sa_family));
+      LOGF("%s %d not supported yet", "socket family", Read16(src->family));
       errno = ENOPROTOOPT;
       return -1;
   }
@@ -732,14 +760,14 @@ int XlatSockaddrToLinux(struct sockaddr_storage_linux *dst,
     n = strnlen(src_un->sun_path,
                 MIN(srclen - offsetof(struct sockaddr_un, sun_path),
                     sizeof(src_un->sun_path)));
-    if (n >= sizeof(dst_un->sun_path)) {
+    if (n >= sizeof(dst_un->path)) {
       LOGF("sockaddr_un path too long for linux");
       return einval();
     }
     memset(dst_un, 0, sizeof(*dst_un));
-    Write16(dst_un->sun_family, AF_UNIX_LINUX);
-    if (n) memcpy(dst_un->sun_path, src_un->sun_path, n);
-    dst_un->sun_path[n] = 0;
+    Write16(dst_un->family, AF_UNIX_LINUX);
+    if (n) memcpy(dst_un->path, src_un->sun_path, n);
+    dst_un->path[n] = 0;
     return offsetof(struct sockaddr_un, sun_path) + n + 1;
   } else if (src->sa_family == AF_INET) {
     struct sockaddr_in_linux *dst_in;
@@ -751,9 +779,9 @@ int XlatSockaddrToLinux(struct sockaddr_storage_linux *dst,
     dst_in = (struct sockaddr_in_linux *)dst;
     src_in = (const struct sockaddr_in *)src;
     memset(dst_in, 0, sizeof(*dst_in));
-    Write16(dst_in->sin_family, AF_INET_LINUX);
-    dst_in->sin_port = src_in->sin_port;
-    dst_in->sin_addr = src_in->sin_addr.s_addr;
+    Write16(dst_in->family, AF_INET_LINUX);
+    dst_in->port = src_in->sin_port;
+    dst_in->addr = src_in->sin_addr.s_addr;
     return sizeof(struct sockaddr_in_linux);
   } else if (src->sa_family == AF_INET6) {
     struct sockaddr_in6_linux *dst_in;
@@ -765,9 +793,9 @@ int XlatSockaddrToLinux(struct sockaddr_storage_linux *dst,
     dst_in = (struct sockaddr_in6_linux *)dst;
     src_in = (const struct sockaddr_in6 *)src;
     memset(dst_in, 0, sizeof(*dst_in));
-    Write16(dst_in->sin6_family, AF_INET6_LINUX);
-    dst_in->sin6_port = src_in->sin6_port;
-    memcpy(dst_in->sin6_addr, &src_in->sin6_addr, 16);
+    Write16(dst_in->family, AF_INET6_LINUX);
+    dst_in->port = src_in->sin6_port;
+    memcpy(dst_in->addr, &src_in->sin6_addr, 16);
     return sizeof(struct sockaddr_in6_linux);
   } else {
     LOGF("%s %d not supported yet", "socket family", src->sa_family);
@@ -777,45 +805,45 @@ int XlatSockaddrToLinux(struct sockaddr_storage_linux *dst,
 }
 
 void XlatStatToLinux(struct stat_linux *dst, const struct stat *src) {
-  Write64(dst->st_dev, src->st_dev);
-  Write64(dst->st_ino, src->st_ino);
-  Write64(dst->st_nlink, src->st_nlink);
-  Write32(dst->st_mode, src->st_mode);
-  Write32(dst->st_uid, src->st_uid);
-  Write32(dst->st_gid, src->st_gid);
-  Write32(dst->__pad, 0);
-  Write64(dst->st_rdev, src->st_rdev);
-  Write64(dst->st_size, src->st_size);
-  Write64(dst->st_blksize, src->st_blksize);
-  Write64(dst->st_blocks, src->st_blocks);
-  Write64(dst->st_dev, src->st_dev);
-  Write64(dst->st_atim.tv_sec, src->st_atime);
-  Write64(dst->st_atim.tv_nsec, 0);
-  Write64(dst->st_mtim.tv_sec, src->st_mtime);
-  Write64(dst->st_mtim.tv_nsec, 0);
-  Write64(dst->st_ctim.tv_sec, src->st_ctime);
-  Write64(dst->st_ctim.tv_nsec, 0);
+  Write64(dst->dev, src->st_dev);
+  Write64(dst->ino, src->st_ino);
+  Write64(dst->nlink, src->st_nlink);
+  Write32(dst->mode, src->st_mode);
+  Write32(dst->uid, src->st_uid);
+  Write32(dst->gid, src->st_gid);
+  Write32(dst->pad_, 0);
+  Write64(dst->rdev, src->st_rdev);
+  Write64(dst->size, src->st_size);
+  Write64(dst->blksize, src->st_blksize);
+  Write64(dst->blocks, src->st_blocks);
+  Write64(dst->dev, src->st_dev);
+  Write64(dst->atim.sec, src->st_atim.tv_sec);
+  Write64(dst->atim.nsec, src->st_atim.tv_nsec);
+  Write64(dst->mtim.sec, src->st_mtim.tv_sec);
+  Write64(dst->mtim.nsec, src->st_mtim.tv_nsec);
+  Write64(dst->ctim.sec, src->st_ctim.tv_sec);
+  Write64(dst->ctim.nsec, src->st_ctim.tv_nsec);
 }
 
 void XlatRusageToLinux(struct rusage_linux *dst, const struct rusage *src) {
-  Write64(dst->ru_utime.tv_sec, src->ru_utime.tv_sec);
-  Write64(dst->ru_utime.tv_usec, src->ru_utime.tv_usec);
-  Write64(dst->ru_stime.tv_sec, src->ru_stime.tv_sec);
-  Write64(dst->ru_stime.tv_usec, src->ru_stime.tv_usec);
-  Write64(dst->ru_maxrss, src->ru_maxrss);
-  Write64(dst->ru_ixrss, src->ru_ixrss);
-  Write64(dst->ru_idrss, src->ru_idrss);
-  Write64(dst->ru_isrss, src->ru_isrss);
-  Write64(dst->ru_minflt, src->ru_minflt);
-  Write64(dst->ru_majflt, src->ru_majflt);
-  Write64(dst->ru_nswap, src->ru_nswap);
-  Write64(dst->ru_inblock, src->ru_inblock);
-  Write64(dst->ru_oublock, src->ru_oublock);
-  Write64(dst->ru_msgsnd, src->ru_msgsnd);
-  Write64(dst->ru_msgrcv, src->ru_msgrcv);
-  Write64(dst->ru_nsignals, src->ru_nsignals);
-  Write64(dst->ru_nvcsw, src->ru_nvcsw);
-  Write64(dst->ru_nivcsw, src->ru_nivcsw);
+  Write64(dst->utime.sec, src->ru_utime.tv_sec);
+  Write64(dst->utime.usec, src->ru_utime.tv_usec);
+  Write64(dst->stime.sec, src->ru_stime.tv_sec);
+  Write64(dst->stime.usec, src->ru_stime.tv_usec);
+  Write64(dst->maxrss, src->ru_maxrss);
+  Write64(dst->ixrss, src->ru_ixrss);
+  Write64(dst->idrss, src->ru_idrss);
+  Write64(dst->isrss, src->ru_isrss);
+  Write64(dst->minflt, src->ru_minflt);
+  Write64(dst->majflt, src->ru_majflt);
+  Write64(dst->nswap, src->ru_nswap);
+  Write64(dst->inblock, src->ru_inblock);
+  Write64(dst->oublock, src->ru_oublock);
+  Write64(dst->msgsnd, src->ru_msgsnd);
+  Write64(dst->msgrcv, src->ru_msgrcv);
+  Write64(dst->nsignals, src->ru_nsignals);
+  Write64(dst->nvcsw, src->ru_nvcsw);
+  Write64(dst->nivcsw, src->ru_nivcsw);
 }
 
 static u64 XlatRlimitToLinuxScalar(u64 x) {
@@ -824,8 +852,8 @@ static u64 XlatRlimitToLinuxScalar(u64 x) {
 }
 
 void XlatRlimitToLinux(struct rlimit_linux *dst, const struct rlimit *src) {
-  Write64(dst->rlim_cur, XlatRlimitToLinuxScalar(src->rlim_cur));
-  Write64(dst->rlim_max, XlatRlimitToLinuxScalar(src->rlim_max));
+  Write64(dst->cur, XlatRlimitToLinuxScalar(src->rlim_cur));
+  Write64(dst->max, XlatRlimitToLinuxScalar(src->rlim_max));
 }
 
 static u64 XlatLinuxToRlimitScalar(int r, u64 x) {
@@ -849,30 +877,36 @@ static u64 XlatLinuxToRlimitScalar(int r, u64 x) {
 
 void XlatLinuxToRlimit(int sysresource, struct rlimit *dst,
                        const struct rlimit_linux *src) {
-  dst->rlim_cur = XlatLinuxToRlimitScalar(sysresource, Read64(src->rlim_cur));
-  dst->rlim_max = XlatLinuxToRlimitScalar(sysresource, Read64(src->rlim_max));
+  dst->rlim_cur = XlatLinuxToRlimitScalar(sysresource, Read64(src->cur));
+  dst->rlim_max = XlatLinuxToRlimitScalar(sysresource, Read64(src->max));
 }
 
 void XlatItimervalToLinux(struct itimerval_linux *dst,
                           const struct itimerval *src) {
-  Write64(dst->it_interval.tv_sec, src->it_interval.tv_sec);
-  Write64(dst->it_interval.tv_usec, src->it_interval.tv_usec);
-  Write64(dst->it_value.tv_sec, src->it_value.tv_sec);
-  Write64(dst->it_value.tv_usec, src->it_value.tv_usec);
+  Write64(dst->interval.sec, src->it_interval.tv_sec);
+  Write64(dst->interval.usec, src->it_interval.tv_usec);
+  Write64(dst->value.sec, src->it_value.tv_sec);
+  Write64(dst->value.usec, src->it_value.tv_usec);
 }
 
 void XlatLinuxToItimerval(struct itimerval *dst,
                           const struct itimerval_linux *src) {
-  dst->it_interval.tv_sec = Read64(src->it_interval.tv_sec);
-  dst->it_interval.tv_usec = Read64(src->it_interval.tv_usec);
-  dst->it_value.tv_sec = Read64(src->it_value.tv_sec);
-  dst->it_value.tv_usec = Read64(src->it_value.tv_usec);
+  dst->it_interval.tv_sec = Read64(src->interval.sec);
+  dst->it_interval.tv_usec = Read64(src->interval.usec);
+  dst->it_value.tv_sec = Read64(src->value.sec);
+  dst->it_value.tv_usec = Read64(src->value.usec);
 }
 
 void XlatWinsizeToLinux(struct winsize_linux *dst, const struct winsize *src) {
   memset(dst, 0, sizeof(*dst));
-  Write16(dst->ws_row, src->ws_row);
-  Write16(dst->ws_col, src->ws_col);
+  Write16(dst->row, src->ws_row);
+  Write16(dst->col, src->ws_col);
+}
+
+void XlatWinsizeToHost(struct winsize *dst, const struct winsize_linux *src) {
+  memset(dst, 0, sizeof(*dst));
+  dst->ws_row = Read16(src->row);
+  dst->ws_col = Read16(src->col);
 }
 
 void XlatSigsetToLinux(u8 dst[8], const sigset_t *src) {
@@ -1232,85 +1266,321 @@ static int UnXlatTermiosOflag(int x) {
 
 static void XlatTermiosCc(struct termios *dst,
                           const struct termios_linux *src) {
-  dst->c_cc[VINTR] = src->c_cc[VINTR_LINUX];
-  dst->c_cc[VQUIT] = src->c_cc[VQUIT_LINUX];
-  dst->c_cc[VERASE] = src->c_cc[VERASE_LINUX];
-  dst->c_cc[VKILL] = src->c_cc[VKILL_LINUX];
-  dst->c_cc[VEOF] = src->c_cc[VEOF_LINUX];
-  dst->c_cc[VTIME] = src->c_cc[VTIME_LINUX];
-  dst->c_cc[VMIN] = src->c_cc[VMIN_LINUX];
-  dst->c_cc[VSTART] = src->c_cc[VSTART_LINUX];
-  dst->c_cc[VSTOP] = src->c_cc[VSTOP_LINUX];
-  dst->c_cc[VSUSP] = src->c_cc[VSUSP_LINUX];
-  dst->c_cc[VEOL] = src->c_cc[VEOL_LINUX];
+  dst->c_cc[VINTR] = src->cc[VINTR_LINUX];
+  dst->c_cc[VQUIT] = src->cc[VQUIT_LINUX];
+  dst->c_cc[VERASE] = src->cc[VERASE_LINUX];
+  dst->c_cc[VKILL] = src->cc[VKILL_LINUX];
+  dst->c_cc[VEOF] = src->cc[VEOF_LINUX];
+  dst->c_cc[VTIME] = src->cc[VTIME_LINUX];
+  dst->c_cc[VMIN] = src->cc[VMIN_LINUX];
+  dst->c_cc[VSTART] = src->cc[VSTART_LINUX];
+  dst->c_cc[VSTOP] = src->cc[VSTOP_LINUX];
+  dst->c_cc[VSUSP] = src->cc[VSUSP_LINUX];
+  dst->c_cc[VEOL] = src->cc[VEOL_LINUX];
 #ifdef VSWTC
-  dst->c_cc[VSWTC] = src->c_cc[VSWTC_LINUX];
+  dst->c_cc[VSWTC] = src->cc[VSWTC_LINUX];
 #endif
 #ifdef VREPRINT
-  dst->c_cc[VREPRINT] = src->c_cc[VREPRINT_LINUX];
+  dst->c_cc[VREPRINT] = src->cc[VREPRINT_LINUX];
 #endif
 #ifdef VDISCARD
-  dst->c_cc[VDISCARD] = src->c_cc[VDISCARD_LINUX];
+  dst->c_cc[VDISCARD] = src->cc[VDISCARD_LINUX];
 #endif
 #ifdef VWERASE
-  dst->c_cc[VWERASE] = src->c_cc[VWERASE_LINUX];
+  dst->c_cc[VWERASE] = src->cc[VWERASE_LINUX];
 #endif
 #ifdef VLNEXT
-  dst->c_cc[VLNEXT] = src->c_cc[VLNEXT_LINUX];
+  dst->c_cc[VLNEXT] = src->cc[VLNEXT_LINUX];
 #endif
 #ifdef VEOL2
-  dst->c_cc[VEOL2] = src->c_cc[VEOL2_LINUX];
+  dst->c_cc[VEOL2] = src->cc[VEOL2_LINUX];
 #endif
 }
 
 static void UnXlatTermiosCc(struct termios_linux *dst,
                             const struct termios *src) {
-  dst->c_cc[VINTR_LINUX] = src->c_cc[VINTR];
-  dst->c_cc[VQUIT_LINUX] = src->c_cc[VQUIT];
-  dst->c_cc[VERASE_LINUX] = src->c_cc[VERASE];
-  dst->c_cc[VKILL_LINUX] = src->c_cc[VKILL];
-  dst->c_cc[VEOF_LINUX] = src->c_cc[VEOF];
-  dst->c_cc[VTIME_LINUX] = src->c_cc[VTIME];
-  dst->c_cc[VMIN_LINUX] = src->c_cc[VMIN];
-  dst->c_cc[VSTART_LINUX] = src->c_cc[VSTART];
-  dst->c_cc[VSTOP_LINUX] = src->c_cc[VSTOP];
-  dst->c_cc[VSUSP_LINUX] = src->c_cc[VSUSP];
-  dst->c_cc[VEOL_LINUX] = src->c_cc[VEOL];
+  dst->cc[VINTR_LINUX] = src->c_cc[VINTR];
+  dst->cc[VQUIT_LINUX] = src->c_cc[VQUIT];
+  dst->cc[VERASE_LINUX] = src->c_cc[VERASE];
+  dst->cc[VKILL_LINUX] = src->c_cc[VKILL];
+  dst->cc[VEOF_LINUX] = src->c_cc[VEOF];
+  dst->cc[VTIME_LINUX] = src->c_cc[VTIME];
+  dst->cc[VMIN_LINUX] = src->c_cc[VMIN];
+  dst->cc[VSTART_LINUX] = src->c_cc[VSTART];
+  dst->cc[VSTOP_LINUX] = src->c_cc[VSTOP];
+  dst->cc[VSUSP_LINUX] = src->c_cc[VSUSP];
+  dst->cc[VEOL_LINUX] = src->c_cc[VEOL];
 #ifdef VSWTC
-  dst->c_cc[VSWTC_LINUX] = src->c_cc[VSWTC];
+  dst->cc[VSWTC_LINUX] = src->c_cc[VSWTC];
 #endif
 #ifdef VREPRINT
-  dst->c_cc[VREPRINT_LINUX] = src->c_cc[VREPRINT];
+  dst->cc[VREPRINT_LINUX] = src->c_cc[VREPRINT];
 #endif
 #ifdef VDISCARD
-  dst->c_cc[VDISCARD_LINUX] = src->c_cc[VDISCARD];
+  dst->cc[VDISCARD_LINUX] = src->c_cc[VDISCARD];
 #endif
 #ifdef VWERASE
-  dst->c_cc[VWERASE_LINUX] = src->c_cc[VWERASE];
+  dst->cc[VWERASE_LINUX] = src->c_cc[VWERASE];
 #endif
 #ifdef VLNEXT
-  dst->c_cc[VLNEXT_LINUX] = src->c_cc[VLNEXT];
+  dst->cc[VLNEXT_LINUX] = src->c_cc[VLNEXT];
 #endif
 #ifdef VEOL2
-  dst->c_cc[VEOL2_LINUX] = src->c_cc[VEOL2];
+  dst->cc[VEOL2_LINUX] = src->c_cc[VEOL2];
 #endif
 }
 
 void XlatLinuxToTermios(struct termios *dst, const struct termios_linux *src) {
+  speed_t speed;
   memset(dst, 0, sizeof(*dst));
-  dst->c_iflag = XlatTermiosIflag(Read32(src->c_iflag));
-  dst->c_oflag = XlatTermiosOflag(Read32(src->c_oflag));
-  dst->c_cflag = XlatTermiosCflag(Read32(src->c_cflag));
-  dst->c_lflag = XlatTermiosLflag(Read32(src->c_lflag));
+  dst->c_iflag = XlatTermiosIflag(Read32(src->iflag));
+  dst->c_oflag = XlatTermiosOflag(Read32(src->oflag));
+  dst->c_cflag = XlatTermiosCflag(Read32(src->cflag));
+  dst->c_lflag = XlatTermiosLflag(Read32(src->lflag));
+  switch (Read32(src->cflag) & CBAUD_LINUX) {
+    case B0_LINUX:
+      speed = B0;
+      break;
+    case B50_LINUX:
+      speed = B50;
+      break;
+    case B75_LINUX:
+      speed = B75;
+      break;
+    case B110_LINUX:
+      speed = B110;
+      break;
+    case B134_LINUX:
+      speed = B134;
+      break;
+    case B150_LINUX:
+      speed = B150;
+      break;
+    case B200_LINUX:
+      speed = B200;
+      break;
+    case B300_LINUX:
+      speed = B300;
+      break;
+    case B600_LINUX:
+      speed = B600;
+      break;
+    case B1200_LINUX:
+      speed = B1200;
+      break;
+    case B1800_LINUX:
+      speed = B1800;
+      break;
+    case B2400_LINUX:
+      speed = B2400;
+      break;
+    case B4800_LINUX:
+      speed = B4800;
+      break;
+    case B9600_LINUX:
+      speed = B9600;
+      break;
+    case B19200_LINUX:
+      speed = B19200;
+      break;
+    case B38400_LINUX:
+      speed = B38400;
+      break;
+#ifdef B57600
+    case B57600_LINUX:
+      speed = B57600;
+      break;
+#endif
+#ifdef B115200
+    case B115200_LINUX:
+      speed = B115200;
+      break;
+#endif
+#ifdef B230400
+    case B230400_LINUX:
+      speed = B230400;
+      break;
+#endif
+#ifdef B460800
+    case B460800_LINUX:
+      speed = B460800;
+      break;
+#endif
+#ifdef B500000
+    case B500000_LINUX:
+      speed = B500000;
+      break;
+#endif
+#ifdef B576000
+    case B576000_LINUX:
+      speed = B576000;
+      break;
+#endif
+#ifdef B921600
+    case B921600_LINUX:
+      speed = B921600;
+      break;
+#endif
+#ifdef B1000000
+    case B1000000_LINUX:
+      speed = B1000000;
+      break;
+#endif
+#ifdef B1152000
+    case B1152000_LINUX:
+      speed = B1152000;
+      break;
+#endif
+#ifdef B1500000
+    case B1500000_LINUX:
+      speed = B1500000;
+      break;
+#endif
+#ifdef B2000000
+    case B2000000_LINUX:
+      speed = B2000000;
+      break;
+#endif
+#ifdef B2500000
+    case B2500000_LINUX:
+      speed = B2500000;
+      break;
+#endif
+#ifdef B3000000
+    case B3000000_LINUX:
+      speed = B3000000;
+      break;
+#endif
+#ifdef B3500000
+    case B3500000_LINUX:
+      speed = B3500000;
+      break;
+#endif
+#ifdef B4000000
+    case B4000000_LINUX:
+      speed = B4000000;
+      break;
+#endif
+    default:
+      LOGF("unknown baud rate: %#x", Read32(src->cflag) & CBAUD_LINUX);
+      speed = B38400;
+      break;
+  }
+  cfsetispeed(dst, speed);
+  cfsetospeed(dst, speed);
   XlatTermiosCc(dst, src);
 }
 
 void XlatTermiosToLinux(struct termios_linux *dst, const struct termios *src) {
+  int speed;
+  speed_t srcspeed;
   memset(dst, 0, sizeof(*dst));
-  Write32(dst->c_iflag, UnXlatTermiosIflag(src->c_iflag));
-  Write32(dst->c_oflag, UnXlatTermiosOflag(src->c_oflag));
-  Write32(dst->c_cflag, UnXlatTermiosCflag(src->c_cflag));
-  Write32(dst->c_lflag, UnXlatTermiosLflag(src->c_lflag));
+  Write32(dst->iflag, UnXlatTermiosIflag(src->c_iflag));
+  Write32(dst->oflag, UnXlatTermiosOflag(src->c_oflag));
+  Write32(dst->cflag, UnXlatTermiosCflag(src->c_cflag));
+  Write32(dst->lflag, UnXlatTermiosLflag(src->c_lflag));
+  if ((srcspeed = cfgetospeed(src)) != (speed_t)-1) {
+    if (srcspeed == B0) {
+      speed = B0_LINUX;
+    } else if (srcspeed == B50) {
+      speed = B50_LINUX;
+    } else if (srcspeed == B75) {
+      speed = B75_LINUX;
+    } else if (srcspeed == B110) {
+      speed = B110_LINUX;
+    } else if (srcspeed == B134) {
+      speed = B134_LINUX;
+    } else if (srcspeed == B150) {
+      speed = B150_LINUX;
+    } else if (srcspeed == B200) {
+      speed = B200_LINUX;
+    } else if (srcspeed == B300) {
+      speed = B300_LINUX;
+    } else if (srcspeed == B600) {
+      speed = B600_LINUX;
+    } else if (srcspeed == B1200) {
+      speed = B1200_LINUX;
+    } else if (srcspeed == B1800) {
+      speed = B1800_LINUX;
+    } else if (srcspeed == B2400) {
+      speed = B2400_LINUX;
+    } else if (srcspeed == B4800) {
+      speed = B4800_LINUX;
+    } else if (srcspeed == B9600) {
+      speed = B9600_LINUX;
+    } else if (srcspeed == B19200) {
+      speed = B19200_LINUX;
+    } else if (srcspeed == B38400) {
+      speed = B38400_LINUX;
+#ifdef B57600
+    } else if (srcspeed == B57600) {
+      speed = B57600_LINUX;
+#endif
+#ifdef B115200
+    } else if (srcspeed == B115200) {
+      speed = B115200_LINUX;
+#endif
+#ifdef B230400
+    } else if (srcspeed == B230400) {
+      speed = B230400_LINUX;
+#endif
+#ifdef B460800
+    } else if (srcspeed == B460800) {
+      speed = B460800_LINUX;
+#endif
+#ifdef B500000
+    } else if (srcspeed == B500000) {
+      speed = B500000_LINUX;
+#endif
+#ifdef B576000
+    } else if (srcspeed == B576000) {
+      speed = B576000_LINUX;
+#endif
+#ifdef B921600
+    } else if (srcspeed == B921600) {
+      speed = B921600_LINUX;
+#endif
+#ifdef B1000000
+    } else if (srcspeed == B1000000) {
+      speed = B1000000_LINUX;
+#endif
+#ifdef B1152000
+    } else if (srcspeed == B1152000) {
+      speed = B1152000_LINUX;
+#endif
+#ifdef B1500000
+    } else if (srcspeed == B1500000) {
+      speed = B1500000_LINUX;
+#endif
+#ifdef B2000000
+    } else if (srcspeed == B2000000) {
+      speed = B2000000_LINUX;
+#endif
+#ifdef B2500000
+    } else if (srcspeed == B2500000) {
+      speed = B2500000_LINUX;
+#endif
+#ifdef B3000000
+    } else if (srcspeed == B3000000) {
+      speed = B3000000_LINUX;
+#endif
+#ifdef B3500000
+    } else if (srcspeed == B3500000) {
+      speed = B3500000_LINUX;
+#endif
+#ifdef B4000000
+    } else if (srcspeed == B4000000) {
+      speed = B4000000_LINUX;
+#endif
+    } else {
+      LOGF("unrecognized baud rate: %ld", (long)srcspeed);
+      speed = B38400;
+    }
+  } else {
+    LOGF("failed to get baud rate: %s", strerror(errno));
+    speed = B38400;
+  }
+  Write32(dst->cflag, (Read32(dst->cflag) & ~CBAUD_LINUX) | speed);
   UnXlatTermiosCc(dst, src);
 }
 

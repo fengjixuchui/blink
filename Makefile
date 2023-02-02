@@ -16,10 +16,11 @@ MODE := $(m)
 endif
 endif
 
-HOST_OS := $(shell uname -s)
+HOST_SYSTEM := $(shell uname -s)
 HOST_ARCH := $(shell uname -m)
+HOST_OS := $(shell uname -o 2>/dev/null)
 
-ifneq ($(HOST_OS), Linux)
+ifneq ($(HOST_SYSTEM), Linux)
 VM = o/$(MODE)/blink/blink
 endif
 ifneq ($(HOST_ARCH), x86_64)
@@ -45,6 +46,7 @@ check2:	o/$(MODE)/test/sse		\
 emulates:				\
 	o/$(MODE)/test/asm		\
 	o/$(MODE)/test/flat		\
+	o/$(MODE)/test/metal		\
 	o/$(MODE)/third_party/cosmo/emulates
 
 tags: TAGS HTAGS
@@ -60,6 +62,7 @@ include test/test.mk
 include test/asm/asm.mk
 include test/func/func.mk
 include test/flat/flat.mk
+include test/metal/metal.mk
 include test/blink/test.mk
 include third_party/gcc/gcc.mk
 include third_party/qemu/qemu.mk

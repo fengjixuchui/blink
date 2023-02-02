@@ -111,8 +111,7 @@ static int CrawlFlags(struct Machine *m,  //
 
 // returns bitset of flags read by code at pc, or -1 if unknown
 int GetNeededFlags(struct Machine *m, i64 pc, int myflags) {
-  int rc;
-  rc = CrawlFlags(m, pc, myflags, 16, 0);
+  int rc = CrawlFlags(m, pc, myflags, 32, 0);
   WriteCod("/\t%" PRIx64 " needs flags %s\n", pc, DescribeFlags(rc));
   return rc;
 }
@@ -122,6 +121,10 @@ int GetFlagClobbers(u64 rde) {
   switch (Mopcode(rde)) {
     default:
       return 0;
+    case 0xE8:   // call
+    case 0xC3:   // ret
+    case 0x105:  // syscall
+      return -1;
     case 0x000:  // add byte
     case 0x001:  // add word
     case 0x002:  // add byte flip
@@ -224,8 +227,8 @@ int GetFlagClobbers(u64 rde) {
       }
     case 0x0DB:  // fpu
     case 0x0DF:  // fpu
-      if (ModrmReg(rde) == 5 || ModrmReg(rde) == 6) {
-        return OF | SF | AF;
+      if (IsModrmRegister(rde) && (ModrmReg(rde) == 5 || ModrmReg(rde) == 6)) {
+        return OF | SF | AF;  // fucomip, fcomip
       } else {
         return 0;
       }
@@ -255,6 +258,8 @@ int GetFlagClobbers(u64 rde) {
         case 0:  // inc
         case 1:  // dec
           return ZF | SF | OF | AF | PF;
+        case 2:  // call Ev
+          return -1;
         default:  // call, callf, jmp, jmpf, push
           return 0;
       }
@@ -312,6 +317,8 @@ int GetFlagDeps(u64 rde) {
     case 0x01D:  // sbb %rax $ivds
     case 0x072:  // jb
     case 0x073:  // jae
+    case 0x142:  // cmovb
+    case 0x143:  // cmovnb
     case 0x182:  // jb
     case 0x183:  // jae
     case 0x192:  // setb

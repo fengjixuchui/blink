@@ -43,6 +43,8 @@ struct Allocator {
     PTHREAD_MUTEX_INITIALIZER,
 };
 
+bool g_wasteland;
+
 static void FillPage(void *p, int c) {
   memset(p, c, 4096);
 }
@@ -106,26 +108,39 @@ static void FreeHostPages(struct System *s) {
   // TODO(jart): Iterate the PML4T to find host pages.
 }
 
-struct System *NewSystem(void) {
+struct System *NewSystem(int mode) {
   struct System *s;
-  if ((s = (struct System *)AllocateBig(sizeof(struct System),
-                                        PROT_READ | PROT_WRITE,
-                                        MAP_ANONYMOUS | MAP_PRIVATE, -1, 0))) {
-    InitJit(&s->jit);
-    InitFds(&s->fds);
-    pthread_mutex_init(&s->sig_lock, 0);
-    pthread_mutex_init(&s->mmap_lock, 0);
-    pthread_mutex_init(&s->futex_lock, 0);
-    pthread_cond_init(&s->machines_cond, 0);
-    pthread_mutex_init(&s->machines_lock, 0);
-    s->blinksigs = 1ull << (SIGSYS_LINUX - 1) |   //
-                   1ull << (SIGILL_LINUX - 1) |   //
-                   1ull << (SIGFPE_LINUX - 1) |   //
-                   1ull << (SIGSEGV_LINUX - 1) |  //
-                   1ull << (SIGTRAP_LINUX - 1);
-    s->automap = kAutomapStart;
-    s->pid = getpid();
+  unassert(mode == XED_MODE_REAL ||    //
+           mode == XED_MODE_LEGACY ||  //
+           mode == XED_MODE_LONG);
+  if (posix_memalign((void **)&s, _Alignof(struct System), sizeof(*s))) {
+    enomem();
+    return 0;
   }
+  memset(s, 0, sizeof(*s));
+  s->mode = mode;
+  if (mode == XED_MODE_REAL) {
+    if (posix_memalign((void **)&s->real, 4096, kRealSize)) {
+      free(s);
+      enomem();
+      return 0;
+    }
+  }
+  InitJit(&s->jit);
+  InitFds(&s->fds);
+  pthread_mutex_init(&s->sig_lock, 0);
+  pthread_mutex_init(&s->mmap_lock, 0);
+  pthread_mutex_init(&s->exec_lock, 0);
+  pthread_mutex_init(&s->futex_lock, 0);
+  pthread_cond_init(&s->machines_cond, 0);
+  pthread_mutex_init(&s->machines_lock, 0);
+  s->blinksigs = 1ull << (SIGSYS_LINUX - 1) |   //
+                 1ull << (SIGILL_LINUX - 1) |   //
+                 1ull << (SIGFPE_LINUX - 1) |   //
+                 1ull << (SIGSEGV_LINUX - 1) |  //
+                 1ull << (SIGTRAP_LINUX - 1);
+  s->automap = kAutomapStart;
+  s->pid = getpid();
   return s;
 }
 
@@ -197,12 +212,12 @@ void FreeSystem(struct System *s) {
   unassert(!pthread_mutex_destroy(&s->machines_lock));
   unassert(!pthread_cond_destroy(&s->machines_cond));
   unassert(!pthread_mutex_destroy(&s->futex_lock));
+  unassert(!pthread_mutex_destroy(&s->exec_lock));
   unassert(!pthread_mutex_destroy(&s->mmap_lock));
   unassert(!pthread_mutex_destroy(&s->sig_lock));
   DestroyFds(&s->fds);
   DestroyJit(&s->jit);
-  FreeBig(s->fun, s->codesize * sizeof(atomic_int));
-  FreeBig(s, sizeof(struct System));
+  free(s);
 }
 
 struct Machine *NewMachine(struct System *system, struct Machine *parent) {
@@ -231,10 +246,7 @@ struct Machine *NewMachine(struct System *system, struct Machine *parent) {
   m->mode = system->mode;
   m->thread = pthread_self();
   m->nolinear = system->nolinear;
-  m->codesize = system->codesize;
-  m->codestart = system->codestart;
-  Write32(m->sigaltstack.ss_flags, SS_DISABLE_LINUX);
-  m->fun = system->fun ? system->fun - system->codestart : 0;
+  Write32(m->sigaltstack.flags, SS_DISABLE_LINUX);
   if (parent) {
     m->tid = (system->next_tid++ & (kMaxThreadIds - 1)) + kMinThreadId;
   } else {
@@ -399,7 +411,10 @@ static bool FreePage(struct System *s, u64 entry) {
   }
 }
 
-static bool RemoveVirtual(struct System *s, i64 virt, i64 size) {
+#define IS_EMPTY_SPACE             1
+#define IS_COMPLETE_LINEAR_MAPPING 2
+
+static int RemoveVirtual(struct System *s, i64 virt, i64 size) {
   u8 *mi;
   i64 end;
   u64 i, pt;
@@ -419,16 +434,23 @@ static bool RemoveVirtual(struct System *s, i64 virt, i64 size) {
       }
     }
   }
-  return got_some && is_mapped;
+  if (!got_some) {
+    return IS_EMPTY_SPACE;
+  } else if (got_some && is_mapped) {
+    unassert(HasLinearMapping(s));
+    return IS_COMPLETE_LINEAR_MAPPING;
+  } else {
+    return 0;
+  }
 }
 
 _Noreturn static void PanicDueToMmap(void) {
 #ifndef NDEBUG
   WriteErrorString(
-      "Unrecoverable mmap() crisis: see log for further details\n");
+      "unrecoverable mmap() crisis: see log for further details\n");
 #else
   WriteErrorString(
-      "Unrecoverable mmap() crisis: Blink was built with NDEBUG\n");
+      "unrecoverable mmap() crisis: Blink was built with NDEBUG\n");
 #endif
   exit(250);
 }
@@ -438,6 +460,7 @@ int ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
   u8 *mi;
   int prot;
   long pagesize;
+  int greenfield;
   i64 ti, pt, end, level, entry;
 
   // we determine these
@@ -469,7 +492,7 @@ int ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
 
   if (HasLinearMapping(s)) {
     if (virt <= 0) {
-      LOGF("app attempted to map null or negative in linear mode");
+      LOGF("app attempted to map %#" PRIx64 " in linear mode", virt);
       return enotsup();
     }
     if (virt & (pagesize - 1)) {
@@ -489,20 +512,35 @@ int ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
   MEM_LOGF("reserving virtual [%#" PRIx64 ",%#" PRIx64 ") w/ %" PRId64 " kb",
            virt, virt + size, size / 1024);
 
-  RemoveVirtual(s, virt, size);
+  // remove existing mapping
+  // this is the point of no return
+  greenfield = RemoveVirtual(s, virt, size) == IS_EMPTY_SPACE;
 
   prot = ((flags & PAGE_U ? PROT_READ : 0) |
           ((flags & PAGE_RW) || fd == -1 ? PROT_WRITE : 0));
 
   if (HasLinearMapping(s)) {
-    if (Mmap(ToHost(virt), size,                     //
-             prot,                                   //
-             (MAP_FIXED |                            //
-              (fd == -1 ? MAP_ANONYMOUS : 0) |       //
-              (shared ? MAP_SHARED : MAP_PRIVATE)),  //
-             fd, offset, "linear") == MAP_FAILED) {
+    // create a linear mapping. doing this runs the risk of destroying
+    // things the kernel put into our address space that blink doesn't
+    // know about. systems like linux and freebsd have a feature which
+    // lets us report a friendly error to the user, when that happens.
+    // the solution is most likely to rebuild with -Wl,-Ttext-segment=
+    // please note we need to take off the seatbelt after an execve().
+    if (g_wasteland) greenfield = false;
+    errno = 0;
+    if (Mmap(ToHost(virt), size, prot,                 //
+             ((greenfield ? MAP_DEMAND : MAP_FIXED) |  //
+              (fd == -1 ? MAP_ANONYMOUS : 0) |         //
+              (shared ? MAP_SHARED : MAP_PRIVATE)),    //
+             fd, offset, "linear") != ToHost(virt)) {
       LOGF("mmap(%#" PRIx64 "[%p], %#" PRIx64 ") crisis: %s", virt,
-           ToHost(virt), size, strerror(errno));
+           ToHost(virt), size,
+           (greenfield && errno == MAP_DENIED)
+               ? "requested memory overlapped blink image or system memory. "
+                 "try using `blink -m` to disable memory optimizations, or "
+                 "try compiling blink using -Wl,--image-base=0x23000000 or "
+                 "possibly -Wl,-Ttext-segment=0x23000000 in LDFLAGS"
+               : strerror(errno));
       PanicDueToMmap();
     }
     s->memstat.allocated += size / 4096;
@@ -624,7 +662,7 @@ int FreeVirtual(struct System *s, i64 virt, i64 size) {
            virt, virt + size, size / 1024);
   // TODO(jart): We should probably validate a PAGE_EOF exists at the
   //             end when size isn't a multiple of platform page size
-  if (RemoveVirtual(s, virt, size) &&
+  if (RemoveVirtual(s, virt, size) == IS_COMPLETE_LINEAR_MAPPING &&
       (HasLinearMapping(s) && !(virt & (pagesize - 1)))) {
     unassert(!Munmap(ToHost(virt & PAGE_TA), size));
   }

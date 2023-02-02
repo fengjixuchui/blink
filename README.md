@@ -1,22 +1,20 @@
 ![Screenshot of Blink running GCC 9.4.0](blink/blink-gcc.png)
 
 [![Test Status](https://github.com/jart/blink/actions/workflows/build.yml/badge.svg)](https://github.com/jart/blink/actions/workflows/build.yml)
-[![MacOS Test Status](https://github.com/jart/blink/actions/workflows/macos.yml/badge.svg)](https://github.com/jart/blink/actions/workflows/macos.yml)
 [![Cygwin Test Status](https://github.com/jart/blink/actions/workflows/cygwin.yml/badge.svg)](https://github.com/jart/blink/actions/workflows/cygwin.yml)
 [![Emscripten Test Status](https://github.com/jart/blink/actions/workflows/emscripten.yml/badge.svg)](https://github.com/jart/blink/actions/workflows/emscripten.yml)
-[![FreeBSD / OpenBSD Test Status](https://github.com/jart/blink/actions/workflows/bsd.yml/badge.svg)](https://github.com/jart/blink/actions/workflows/bsd.yml)
 # Blinkenlights
 
 This project contains two programs:
 
-`blink` is a virtual machine that runs statically-compiled x86-64-linux
-programs on different operating systems and hardware architectures. It's
-designed to do the same thing as the `qemu-x86_64` command, except (a)
-rather than being a 4mb binary, Blink only has a ~170kb footprint; and
-(b) Blink goes 2x faster than Qemu on some benchmarks such as emulating
-GCC. The tradeoff is Blink doesn't have as many features as Qemu. Blink
-is a great fit when you want a virtual machine that's extremely small
-and runs ephemeral programs much faster. For further details on the
+`blink` is a virtual machine that runs x86-64-linux programs on
+different operating systems and hardware architectures. It's designed to
+do the same thing as the `qemu-x86_64` command, except (a) rather than
+being a 4mb binary, Blink only has a ~179kb footprint; and (b) Blink
+goes 2x faster than Qemu on some benchmarks such as emulating GCC. The
+tradeoff is Blink doesn't have as many features as Qemu. Blink is a
+great fit when you want a virtual machine that's extremely small and
+runs ephemeral programs much faster. For further details on the
 motivations for this tool, please read <https://justine.lol/ape.html>.
 
 [`blinkenlights`](https://justine.lol/blinkenlights) is a TUI interface
@@ -128,20 +126,20 @@ You can hunt down bugs in Blink using the following build modes:
 
 ## Compiling and Running Programs under Blink
 
-Blink is picky about which Linux executables it'll emulate. For example,
-right now only static binaries are supported. In other cases, the host
-system page size may cause problems. For example, Apple M1 has a system
-page size of 16kb, and WASM's page size is 64kb. On those platforms, you
+Blink can be picky about which Linux executables it'll execute. For
+example the host system page size may cause problems on non-Linux
+platforms like Apple M1 (16kb) and Cygwin (64kb). On such platforms, you
 may encounter an error like this:
 
 ```
 I2023-01-06T18:12:51.007788:blink/loader.c:91:47550 p_vaddr p_offset skew unequal w.r.t. host page size
 ```
 
-In this case, you can disable the linear memory optimization (using the
-`-m` flag) but that'll slow down performance. Another option is simply
-recompiling your executable so that its ELF program headers will work on
-systems with a larger page size. You can do that using these GCC flags:
+The simplest way to solve that is by disabling the linear memory
+optimization (using the `blink -m` flag) but that'll slow down
+performance. Another option is to try recompiling your executable so
+that its ELF program headers will work on systems with a larger page
+size. You can do that using these GCC flags:
 
 ```
 gcc -static -Wl,-z,common-page-size=65536,-z,max-page-size=65536 ...
@@ -303,12 +301,32 @@ ring-0 system instructions, since Blink is primarily a user-mode VM, and
 therefore only has limited support for bare metal operating system
 software (which we'll discuss more in-depth in a later section).
 
-Blink itself may be detected via `CPUID` by checking for the vendor
-string `GenuineBlink` (rather than the `GenuineIntel` / `AuthenticAMD`
-brands that get reported normally). Please note that old versions of
-Blinkenlights use the brand `GenuineCosmo`. Blink also identifies itself
-as `blink 4.0` via the `uname()` system call. We report a false version
-because otherwise, every program that links Glibc will refuse to run.
+Blink advertises itself as `blink 4.0` in the `uname()` system call.
+Programs may detect they're running in Blink by issuing a `CPUID`
+instruction where `EAX` is set to the leaf number:
+
+- Leaf `0x0` (or `0x80000000`) reports `GenuineIntel` in
+  `EBX ‖ EDX ‖ ECX`
+
+- Leaf `0x1` reports that Blink is a hypervisor in bit `31` of `ECX`
+
+- Leaf `0x40000000` reports `GenuineBlink` as the hypervisor name in
+  `EBX ‖ ECX ‖ EDX`
+
+- Leaf `0x40031337` reports the underlying operating system name in
+  `EBX ‖ ECX ‖ EDX` with zero filling for strings shorter than 12:
+
+  - `Linux` for Linux
+  - `XNU` for MacOS
+  - `FreeBSD` for FreeBSD
+  - `NetBSD` for NetBSD
+  - `OpenBSD` for OpenBSD
+  - `Linux` for Linux
+  - `Cygwin` for Windows under Cygwin
+  - `Windows` for Windows under Cosmopolitan
+  - `Unknown` if compiled on unrecognized platform
+
+- Leaf `0x80000001` tells if Blink's JIT is enabled in bit `31` in `ECX`
 
 ### JIT
 
@@ -398,14 +416,12 @@ point where it can boot something like Windows.
 
 ## Executable Formats
 
-Blink supports several different executable formats, all of which are
-static. You can run:
+Blink supports several different executable formats. You can run:
+
+- x86-64-linux ELF executables (both static and dynamic).
 
 - Actually Portable Executables, which have either the `MZqFpD` or
   `jartsr` magic.
-
-- Statically-compiled x86-64-linux ELF executables, so long as they
-  don't use PIC/PIE or require a interpreter.
 
 - Flat executables, which must end with the file extension `.bin`. In
   this case, you can make executables as small as 10 bytes in size,
@@ -419,14 +435,36 @@ static. You can run:
 
 ## Quirks
 
-Here's the current list of quirks and known issues with Blink.
+Here's the current list of Blink's known quirks and tradeoffs.
+
+### Flags
+
+Flag dependencies may not carry across function call boundaries under
+long mode. This is because when Blink's JIT is speculating whether or
+not it's necessary for an arithmetic instruction to compute flags, it
+considers `RET` and `CALL` terminal ops that break the chain. As such
+64-bit code shouldn't do things we did in the DOS days, such as using
+carry flag as a return value to indicate error. This should work fine
+when `STC` is used to set the carry flag, but if the code computes it
+cleverly using instructions like `SUB`, then EFLAGS might not change.
+
+### Faults
+
+Blink may not report the precise program counter where a fault occurred
+in `ucontext_t::uc_mcontext::rip` when signalling a segmentation fault.
+This is currently only possible when `PUSH` or `POP` access bad memory.
+That's because Blink's JIT tries to avoid updating `Machine::ip` on ops
+it considers "pure" such as those that only access registers, which for
+reasons of performance is defined to include pushing and popping.
 
 ### Futexes
 
 If futexes are shared between multiple processes then they'll have
-poorer latency, because Blink currently only supports condition
-variables between threads. Blink also currently doesn't unlock robust
-mutexes on process death. We're working on both these problems.
+poorer latency, because Blink currently only supports true condition
+variables between threads. However such code won't deadlock, since the
+POSIX threads API requires that Blink periodically poll the futex. Blink
+also currently doesn't unlock robust mutexes on process death. We're
+working on both these problems.
 
 ### Signal Handling
 

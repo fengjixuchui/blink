@@ -112,28 +112,23 @@ static void OpLeaGvqpM(P) {
   }
 }
 
-static relegated void OpPushSeg(P) {
-  u8 seg = (Opcode(rde) & 070) >> 3;
-  Push(A, *GetSegment(A, seg) >> 4);
-}
-
-static relegated void OpPopSeg(P) {
-  u8 seg = (Opcode(rde) & 070) >> 3;
-  *GetSegment(A, seg) = Pop(A, 0) << 4;
-}
-
-static relegated void OpMovEvqpSw(P) {
-  WriteRegisterOrMemory(rde, GetModrmRegisterWordPointerWriteOszRexw(A),
-                        *GetSegment(A, ModrmReg(rde)) >> 4);
+static relegated const struct DescriptorCache *GetSegment(P, unsigned s) {
+  if (s < 6) {
+    return m->seg + s;
+  } else {
+    OpUdImpl(m);
+  }
 }
 
 static relegated int GetDescriptor(struct Machine *m, int selector,
                                    u64 *out_descriptor) {
-  unassert(m->system->gdt_base + m->system->gdt_limit <= kRealSize);
+  u64 base = m->system->gdt_base, daddr;
   selector &= -8;
-  if (8 <= selector && selector + 8 <= m->system->gdt_limit) {
-    SetReadAddr(m, m->system->gdt_base + selector, 8);
-    *out_descriptor = Load64(m->system->real + m->system->gdt_base + selector);
+  if (8 <= selector && selector + 7 <= m->system->gdt_limit) {
+    daddr = base + selector;
+    if (daddr >= kRealSize || daddr + 8 > kRealSize) return -1;
+    SetReadAddr(m, daddr, 8);
+    *out_descriptor = Load64(m->system->real + daddr);
     return 0;
   } else {
     return -1;
@@ -145,7 +140,9 @@ static relegated u64 GetDescriptorBase(u64 d) {
 }
 
 static relegated u64 GetDescriptorLimit(u64 d) {
-  return (d & 0x000f000000000000) >> 32 | (d & 0xffff);
+  u64 lim = (d & 0x000f000000000000) >> 32 | (d & 0xffff);
+  if ((d & 0x0080000000000000) != 0) lim = (lim << 12) | 0xfff;
+  return lim;
 }
 
 static relegated int GetDescriptorMode(u64 d) {
@@ -154,20 +151,47 @@ static relegated int GetDescriptorMode(u64 d) {
 }
 
 static relegated bool IsProtectedMode(struct Machine *m) {
-  return m->system->cr0 & 1;
+  return m->system->cr0 & CR0_PE;
 }
 
-static relegated void OpMovSwEvqp(P) {
-  u64 x, d;
-  x = ReadMemory(rde, GetModrmRegisterWordPointerReadOszRexw(A));
+static relegated void SetSegment(P, unsigned sr, u16 sel, bool jumping) {
+  u64 descriptor;
+  if (sr == 1 && !jumping) OpUdImpl(m);
   if (!IsProtectedMode(m)) {
-    x <<= 4;
-  } else if (GetDescriptor(m, x, &d) != -1) {
-    x = GetDescriptorBase(d);
+    m->seg[sr].sel = sel;
+    m->seg[sr].base = sel << 4;
+  } else if (GetDescriptor(m, sel, &descriptor) != -1) {
+    m->seg[sr].sel = sel;
+    m->seg[sr].base = GetDescriptorBase(descriptor);
+    if (sr == 1) ChangeMachineMode(m, GetDescriptorMode(descriptor));
   } else {
     ThrowProtectionFault(m);
   }
-  *GetSegment(A, ModrmReg(rde)) = x;
+}
+
+relegated void SetCs(P, u16 sel) {
+  SetSegment(A, 1, sel, true);
+}
+
+static relegated void OpPushSeg(P) {
+  u8 seg = (Opcode(rde) & 070) >> 3;
+  Push(A, GetSegment(A, seg)->sel);
+}
+
+static relegated void OpPopSeg(P) {
+  u8 seg = (Opcode(rde) & 070) >> 3;
+  SetSegment(A, seg, Pop(A, 0), false);
+}
+
+static relegated void OpMovEvqpSw(P) {
+  WriteRegisterOrMemory(rde, GetModrmRegisterWordPointerWriteOszRexw(A),
+                        GetSegment(A, ModrmReg(rde))->sel);
+}
+
+static relegated void OpMovSwEvqp(P) {
+  u64 x;
+  x = ReadMemory(rde, GetModrmRegisterWordPointerReadOszRexw(A));
+  SetSegment(A, ModrmReg(rde), x, false);
 }
 
 static relegated void OpLsl(P) {
@@ -193,17 +217,8 @@ void ChangeMachineMode(struct Machine *m, int mode) {
 }
 
 static relegated void OpJmpf(P) {
-  u64 descriptor;
-  if (!IsProtectedMode(m)) {
-    m->cs = uimm0 << 4;
-    m->ip = disp;
-  } else if (GetDescriptor(m, uimm0, &descriptor) != -1) {
-    m->cs = GetDescriptorBase(descriptor);
-    m->ip = disp;
-    ChangeMachineMode(m, GetDescriptorMode(descriptor));
-  } else {
-    ThrowProtectionFault(m);
-  }
+  SetCs(A, uimm0);
+  m->ip = disp;
   if (m->system->onlongbranch) {
     m->system->onlongbranch(m);
   }
@@ -569,18 +584,14 @@ static void OpMovslGdqpEd(P) {
 
 void Connect(P, u64 pc) {
   void *jump;
-  nexgen32e_f func;
-  if (HasHook(m, pc)) {
-    func = GetHook(m, pc);
-    if (func != JitlessDispatch && func != GeneralDispatch) {
-      jump = (u8 *)func + GetPrologueSize();
-    } else {
-      if (!FLAG_noconnect) {
-        RecordJitJump(m->path.jb, m->fun + pc, GetPrologueSize());
-      }
-      jump = (void *)m->system->ender;
-    }
+  nexgen32e_f f;
+  f = (nexgen32e_f)GetJitHook(&m->system->jit, pc, (intptr_t)GeneralDispatch);
+  if (f != JitlessDispatch && f != GeneralDispatch) {
+    jump = (u8 *)f + GetPrologueSize();
   } else {
+    if (!FLAG_noconnect) {
+      RecordJitJump(m->path.jb, pc, GetPrologueSize());
+    }
     jump = (void *)m->system->ender;
   }
   AppendJitJump(m->path.jb, jump);
@@ -1181,7 +1192,7 @@ static void Op1b8(P) {
   }
 }
 
-static relegated void LoadFarPointer(P, u64 *seg) {
+static relegated void LoadFarPointer(P, unsigned sr) {
   unsigned n;
   u8 *p;
   u64 fp;
@@ -1191,15 +1202,15 @@ static relegated void LoadFarPointer(P, u64 *seg) {
       OpUdImpl(m);
       break;
     case XED_MODE_REAL:
-      n = 1 << RegLog2(rde);
+      n = 1 << WordLog2(rde);
       p = ComputeReserveAddressRead(A, n + 2);
       LockBus(p);
       fp = Load32(p);
       if (n >= 4) {
         fp |= (u64)Load16(p + 4) << 32;
-        *seg = (fp >> 32 & 0x0000ffff) << 4;
+        SetSegment(A, sr, fp >> 32 & 0x0000ffff, false);
       } else {
-        *seg = (fp >> 16 & 0x0000ffff) << 4;
+        SetSegment(A, sr, fp >> 16 & 0x0000ffff, false);
       }
       UnlockBus(p);
       WriteRegister(rde, RegRexrReg(m, rde), fp);  // offset portion
@@ -1210,11 +1221,11 @@ static relegated void LoadFarPointer(P, u64 *seg) {
 }
 
 static relegated void OpLes(P) {
-  LoadFarPointer(A, &m->es);
+  LoadFarPointer(A, 0);
 }
 
 static relegated void OpLds(P) {
-  LoadFarPointer(A, &m->ds);
+  LoadFarPointer(A, 3);
 }
 
 static relegated void Loop(P, bool cond) {
@@ -1347,19 +1358,19 @@ static void OpStmxcsr(P) {
 }
 
 static void OpRdfsbase(P) {
-  WriteRegister(rde, RegRexbRm(m, rde), m->fs);
+  WriteRegister(rde, RegRexbRm(m, rde), m->fs.base);
 }
 
 static void OpRdgsbase(P) {
-  WriteRegister(rde, RegRexbRm(m, rde), m->gs);
+  WriteRegister(rde, RegRexbRm(m, rde), m->gs.base);
 }
 
 static void OpWrfsbase(P) {
-  m->fs = ReadRegister(rde, RegRexbRm(m, rde));
+  m->fs.base = ReadRegister(rde, RegRexbRm(m, rde));
 }
 
 static void OpWrgsbase(P) {
-  m->gs = ReadRegister(rde, RegRexbRm(m, rde));
+  m->gs.base = ReadRegister(rde, RegRexbRm(m, rde));
 }
 
 static void OpMfence(P) {
@@ -1371,6 +1382,10 @@ static void OpLfence(P) {
 }
 
 static void OpSfence(P) {
+  OpMfence(A);
+}
+
+static void OpWbinvd(P) {
   OpMfence(A);
 }
 
@@ -1573,7 +1588,7 @@ int ClassifyOp(u64 rde) {
     case 0x0E9:  // OpJmp
     case 0x0EA:  // OpJmpf
     case 0x0EB:  // OpJmp
-    case 0x0cf:  // OpIret
+    case 0x0CF:  // OpIret
     case 0x180:  // OpJo
     case 0x181:  // OpJno
     case 0x182:  // OpJb
@@ -1603,6 +1618,7 @@ int ClassifyOp(u64 rde) {
     case 0x0CC:  // OpInterrupt3
     case 0x0CD:  // OpInterruptImm
     case 0x105:  // OpSyscall
+      // case 0x1AE:  // Op1ae (mfence, lfence, clflush, etc.)
       // precious ops are excluded from jit pathmaking entirely. not
       // doing this would be inviting disaster, since system calls and
       // longjmp could do anything. for example, we don't want clone()
@@ -1877,7 +1893,7 @@ static const nexgen32e_f kNexgen32e[] = {
     /*106*/ OpUd,                    //
     /*107*/ OpUd,                    //
     /*108*/ OpUd,                    //
-    /*109*/ OpUd,                    //
+    /*109*/ OpWbinvd,                //
     /*10A*/ OpUd,                    //
     /*10B*/ OpUd,                    //
     /*10C*/ OpUd,                    //
@@ -2163,30 +2179,7 @@ nexgen32e_f GetOp(long op) {
 }
 
 static bool CanJit(struct Machine *m) {
-  return !IsJitDisabled(&m->system->jit) && HasHook(m, m->ip);
-}
-
-bool HasHook(struct Machine *m, u64 pc) {
-  return pc - m->codestart < m->codesize;
-}
-
-nexgen32e_f GetHook(struct Machine *m, u64 pc) {
-  int off = atomic_load_explicit(m->fun + (uintptr_t)pc, memory_order_relaxed);
-  return off ? (nexgen32e_f)(IMAGE_END + off) : GeneralDispatch;
-}
-
-void SetHook(struct Machine *m, u64 pc, nexgen32e_f func) {
-  u8 *f;
-  int off;
-  if (func) {
-    f = (u8 *)func;
-    unassert(f - IMAGE_END);
-    unassert(INT_MIN <= f - IMAGE_END && f - IMAGE_END <= INT_MAX);
-    off = f - IMAGE_END;
-  } else {
-    off = 0;
-  }
-  atomic_store_explicit(m->fun + pc, off, memory_order_relaxed);
+  return !IsJitDisabled(&m->system->jit);
 }
 
 void JitlessDispatch(P) {
@@ -2292,8 +2285,9 @@ void ExecuteInstruction(struct Machine *m) {
 #endif
 #ifdef HAVE_JIT
   nexgen32e_f func;
-  if (HasHook(m, m->ip)) {
-    func = GetHook(m, m->ip);
+  if (CanJit(m)) {
+    func = (nexgen32e_f)GetJitHook(&m->system->jit, m->ip,
+                                   (intptr_t)GeneralDispatch);
     if (!IsMakingPath(m)) {
       STATISTIC(++instructions_dispatched);
       func(DISPATCH_NOTHING);

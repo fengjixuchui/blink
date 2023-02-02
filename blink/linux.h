@@ -2,7 +2,6 @@
 #define BLINK_LINUX_H_
 #include "blink/types.h"
 
-#define ENOSYS_LINUX          38
 #define EPERM_LINUX           1
 #define ENOENT_LINUX          2
 #define ESRCH_LINUX           3
@@ -31,7 +30,6 @@
 #define ETXTBSY_LINUX         26
 #define EFBIG_LINUX           27
 #define ENOSPC_LINUX          28
-#define EDQUOT_LINUX          122
 #define ESPIPE_LINUX          29
 #define EROFS_LINUX           30
 #define EMLINK_LINUX          31
@@ -41,13 +39,25 @@
 #define EDEADLK_LINUX         35
 #define ENAMETOOLONG_LINUX    36
 #define ENOLCK_LINUX          37
+#define ENOSYS_LINUX          38
 #define ENOTEMPTY_LINUX       39
 #define ELOOP_LINUX           40
 #define ENOMSG_LINUX          42
 #define EIDRM_LINUX           43
+#define ENOSTR_LINUX          60
+#define ENODATA_LINUX         61
+#define ETIME_LINUX           62
+#define ENOSR_LINUX           63
+#define ENONET_LINUX          64
+#define EREMOTE_LINUX         66
+#define ENOLINK_LINUX         67
 #define EPROTO_LINUX          71
+#define EMULTIHOP_LINUX       72
+#define EBADMSG_LINUX         74
 #define EOVERFLOW_LINUX       75
+#define EBADFD_LINUX          77
 #define EILSEQ_LINUX          84
+#define ERESTART_LINUX        85
 #define EUSERS_LINUX          87
 #define ENOTSOCK_LINUX        88
 #define EDESTADDRREQ_LINUX    89
@@ -73,28 +83,20 @@
 #define ESHUTDOWN_LINUX       108
 #define ETOOMANYREFS_LINUX    109
 #define ETIMEDOUT_LINUX       110
-#define ETIME_LINUX           62
 #define ECONNREFUSED_LINUX    111
 #define EHOSTDOWN_LINUX       112
 #define EHOSTUNREACH_LINUX    113
 #define EALREADY_LINUX        114
 #define EINPROGRESS_LINUX     115
 #define ESTALE_LINUX          116
-#define EREMOTE_LINUX         66
-#define EBADMSG_LINUX         74
+#define EDQUOT_LINUX          122
+#define ENOMEDIUM_LINUX       123
+#define EMEDIUMTYPE_LINUX     124
 #define ECANCELED_LINUX       125
 #define EOWNERDEAD_LINUX      130
 #define ENOTRECOVERABLE_LINUX 131
-#define ENONET_LINUX          64
-#define ERESTART_LINUX        85
-#define ENODATA_LINUX         61
-#define ENOSR_LINUX           63
-#define ENOSTR_LINUX          60
-#define EMULTIHOP_LINUX       72
-#define ENOLINK_LINUX         67
-#define ENOMEDIUM_LINUX       123
-#define EMEDIUMTYPE_LINUX     124
-#define EBADFD_LINUX          77
+#define ERFKILL_LINUX         132
+#define EHWPOISON_LINUX       133
 
 #define AT_FDCWD_LINUX            -100
 #define AT_SYMLINK_NOFOLLOW_LINUX 0x0100
@@ -128,16 +130,38 @@
 
 #define F_DUPFD_LINUX         0
 #define F_DUPFD_CLOEXEC_LINUX 0x0406
-#define F_GETFD_LINUX         1
-#define F_SETFD_LINUX         2
-#define FD_CLOEXEC_LINUX      1
-#define F_GETFL_LINUX         3
-#define F_SETFL_LINUX         4
+
+#define F_GETFD_LINUX    1
+#define F_SETFD_LINUX    2
+#define FD_CLOEXEC_LINUX 1
+
+#define F_GETFL_LINUX 3
+#define F_SETFL_LINUX 4
+
+#define F_GETLK_LINUX  5
+#define F_SETLK_LINUX  6
+#define F_SETLKW_LINUX 7
+#define F_RDLCK_LINUX  0
+#define F_WRLCK_LINUX  1
+#define F_UNLCK_LINUX  2
+
+#define F_SETSIG_LINUX 10
+#define F_GETSIG_LINUX 11
+
+#define F_SETOWN_LINUX        8
+#define F_GETOWN_LINUX        9
+#define F_SETOWN_EX_LINUX     15
+#define F_GETOWN_EX_LINUX     16
+#define F_GETOWNER_UIDS_LINUX 17
+#define F_OWNER_TID_LINUX     0
+#define F_OWNER_PID_LINUX     1
+#define F_OWNER_PGRP_LINUX    2
 
 #define SOCK_CLOEXEC_LINUX  O_CLOEXEC_LINUX
 #define SOCK_NONBLOCK_LINUX O_NDELAY_LINUX
 
 #define TIOCGWINSZ_LINUX    0x5413
+#define TIOCSWINSZ_LINUX    0x5414
 #define TCGETS_LINUX        0x5401
 #define TCSETS_LINUX        0x5402
 #define TCSETSW_LINUX       0x5403
@@ -254,15 +278,30 @@
 #define SIGRTMIN_LINUX  32
 #define SIGRTMAX_LINUX  64
 
-#define AT_PAGESZ_LINUX 6
-#define AT_UID_LINUX    11
-#define AT_EUID_LINUX   12
-#define AT_GID_LINUX    13
-#define AT_EGID_LINUX   14
-#define AT_CLKTCK_LINUX 17
-#define AT_SECURE_LINUX 23
-#define AT_RANDOM_LINUX 25
-#define AT_EXECFN_LINUX 31
+#define AT_NULL_LINUX          0
+#define AT_IGNORE_LINUX        1
+#define AT_EXECFD_LINUX        2
+#define AT_PHDR_LINUX          3
+#define AT_PHENT_LINUX         4
+#define AT_PHNUM_LINUX         5
+#define AT_PAGESZ_LINUX        6
+#define AT_BASE_LINUX          7
+#define AT_FLAGS_LINUX         8
+#define AT_ENTRY_LINUX         9
+#define AT_NOTELF_LINUX        10
+#define AT_UID_LINUX           11
+#define AT_EUID_LINUX          12
+#define AT_GID_LINUX           13
+#define AT_EGID_LINUX          14
+#define AT_PLATFORM_LINUX      15
+#define AT_HWCAP_LINUX         16
+#define AT_CLKTCK_LINUX        17
+#define AT_SECURE_LINUX        23
+#define AT_BASE_PLATFORM_LINUX 24
+#define AT_RANDOM_LINUX        25
+#define AT_HWCAP2_LINUX        26
+#define AT_EXECFN_LINUX        31
+#define AT_MINSIGSTKSZ_LINUX   51
 
 #define IFNAMSIZ_LINUX 16
 
@@ -280,14 +319,6 @@
 #define SOL_SOCKET_LINUX 1
 #define SOL_TCP_LINUX    6
 #define SOL_UDP_LINUX    17
-
-#define F_SETLK_LINUX  6
-#define F_SETLKW_LINUX 7
-#define F_GETLK_LINUX  5
-
-#define F_RDLCK_LINUX 0
-#define F_WRLCK_LINUX 1
-#define F_UNLCK_LINUX 2
 
 #define SA_NOCLDSTOP_LINUX 1
 #define SA_NOCLDWAIT_LINUX 2
@@ -414,7 +445,21 @@
 #define FF1_LINUX    0100000
 
 // termios::c_cflag
+#define EXTA_LINUX     B19200
+#define EXTB_LINUX     B38400
+#define CSIZE_LINUX    0000060
+#define CS5_LINUX      0000000
+#define CS6_LINUX      0000020
+#define CS7_LINUX      0000040
+#define CS8_LINUX      0000060
+#define CSTOPB_LINUX   0000100
+#define CREAD_LINUX    0000200
+#define PARENB_LINUX   0000400
+#define PARODD_LINUX   0001000
+#define HUPCL_LINUX    0002000
+#define CLOCAL_LINUX   0004000
 #define CBAUD_LINUX    0010017
+#define CBAUDEX_LINUX  0010000
 #define B0_LINUX       0000000  // shut it down
 #define B50_LINUX      0000001
 #define B75_LINUX      0000002
@@ -431,20 +476,6 @@
 #define B9600_LINUX    0000015
 #define B19200_LINUX   0000016
 #define B38400_LINUX   0000017
-#define EXTA_LINUX     B19200
-#define EXTB_LINUX     B38400
-#define CSIZE_LINUX    0000060
-#define CS5_LINUX      0000000
-#define CS6_LINUX      0000020
-#define CS7_LINUX      0000040
-#define CS8_LINUX      0000060
-#define CSTOPB_LINUX   0000100
-#define CREAD_LINUX    0000200
-#define PARENB_LINUX   0000400
-#define PARODD_LINUX   0001000
-#define HUPCL_LINUX    0002000
-#define CLOCAL_LINUX   0004000
-#define CBAUDEX_LINUX  0010000
 #define B57600_LINUX   0010001
 #define B115200_LINUX  0010002
 #define B230400_LINUX  0010003
@@ -487,9 +518,99 @@
 #define FUTEX_OWNER_DIED_LINUX 0x40000000
 #define FUTEX_TID_MASK_LINUX   0x3fffffff
 
+#define UTIME_NOW_LINUX  ((1l << 30) - 1l)
+#define UTIME_OMIT_LINUX ((1l << 30) - 2l)
+
+#define ITIMER_REAL_LINUX    0
+#define ITIMER_VIRTUAL_LINUX 1
+#define ITIMER_PROF_LINUX    2
+
+#define FIOASYNC_LINUX           0x5452
+#define FIOCLEX_LINUX            0x5451
+#define FIONBIO_LINUX            0x5421
+#define FIONCLEX_LINUX           0x5450
+#define FIONREAD_LINUX           0x541b
+#define FIOQSIZE_LINUX           0x5460
+#define TCFLSH_LINUX             0x540b
+#define TCGETA_LINUX             0x5405
+#define TCGETS_LINUX             0x5401
+#define TCGETX_LINUX             0x5432
+#define TCSBRK_LINUX             0x5409
+#define TCSBRKP_LINUX            0x5425
+#define TCSETA_LINUX             0x5406
+#define TCSETAF_LINUX            0x5408
+#define TCSETAW_LINUX            0x5407
+#define TCSETS_LINUX             0x5402
+#define TCSETSF_LINUX            0x5404
+#define TCSETSW_LINUX            0x5403
+#define TCSETX_LINUX             0x5433
+#define TCSETXF_LINUX            0x5434
+#define TCSETXW_LINUX            0x5435
+#define TCXONC_LINUX             0x540a
+#define TIOCCBRK_LINUX           0x5428
+#define TIOCCONS_LINUX           0x541d
+#define TIOCEXCL_LINUX           0x540c
+#define TIOCGDEV_LINUX           0x80045432
+#define TIOCGETD_LINUX           0x5424
+#define TIOCGEXCL_LINUX          0x80045440
+#define TIOCGICOUNT_LINUX        0x545d
+#define TIOCGISO7816_LINUX       0x80285442
+#define TIOCGLCKTRMIOS_LINUX     0x5456
+#define TIOCGPGRP_LINUX          0x540f
+#define TIOCGPKT_LINUX           0x80045438
+#define TIOCGPTLCK_LINUX         0x80045439
+#define TIOCGPTN_LINUX           0x80045430
+#define TIOCGPTPEER_LINUX        0x5441
+#define TIOCGRS485_LINUX         0x542e
+#define TIOCGSERIAL_LINUX        0x541e
+#define TIOCGSID_LINUX           0x5429
+#define TIOCGSOFTCAR_LINUX       0x5419
+#define TIOCGWINSZ_LINUX         0x5413
+#define TIOCINQ_LINUX            0x541b
+#define TIOCLINUX_LINUX          0x541c
+#define TIOCMBIC_LINUX           0x5417
+#define TIOCMBIS_LINUX           0x5416
+#define TIOCMGET_LINUX           0x5415
+#define TIOCMIWAIT_LINUX         0x545c
+#define TIOCMSET_LINUX           0x5418
+#define TIOCNOTTY_LINUX          0x5422
+#define TIOCNXCL_LINUX           0x540d
+#define TIOCOUTQ_LINUX           0x5411
+#define TIOCPKT_LINUX            0x5420
+#define TIOCPKT_DATA_LINUX       0
+#define TIOCPKT_DOSTOP_LINUX     0x20
+#define TIOCPKT_FLUSHREAD_LINUX  0x1
+#define TIOCPKT_FLUSHWRITE_LINUX 0x2
+#define TIOCPKT_IOCTL_LINUX      0x40
+#define TIOCPKT_NOSTOP_LINUX     0x10
+#define TIOCPKT_START_LINUX      0x8
+#define TIOCPKT_STOP_LINUX       0x4
+#define TIOCSBRK_LINUX           0x5427
+#define TIOCSCTTY_LINUX          0x540e
+#define TIOCSERCONFIG_LINUX      0x5453
+#define TIOCSERGETLSR_LINUX      0x5459
+#define TIOCSERGETMULTI_LINUX    0x545a
+#define TIOCSERGSTRUCT_LINUX     0x5458
+#define TIOCSERGWILD_LINUX       0x5454
+#define TIOCSERSETMULTI_LINUX    0x545b
+#define TIOCSERSWILD_LINUX       0x5455
+#define TIOCSER_TEMT_LINUX       0x1
+#define TIOCSETD_LINUX           0x5423
+#define TIOCSIG_LINUX            0x40045436
+#define TIOCSISO7816_LINUX       0xc0285443
+#define TIOCSLCKTRMIOS_LINUX     0x5457
+#define TIOCSPGRP_LINUX          0x5410
+#define TIOCSPTLCK_LINUX         0x40045431
+#define TIOCSRS485_LINUX         0x542f
+#define TIOCSSERIAL_LINUX        0x541f
+#define TIOCSSOFTCAR_LINUX       0x541a
+#define TIOCSTI_LINUX            0x5412
+#define TIOCSWINSZ_LINUX         0x5414
+#define TIOCVHANGUP_LINUX        0x5437
+
 struct iovec_linux {
-  u8 iov_base[8];
-  u8 iov_len[8];
+  u8 base[8];
+  u8 len[8];
 };
 
 struct pollfd_linux {
@@ -499,18 +620,18 @@ struct pollfd_linux {
 };
 
 struct timeval_linux {
-  u8 tv_sec[8];
-  u8 tv_usec[8];
+  u8 sec[8];
+  u8 usec[8];
 };
 
 struct timespec_linux {
-  u8 tv_sec[8];
-  u8 tv_nsec[8];
+  u8 sec[8];
+  u8 nsec[8];
 };
 
 struct timezone_linux {
-  u8 tz_minuteswest[4];
-  u8 tz_dsttime[4];
+  u8 minuteswest[4];
+  u8 dsttime[4];
 };
 
 struct sigaction_linux {
@@ -521,98 +642,98 @@ struct sigaction_linux {
 };
 
 struct winsize_linux {
-  u8 ws_row[2];
-  u8 ws_col[2];
-  u8 ws_xpixel[2];
-  u8 ws_ypixel[2];
+  u8 row[2];
+  u8 col[2];
+  u8 xpixel[2];
+  u8 ypixel[2];
 };
 
 struct termios_linux {
-  u8 c_iflag[4];
-  u8 c_oflag[4];
-  u8 c_cflag[4];
-  u8 c_lflag[4];
-  u8 c_line;
-  u8 c_cc[NCCS_LINUX];
+  u8 iflag[4];
+  u8 oflag[4];
+  u8 cflag[4];
+  u8 lflag[4];
+  u8 line;
+  u8 cc[NCCS_LINUX];
 };
 
 struct sockaddr_linux {
-  u8 sa_family[2];
+  u8 family[2];
 };
 
 struct sockaddr_un_linux {
-  u8 sun_family[2];
-  char sun_path[108];
+  u8 family[2];
+  char path[108];
 };
 
 struct sockaddr_in_linux {
-  u8 sin_family[2];
-  u16 sin_port;
-  u32 sin_addr;
-  u8 sin_zero[8];
+  u8 family[2];
+  u16 port;
+  u32 addr;
+  u8 zero[8];
 };
 
 struct sockaddr_in6_linux {
-  u8 sin6_family[2];
-  u16 sin6_port;
-  u8 sin6_flowinfo[4];
-  u8 sin6_addr[16];
-  u8 sin6_scope_id[4];
+  u8 family[2];
+  u16 port;
+  u8 flowinfo[4];
+  u8 addr[16];
+  u8 scope_id[4];
 };
 
 struct sockaddr_storage_linux {
   union {
-    u8 ss_family[2];
-    char ss_storage[128];
+    u8 family[2];
+    char storage[128];
   };
 };
 
 struct stat_linux {
-  u8 st_dev[8];
-  u8 st_ino[8];
-  u8 st_nlink[8];
-  u8 st_mode[4];
-  u8 st_uid[4];
-  u8 st_gid[4];
-  u8 __pad[4];
-  u8 st_rdev[8];
-  u8 st_size[8];
-  u8 st_blksize[8];
-  u8 st_blocks[8];
-  struct timespec_linux st_atim;
-  struct timespec_linux st_mtim;
-  struct timespec_linux st_ctim;
+  u8 dev[8];
+  u8 ino[8];
+  u8 nlink[8];
+  u8 mode[4];
+  u8 uid[4];
+  u8 gid[4];
+  u8 pad_[4];
+  u8 rdev[8];
+  u8 size[8];
+  u8 blksize[8];
+  u8 blocks[8];
+  struct timespec_linux atim;
+  struct timespec_linux mtim;
+  struct timespec_linux ctim;
 };
 
 struct itimerval_linux {
-  struct timeval_linux it_interval;
-  struct timeval_linux it_value;
+  struct timeval_linux interval;
+  struct timeval_linux value;
 };
 
 struct rusage_linux {
-  struct timeval_linux ru_utime;
-  struct timeval_linux ru_stime;
-  u8 ru_maxrss[8];
-  u8 ru_ixrss[8];
-  u8 ru_idrss[8];
-  u8 ru_isrss[8];
-  u8 ru_minflt[8];
-  u8 ru_majflt[8];
-  u8 ru_nswap[8];
-  u8 ru_inblock[8];
-  u8 ru_oublock[8];
-  u8 ru_msgsnd[8];
-  u8 ru_msgrcv[8];
-  u8 ru_nsignals[8];
-  u8 ru_nvcsw[8];
-  u8 ru_nivcsw[8];
+  struct timeval_linux utime;
+  struct timeval_linux stime;
+  u8 maxrss[8];
+  u8 ixrss[8];
+  u8 idrss[8];
+  u8 isrss[8];
+  u8 minflt[8];
+  u8 majflt[8];
+  u8 nswap[8];
+  u8 inblock[8];
+  u8 oublock[8];
+  u8 msgsnd[8];
+  u8 msgrcv[8];
+  u8 nsignals[8];
+  u8 nvcsw[8];
+  u8 nivcsw[8];
 };
 
 struct siginfo_linux {
   u8 si_signo[4];
   u8 si_errno[4];
   u8 si_code[4];
-  u8 __pad[4];
+  u8 pad_[4];
   u8 payload[112];
 };
 
@@ -627,15 +748,15 @@ struct fpstate_linux {
   u8 mxcr_mask[4];
   u8 st[8][16];
   u8 xmm[16][16];
-  u8 __padding[96];
+  u8 padding_[96];
 };
 
 struct ucontext_linux {
-  u8 uc_flags[8];
-  u8 uc_link[8];
-  u8 ss_sp[8];
-  u8 ss_flags[4];
-  u8 __pad0[4];
+  u8 uc__flags[8];
+  u8 uc__link[8];
+  u8 ss__sp[8];
+  u8 ss__flags[4];
+  u8 pad0_[4];
   u8 ss_size[8];
   u8 r8[8];
   u8 r9[8];
@@ -664,8 +785,8 @@ struct ucontext_linux {
   u8 oldmask[8];
   u8 cr2[8];
   u8 fpstate[8];
-  u8 __pad1[64];
-  u8 uc_sigmask[8];
+  u8 pad1_[64];
+  u8 sigmask[8];
 };
 
 struct utsname_linux {
@@ -678,16 +799,16 @@ struct utsname_linux {
 };
 
 struct rlimit_linux {
-  u8 rlim_cur[8];
-  u8 rlim_max[8];
+  u8 cur[8];
+  u8 max[8];
 };
 
 struct dirent_linux {
-  u8 d_ino[8];       // inode number
-  u8 d_off[8];       // implementation-dependent location number
-  u8 d_reclen[2];    // byte length of this whole struct and string
-  u8 d_type[1];      // DT_REG, DT_DIR, DT_UNKNOWN, DT_BLK, etc.
-  char d_name[256];  // NUL-terminated basename
+  u8 ino[8];       // inode number
+  u8 off[8];       // implementation-dependent location number
+  u8 reclen[2];    // byte length of this whole struct and string
+  u8 type[1];      // DT_REG, DT_DIR, DT_UNKNOWN, DT_BLK, etc.
+  char name[256];  // NUL-terminated basename
 };
 
 struct ifconf_linux {
@@ -708,12 +829,12 @@ struct ifreq_linux {
 };
 
 struct flock_linux {
-  u8 l_type[2];
-  u8 l_whence[2];
+  u8 type[2];
+  u8 whence[2];
   u8 pad1_[4];
-  u8 l_start[8];
-  u8 l_len[8];
-  u8 l_pid[4];
+  u8 start[8];
+  u8 len[8];
+  u8 pid[4];
   u8 pad2_[4];
 };
 
@@ -727,24 +848,24 @@ struct sysinfo_linux {
   u8 totalswap[8];  // size of emergency memory
   u8 freeswap[8];   // hopefully equal to totalswap
   u8 procs[2];      // number of processes
-  u8 __ignore[6];   // padding
+  u8 ignore_[6];    // padding
   u8 totalhigh[8];  // wut
   u8 freehigh[8];   // wut
   u8 mem_unit[4];   // ram stuff above is multiples of this
 };
 
 struct tms_linux {
-  u8 tms_utime[8];   // user time
-  u8 tms_stime[8];   // system time
-  u8 tms_cutime[8];  // user time of children
-  u8 tms_cstime[8];  // system time of children
+  u8 utime[8];   // user time
+  u8 stime[8];   // system time
+  u8 cutime[8];  // user time of children
+  u8 cstime[8];  // system time of children
 };
 
 struct sigaltstack_linux {
-  u8 ss_sp[8];     // base address of stack
-  u8 ss_flags[4];  // SS_???_LINUX flags
-  u8 pad1_[4];     //
-  u8 ss_size[8];   // size of stack
+  u8 sp[8];     // base address of stack
+  u8 flags[4];  // SS_???_LINUX flags
+  u8 pad1_[4];  //
+  u8 size[8];   // size of stack
 };
 
 struct pselect6_linux {
@@ -760,6 +881,31 @@ struct robust_list_linux {
   u8 next[8];
   u8 offset[8];
   u8 pending[8];
+};
+
+struct utimbuf_linux {
+  u8 actime[8];
+  u8 modtime[8];
+};
+
+struct f_owner_ex_linux {
+  u8 type[4];
+  u8 pid[4];
+};
+
+struct statfs_linux {
+  u8 type[8];     // type of filesystem
+  u8 bsize[8];    // optimal transfer block size
+  u8 blocks[8];   // total data blocks in filesystem
+  u8 bfree[8];    // free blocks in filesystem
+  u8 bavail[8];   // free blocks available to
+  u8 files[8];    // total file nodes in filesystem
+  u8 ffree[8];    // free file nodes in filesystem
+  u8 fsid[2][4];  // filesystem id
+  u8 namelen[8];  // maximum length of filenames
+  u8 frsize[8];   // fragment size
+  u8 flags[8];    // mount flags of filesystem 2.6.36
+  u8 spare[4][8];
 };
 
 int sysinfo_linux(struct sysinfo_linux *);

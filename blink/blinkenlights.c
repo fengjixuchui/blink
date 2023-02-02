@@ -50,6 +50,7 @@
 #include "blink/flags.h"
 #include "blink/fpu.h"
 #include "blink/high.h"
+#include "blink/linux.h"
 #include "blink/loader.h"
 #include "blink/log.h"
 #include "blink/machine.h"
@@ -277,8 +278,8 @@ static const char kRipName[3][4] = {"IP", "EIP", "RIP"};
 static const char kRegisterNames[3][16][4] = {
     {"AX", "CX", "DX", "BX", "SP", "BP", "SI", "DI"},
     {"EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI"},
-    {"RAX", "RCX", "RDX", "RBX", "RSP", "RBP", "RSI", "RDI", "R8", "R9", "R10",
-     "R11", "R12", "R13", "R14", "R15"},
+    {"RAX", "RCX", "RDX", "RBX", "RSP", "RBP", "RSI", "RDI",  //
+     "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15"},
 };
 
 extern char **environ;
@@ -346,6 +347,7 @@ static struct timespec statusexpires;
 static struct termios oldterm;
 static char systemfailure[128];
 static struct sigaction oldsig[4];
+static char pathbuf[PATH_MAX];
 struct History g_history;
 
 static void Redraw(bool);
@@ -482,9 +484,9 @@ static i64 GetSp(void) {
     case 8:
       return Read64(m->sp);
     case 4:
-      return m->ss + Read32(m->sp);
+      return m->ss.base + Read32(m->sp);
     case 2:
-      return m->ss + Read16(m->sp);
+      return m->ss.base + Read16(m->sp);
   }
 }
 
@@ -533,7 +535,7 @@ static unsigned long TallyHits(i64 addr, int size) {
   i64 pc;
   unsigned long hits;
   for (hits = 0, pc = addr; pc < addr + size; ++pc) {
-    hits += ophits[pc - m->system->codestart_prof];
+    hits += ophits[pc - m->system->codestart];
   }
   return hits;
 }
@@ -541,13 +543,12 @@ static unsigned long TallyHits(i64 addr, int size) {
 static void GenerateProfile(void) {
   int sym;
   profsyms.i = 0;
-  profsyms.toto =
-      TallyHits(m->system->codestart_prof, m->system->codesize_prof);
+  profsyms.toto = TallyHits(m->system->codestart, m->system->codesize);
   if (!ophits) return;
   for (sym = 0; sym < dis->syms.i; ++sym) {
-    if (dis->syms.p[sym].addr >= m->system->codestart_prof &&
+    if (dis->syms.p[sym].addr >= m->system->codestart &&
         dis->syms.p[sym].addr + dis->syms.p[sym].size <
-            m->system->codestart_prof + m->system->codesize_prof) {
+            m->system->codestart + m->system->codesize) {
       AddProfSym(sym, TallyHits(dis->syms.p[sym].addr, dis->syms.p[sym].size));
     }
   }
@@ -956,7 +957,7 @@ static bool IsXmmNonZero(i64 start, i64 end) {
 static bool IsSegNonZero(void) {
   unsigned i;
   for (i = 0; i < 6; ++i) {
-    if (*GetSegment(DISPATCH_NOTHING, i)) {
+    if (GetSegmentBase(DISPATCH_NOTHING, i)) {
       return true;
     }
   }
@@ -1004,7 +1005,7 @@ static int GetAddrHexWidth(void) {
     case XED_MODE_LEGACY:
       return 8;
     case XED_MODE_REAL:
-      if (m->fs >= 0x10fff0 || m->gs >= 0x10fff0) {
+      if (m->fs.base >= 0x10fff0 || m->gs.base >= 0x10fff0) {
         return 8;
       } else {
         return 6;
@@ -1342,17 +1343,18 @@ static void DrawRegister(struct Panel *p, i64 i, i64 r) {
   AppendPanel(p, i, "  ");
 }
 
-static void DrawSegment(struct Panel *p, i64 i, u64 value, u64 previous,
-                        const char *name) {
+static void DrawSegment(struct Panel *p, i64 i, struct DescriptorCache value,
+                        struct DescriptorCache previous, const char *name) {
+  bool changed = value.sel != previous.sel || value.base != previous.base;
   char buf[32];
-  if (value != previous) AppendPanel(p, i, "\033[7m");
+  if (changed) AppendPanel(p, i, "\033[7m");
   snprintf(buf, sizeof(buf), "%-3s", name);
   AppendPanel(p, i, buf);
   AppendPanel(p, i, " ");
-  snprintf(buf, sizeof(buf), "%0*" PRIx64, GetRegHexWidth(),
-           value >> (4 * (m->mode == XED_MODE_REAL)));
+  snprintf(buf, sizeof(buf), "%04" PRIx16 " (@%08" PRIx64 ")", value.sel,
+           value.base);
   AppendPanel(p, i, buf);
-  if (value != previous) AppendPanel(p, i, "\033[27m");
+  if (changed) AppendPanel(p, i, "\033[27m");
   AppendPanel(p, i, "  ");
 }
 
@@ -1752,7 +1754,7 @@ static void DrawFrames(struct Panel *p) {
     name = sym != -1 ? dis->syms.stab + dis->syms.p[sym].name : "UNKNOWN";
     s = line;
     s += sprintf(s, "%0*" PRIx64 " %0*" PRIx64 " ", GetAddrHexWidth(),
-                 m->ss + bp, GetAddrHexWidth(), rp);
+                 m->ss.base + bp, GetAddrHexWidth(), rp);
     s = Demangle(s, name, DIS_MAX_SYMBOL_LENGTH);
     AppendPanel(p, i - framesstart, line);
     if (sym != -1 && rp != dis->syms.p[sym].addr) {
@@ -1770,8 +1772,8 @@ static void DrawFrames(struct Panel *p) {
       AppendPanel(p, i - framesstart, " [MISALIGN]");
     }
     ++i;
-    if (((m->ss + bp) & 0xfff) > 0xff0) break;
-    if (!(r = LookupAddress(m, m->ss + bp))) {
+    if (((m->ss.base + bp) & 0xfff) > 0xff0) break;
+    if (!(r = LookupAddress(m, m->ss.base + bp))) {
       AppendPanel(p, i - framesstart, "CORRUPT FRAME POINTER");
       break;
     }
@@ -1790,7 +1792,7 @@ static void CheckFramePointerImpl(void) {
   lastbp = bp;
   rp = m->ip;
   while (bp) {
-    if (!(r = LookupAddress(m, m->ss + bp))) {
+    if (!(r = LookupAddress(m, m->ss.base + bp))) {
       LOGF("corrupt frame: %0*" PRIx64 "", GetAddrHexWidth(), bp);
       ThrowProtectionFault(m);
     }
@@ -1972,6 +1974,7 @@ static void RewindHistory(int delta) {
       g_history.viewing = 0;
     }
   }
+  g_history.viewing = MIN(g_history.viewing, g_history.count);
   // clear the crash dialog box if it exists.
   action &= ~FAILURE;
 }
@@ -2009,6 +2012,7 @@ static void Redraw(bool force) {
   size_t size;
   double execsecs;
   struct timespec start_draw, end_draw;
+  if (!tuimode) return;
   if (g_history.viewing) {
     ShowHistory();
     return;
@@ -2078,7 +2082,7 @@ static void Redraw(bool force) {
 
 static void ReactiveDraw(void) {
   if (tuimode) {
-    LOGF("%" PRIx64 " %s ReactiveDraw", GetPc(m), tuimode ? "TUI" : "EXEC");
+    // LOGF("%" PRIx64 " %s ReactiveDraw", GetPc(m), tuimode ? "TUI" : "EXEC");
     Redraw(true);
     tick = speed;
   }
@@ -2350,21 +2354,12 @@ static int OnPtyFdTiocgwinsz(int fd, struct winsize *ws) {
   return 0;
 }
 
-static int OnPtyFdTcsets(int fd, u64 request, struct termios *c) {
+static int OnPtyFdTiocswinsz(int fd, const struct winsize *ws) {
   return 0;
 }
 
-static int OnPtyFdIoctl(int fd, unsigned long request, ...) {
-  va_list va;
-  struct winsize *ws;
-  if (request == TIOCGWINSZ) {
-    va_start(va, request);
-    ws = va_arg(va, struct winsize *);
-    va_end(va);
-    return OnPtyFdTiocgwinsz(fd, ws);
-  } else {
-    return einval();
-  }
+static int OnPtyFdTcsets(int fd, u64 request, struct termios *c) {
+  return 0;
 }
 
 static int OnPtyTcgetattr(int fd, struct termios *c) {
@@ -2447,10 +2442,11 @@ static const struct FdCb kFdCbPty = {
     .close = OnPtyFdClose,
     .readv = OnPtyFdReadv,
     .writev = OnPtyFdWritev,
-    .ioctl = OnPtyFdIoctl,
     .poll = OnPtyFdPoll,
     .tcgetattr = OnPtyTcgetattr,
     .tcsetattr = OnPtyTcsetattr,
+    .tcgetwinsize = OnPtyFdTiocgwinsz,
+    .tcsetwinsize = OnPtyFdTiocswinsz,
 };
 
 static void LaunchDebuggerReactively(void) {
@@ -2546,7 +2542,7 @@ static void OnDiskServiceGetParams(void) {
   m->cl = lastcylinder >> 8 << 6 | lastsector;
   m->ch = lastcylinder;
   m->ah = 0;
-  m->es = 0;
+  m->es.sel = m->es.base = 0;
   Put16(m->di, 0);
   SetCarry(false);
 }
@@ -2567,7 +2563,7 @@ static void OnDiskServiceReadSectors(void) {
        " drive %" PRId64 " offset %#" PRIx64 "",
        sectors, sector, cylinder, head, drive, offset);
   if (0 <= sector && offset + size <= m->system->elf.mapsize) {
-    addr = m->es + Get16(m->bx);
+    addr = m->es.base + Get16(m->bx);
     if (addr + size <= kRealSize) {
       SetWriteAddr(m, addr, size);
       memcpy(m->system->real + addr, m->system->elf.map + offset, size);
@@ -2588,6 +2584,67 @@ static void OnDiskServiceReadSectors(void) {
   }
 }
 
+static void OnDiskServiceProbeExtended(void) {
+  u8 drive = m->dl;
+  u16 magic = Get16(m->bx);
+  (void)drive;
+  if (magic == 0x55AA) {
+    Put16(m->bx, 0xAA55);
+    m->ah = 0x30;
+    SetCarry(false);
+  } else {
+    m->ah = 0x01;
+    SetCarry(true);
+  }
+}
+
+static void OnDiskServiceReadSectorsExtended(void) {
+  u8 drive = m->dl;
+  i64 pkt_addr = m->ds.base + Get16(m->si), addr, sectors, size, lba, offset;
+  u8 pkt_size, *pkt;
+  (void)drive;
+  SetReadAddr(m, pkt_addr, 1);
+  pkt = m->system->real + pkt_addr;
+  pkt_size = Get8(pkt);
+  if ((pkt_size != 0x10 && pkt_size != 0x18) || Get8(pkt + 1) != 0) {
+    m->ah = 0x01;
+    SetCarry(true);
+  } else {
+    SetReadAddr(m, pkt_addr, pkt_size);
+    addr = Read32(pkt + 4);
+    if (addr == 0xFFFFFFFF && pkt_size == 0x18) {
+      addr = Read64(pkt + 0x10);
+    } else {
+      addr = (addr >> 16 << 4) + (addr & 0xFFFF);
+    }
+    sectors = Read16(pkt + 2);
+    size = sectors * 512;
+    lba = Read32(pkt + 8);
+    offset = lba * 512;
+    LOGF("bios read sector ext 0 <= %" PRId64 " && %" PRIx64 " + %" PRIx64
+         " <= %lx",
+         lba, offset, size, m->system->elf.mapsize);
+    if (offset >= m->system->elf.mapsize ||
+        offset + size > m->system->elf.mapsize) {
+      LOGF("bios read sector failed 0 <= %" PRId64 " && %" PRIx64 " <= %lx",
+           lba, offset, m->system->elf.mapsize);
+      SetWriteAddr(m, pkt_addr + 2, 2);
+      Write16(pkt + 2, 0);
+      m->ah = 0x0d;
+    } else if (addr >= kRealSize || addr + size > kRealSize) {
+      SetWriteAddr(m, pkt_addr + 2, 2);
+      Write16(pkt + 2, 0);
+      m->ah = 0x02;
+      SetCarry(true);
+    } else {
+      SetWriteAddr(m, addr, size);
+      memcpy(m->system->real + addr, m->system->elf.map + offset, size);
+      m->ah = 0x00;
+      SetCarry(false);
+    }
+  }
+}
+
 static void OnDiskService(void) {
   switch (m->ah) {
     case 0x00:
@@ -2598,6 +2655,12 @@ static void OnDiskService(void) {
       break;
     case 0x08:
       OnDiskServiceGetParams();
+      break;
+    case 0x41:
+      OnDiskServiceProbeExtended();
+      break;
+    case 0x42:
+      OnDiskServiceReadSectorsExtended();
       break;
     default:
       OnDiskServiceBadCommand();
@@ -2775,7 +2838,7 @@ static void OnApmService(void) {
 static void OnE820(void) {
   i64 addr;
   u8 p[20];
-  addr = m->es + Get16(m->di);
+  addr = m->es.base + Get16(m->di);
   if (Get32(m->dx) == 0x534D4150 && Get32(m->cx) == 24 &&
       addr + (int)sizeof(p) <= kRealSize) {
     if (!Get32(m->bx)) {
@@ -3148,7 +3211,7 @@ static void OnHelp(void) {
 
 static void HandleKeyboard(const char *k) {
   const char *p = k;
-  LOGF("HandleKeyboard(%#x [%c])", *k, isprint(*k) ? *k : '.');
+  // LOGF("HandleKeyboard(%#x [%c])", *k, isprint(*k) ? *k : '.');
   switch (*p++) {
     CASE('q', OnQ());
     CASE('v', OnV());
@@ -3218,7 +3281,7 @@ static void HandleKeyboard(const char *k) {
 
 static void ReadKeyboard(void) {
   char buf[64];
-  LOGF("ReadKeyboard");
+  // LOGF("ReadKeyboard");
   memset(buf, 0, sizeof(buf));
   dialog = NULL;
   if (readansi(ttyin, buf, sizeof(buf)) == -1) {
@@ -3282,8 +3345,8 @@ static void LogInstruction(void) {
        m->ip, Get64(m->sp) & 0xffffffffffff, Get64(m->ax), Get64(m->cx),
        Get64(m->dx), Get64(m->bx), Get64(m->bp), Get64(m->si), Get64(m->di),
        Get64(m->r8), Get64(m->r9), Get64(m->r10), Get64(m->r11), Get64(m->r12),
-       Get64(m->r13), Get64(m->r14), Get64(m->r15), m->fs & 0xffffffffffff,
-       m->gs & 0xffffffffffff);
+       Get64(m->r13), Get64(m->r14), Get64(m->r15), m->fs.base & 0xffffffffffff,
+       m->gs.base & 0xffffffffffff);
 }
 
 static void EnterWatchpoint(long bp) {
@@ -3300,10 +3363,10 @@ static void EnterWatchpoint(long bp) {
 }
 
 static void ProfileOp(struct Machine *m, u64 pc) {
-  if (ophits &&                           //
-      pc >= m->system->codestart_prof &&  //
-      pc < m->system->codestart_prof + m->system->codesize_prof) {
-    ++ophits[pc - m->system->codestart_prof];
+  if (ophits &&                      //
+      pc >= m->system->codestart &&  //
+      pc < m->system->codestart + m->system->codesize) {
+    ++ophits[pc - m->system->codestart];
   }
 }
 
@@ -3648,14 +3711,19 @@ static void AddPath_StartOp_Tui(P) {
 
 int VirtualMachine(int argc, char *argv[]) {
   struct Dll *e;
-  codepath = argv[optind_++];
+  if (!Commandv(argv[optind_], pathbuf, sizeof(pathbuf))) {
+    fprintf(stderr, "%s: command not found: %s\n", argv[0], argv[optind_]);
+    exit(127);
+  }
+  codepath = pathbuf;
+  optind_++;
   do {
     action = 0;
     LoadProgram(m, codepath, argv + optind_ - 1, environ);
-    if (m->system->codesize_prof) {
+    if (m->system->codesize) {
       ophits = (unsigned long *)AllocateBig(
-          m->system->codesize_prof * sizeof(unsigned long),
-          PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+          m->system->codesize * sizeof(unsigned long), PROT_READ | PROT_WRITE,
+          MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     }
     ScrollMemoryViews();
     AddStdFd(&m->system->fds, 0);
@@ -3737,7 +3805,7 @@ int main(int argc, char *argv[]) {
   WriteErrorInit();
   AddPath_StartOp_Hook = AddPath_StartOp_Tui;
   unassert((pty = NewPty()));
-  unassert((s = NewSystem()));
+  unassert((s = NewSystem(XED_MODE_REAL)));
   unassert((m = NewMachine(s, 0)));
   SetMachineMode(m, XED_MODE_LONG);
   m->system->redraw = Redraw;
@@ -3767,7 +3835,7 @@ int main(int argc, char *argv[]) {
                           1ull << (SIGWINCH_LINUX - 1);  //
   if (optind_ == argc) PrintUsage(48, stderr);
   rc = VirtualMachine(argc, argv);
-  FreeBig(ophits, m->system->codesize_prof * sizeof(unsigned long));
+  FreeBig(ophits, m->system->codesize * sizeof(unsigned long));
   FreeMachine(m);
   ClearHistory();
   FreePanels();

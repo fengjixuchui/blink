@@ -52,6 +52,7 @@ u8 *GetPageAddress(struct System *s, u64 entry) {
   if (entry & PAGE_HOST) {
     return (u8 *)(intptr_t)(entry & PAGE_TA);
   } else if ((entry & PAGE_TA) + 4096 <= kRealSize) {
+    unassert(s->real);
     return s->real + (entry & PAGE_TA);
   } else {
     return 0;
@@ -112,7 +113,8 @@ static u64 FindPageTableEntry(struct Machine *m, u64 page) {
 u8 *LookupAddress(struct Machine *m, i64 virt) {
   u8 *host;
   u64 entry, page;
-  if (m->mode != XED_MODE_REAL) {
+  if (m->mode == XED_MODE_LONG ||
+      (m->mode != XED_MODE_REAL && (m->system->cr0 & CR0_PG))) {
     if (atomic_load_explicit(&m->invalidated, memory_order_relaxed)) {
       ResetTlb(m);
       atomic_store_explicit(&m->invalidated, false, memory_order_relaxed);
@@ -131,6 +133,7 @@ u8 *LookupAddress(struct Machine *m, i64 virt) {
     }
   } else if (virt >= 0 && virt <= 0xffffffff &&
              (virt & 0xffffffff) + 4095 < kRealSize) {
+    unassert(m->system->real);
     return m->system->real + virt;
   } else {
     efault();
@@ -188,13 +191,13 @@ bool IsValidMemory(struct Machine *m, i64 virt, i64 size, int prot) {
   }
 }
 
-void VirtualCopy(struct Machine *m, i64 v, char *r, u64 n, bool d) {
+int VirtualCopy(struct Machine *m, i64 v, char *r, u64 n, bool d) {
   u8 *p;
   u64 k;
   k = 4096 - (v & 4095);
   while (n) {
     k = MIN(k, n);
-    p = ResolveAddress(m, v);
+    if (!(p = LookupAddress(m, v))) return -1;
     if (d) {
       memcpy(r, p, k);
     } else {
@@ -205,25 +208,27 @@ void VirtualCopy(struct Machine *m, i64 v, char *r, u64 n, bool d) {
     v += k;
     k = 4096;
   }
+  return 0;
 }
 
-u8 *CopyFromUser(struct Machine *m, void *dst, i64 src, u64 n) {
-  VirtualCopy(m, src, (char *)dst, n, true);
-  return (u8 *)dst;
+int CopyFromUser(struct Machine *m, void *dst, i64 src, u64 n) {
+  return VirtualCopy(m, src, (char *)dst, n, true);
 }
 
-void CopyFromUserRead(struct Machine *m, void *dst, i64 addr, u64 n) {
-  CopyFromUser(m, dst, addr, n);
+int CopyFromUserRead(struct Machine *m, void *dst, i64 addr, u64 n) {
+  if (CopyFromUser(m, dst, addr, n) == -1) return -1;
   SetReadAddr(m, addr, n);
+  return 0;
 }
 
-void CopyToUser(struct Machine *m, i64 dst, void *src, u64 n) {
-  VirtualCopy(m, dst, (char *)src, n, false);
+int CopyToUser(struct Machine *m, i64 dst, void *src, u64 n) {
+  return VirtualCopy(m, dst, (char *)src, n, false);
 }
 
-void CopyToUserWrite(struct Machine *m, i64 addr, void *src, u64 n) {
-  CopyToUser(m, addr, src, n);
+int CopyToUserWrite(struct Machine *m, i64 addr, void *src, u64 n) {
+  if (CopyToUser(m, addr, src, n) == -1) return -1;
   SetWriteAddr(m, addr, n);
+  return 0;
 }
 
 void CommitStash(struct Machine *m) {

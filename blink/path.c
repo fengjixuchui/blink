@@ -27,6 +27,7 @@
 #include "blink/debug.h"
 #include "blink/dis.h"
 #include "blink/high.h"
+#include "blink/jit.h"
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
@@ -272,6 +273,7 @@ static bool IsPure(u64 rde) {
     case 0x0F9:  // OpStc
     case 0x11F:  // OpNopEv
     case 0x150:  // OpMovmskpsd
+    case 0x1D7:  // OpPmovmskbGdqpNqUdq
     case 0x1C8:  // OpBswapZvqp
     case 0x1C9:  // OpBswapZvqp
     case 0x1CA:  // OpBswapZvqp
@@ -280,6 +282,22 @@ static bool IsPure(u64 rde) {
     case 0x1CD:  // OpBswapZvqp
     case 0x1CE:  // OpBswapZvqp
     case 0x1CF:  // OpBswapZvqp
+    case 0x050:  // OpPushZvq
+    case 0x051:  // OpPushZvq
+    case 0x052:  // OpPushZvq
+    case 0x053:  // OpPushZvq
+    case 0x054:  // OpPushZvq
+    case 0x055:  // OpPushZvq
+    case 0x056:  // OpPushZvq
+    case 0x057:  // OpPushZvq
+    case 0x058:  // OpPopZvq
+    case 0x059:  // OpPopZvq
+    case 0x05A:  // OpPopZvq
+    case 0x05B:  // OpPopZvq
+    case 0x05C:  // OpPopZvq
+    case 0x05D:  // OpPopZvq
+    case 0x05E:  // OpPopZvq
+    case 0x05F:  // OpPopZvq
       return true;
     case 0x000:  // OpAlub
     case 0x001:  // OpAluw
@@ -423,6 +441,8 @@ static bool IsPure(u64 rde) {
     case 0x174:  // OpSsePcmpeqb
     case 0x175:  // OpSsePcmpeqw
     case 0x176:  // OpSsePcmpeqd
+    case 0x17E:  // OpMov0f7e
+    case 0x17F:  // OpMov0f7f
     case 0x1D1:  // OpSsePsrlwv
     case 0x1D2:  // OpSsePsrldv
     case 0x1D3:  // OpSsePsrlqv
@@ -476,6 +496,7 @@ static bool IsPure(u64 rde) {
     case 0x20A:  // OpSsePsignd
     case 0x20B:  // OpSsePmulhrsw
     case 0x2F6:  // adcx, adox, mulx
+    case 0x344:  // pclmulqdq
       return IsModrmRegister(rde);
     case 0x08D:  // OpLeaGvqpM
       return !IsRipRelative(rde);
@@ -492,8 +513,7 @@ static bool MustUpdateIp(P) {
   u64 next;
   if (!IsPure(rde)) return true;
   next = m->ip + Oplength(rde);
-  if (!HasHook(m, next)) return true;
-  if (GetHook(m, next) != GeneralDispatch) return true;
+  if (GetJitHook(&m->system->jit, next, 0)) return true;
   return false;
 }
 
@@ -546,7 +566,7 @@ bool CreatePath(P) {
       FlushCod(m->path.jb);
       m->path.start = pc;
       m->path.elements = 0;
-      SetHook(m, pc, JitlessDispatch);
+      SetJitHook(&m->system->jit, pc, (intptr_t)JitlessDispatch);
       res = true;
     } else {
       res = false;
@@ -575,13 +595,13 @@ void FinishPath(struct Machine *m) {
   STATISTIC(path_longest = MAX(path_longest, m->path.elements));
   STATISTIC(AVERAGE(path_average_elements, m->path.elements));
   STATISTIC(AVERAGE(path_average_bytes, m->path.jb->index - m->path.jb->start));
-  if (FinishJit(&m->system->jit, m->path.jb, m->fun + m->path.start)) {
+  if (FinishJit(&m->system->jit, m->path.jb, m->path.start)) {
     STATISTIC(++path_count);
     JIT_LOGF("staged path to %" PRIx64, m->path.start);
   } else {
     STATISTIC(++path_ooms);
     JIT_LOGF("path starting at %" PRIx64 " ran out of space", m->path.start);
-    SetHook(m, m->path.start, 0);
+    SetJitHook(&m->system->jit, m->path.start, 0);
   }
   m->path.jb = 0;
 }
@@ -593,7 +613,7 @@ void AbandonPath(struct Machine *m) {
   JIT_LOGF("abandoning path jit_pc:%" PRIxPTR " which started at pc:%" PRIx64,
            GetJitPc(m->path.jb), m->path.start);
   AbandonJit(&m->system->jit, m->path.jb);
-  SetHook(m, m->path.start, 0);
+  SetJitHook(&m->system->jit, m->path.start, 0);
   m->path.skew = 0;
   m->path.jb = 0;
 }

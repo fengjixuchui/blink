@@ -198,7 +198,11 @@ o/$(MODE)/third_party/cosmo:									\
 		o/$(MODE)/third_party/cosmo/2/socket_test.com.ok				\
 		o/$(MODE)/third_party/cosmo/5/unix_test.com.ok					\
 		o/$(MODE)/third_party/cosmo/2/tmpfile_test.com.ok				\
-		o/$(MODE)/third_party/cosmo/2/select_test.com.ok
+		o/$(MODE)/third_party/cosmo/2/select_test.com.ok				\
+		o/$(MODE)/third_party/cosmo/7/utimensat_test.com.ok				\
+		o/$(MODE)/third_party/cosmo/2/readlinkat_test.com.ok				\
+		o/$(MODE)/third_party/cosmo/2/signal_test.com.ok				\
+		o/$(MODE)/third_party/cosmo/2/tkill_test.com.ok
 	@mkdir -p $(@D)
 	@touch $@
 

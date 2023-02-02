@@ -408,6 +408,14 @@ MICRO_OP static u8 *ResolveHost(i64 v) {
   return ToHost(v);
 }
 
+MICRO_OP static u8 *GetBegPtr(struct Machine *m, long i) {
+  return m->beg + i;
+}
+
+MICRO_OP static u8 *GetWegPtr(struct Machine *m, long i) {
+  return m->weg[i];
+}
+
 MICRO_OP static u8 *GetXmmPtr(struct Machine *m, long i) {
   return m->xmm[i];
 }
@@ -900,6 +908,10 @@ MICRO_OP i64 Adox64(u64 x, u64 y, struct Machine *m) {
   return z;
 }
 
+MICRO_OP i64 JustNeg(u64 x) {
+  return -x;
+}
+
 MICRO_OP i64 JustDec(u64 x) {
   return x - 1;
 }
@@ -933,10 +945,10 @@ MICRO_OP static i64 FastDec8(u64 x64, struct Machine *m) {
 }
 
 const aluop_f kFastDec[4] = {
-    (void *)FastDec8,   //
-    (void *)FastDec16,  //
-    (void *)FastDec32,  //
-    (void *)FastDec64,  //
+    (aluop_f)FastDec8,   //
+    (aluop_f)FastDec16,  //
+    (aluop_f)FastDec32,  //
+    (aluop_f)FastDec64,  //
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1100,7 +1112,7 @@ MICRO_OP static u64 Truncate32(u64 x) {
   return (u32)x;
 }
 MICRO_OP static i64 Seg(struct Machine *m, u64 d, long s) {
-  return d + m->seg[s];
+  return d + m->seg[s].base;
 }
 MICRO_OP static i64 Base(struct Machine *m, u64 d, long i) {
   return d + Get64(m->weg[i]);
@@ -1500,13 +1512,21 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
         if (IsModrmRegister(rde)) {
           GetReg(A, log2sz, RexbRm(rde), RexRexb(rde));
         } else if (HasLinearMapping(m)) {
-          Jitter(A,
-                 "L"         // load effective address
-                 "t"         // arg0 = virtual address
-                 "m"         // call micro-op (turn virtual into pointer)
-                 "t"         // arg0 = pointer
-                 LOADSTORE,  // call function (read word shared memory)
-                 ResolveHost, kLoad[log2sz]);
+          if (!kSkew) {
+            Jitter(A,
+                   "L"         // load effective address
+                   "t"         // arg0 = pointer
+                   LOADSTORE,  // call function (read word shared memory)
+                   kLoad[log2sz]);
+          } else {
+            Jitter(A,
+                   "L"         // load effective address
+                   "t"         // arg0 = virtual address
+                   "m"         // call micro-op (turn virtual into pointer)
+                   "t"         // arg0 = pointer
+                   LOADSTORE,  // call function (read word shared memory)
+                   ResolveHost, kLoad[log2sz]);
+          }
         } else {
           Jitter(A,
                  "L"         // load effective address
@@ -1527,15 +1547,25 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
           if (IsModrmRegister(rde)) {
             PutReg(A, log2sz, RexbRm(rde), RexRexb(rde));
           } else if (HasLinearMapping(m)) {
-            Jitter(A,
-                   "s3="       // sav3 = <pop>
-                   "L"         // load effective address
-                   "t"         // arg0 = virtual address
-                   "m"         // call micro-op
-                   "s3a1="     // arg1 = sav3
-                   "t"         // arg0 = res0
-                   LOADSTORE,  // call micro-op (write word to shared memory)
-                   ResolveHost, kStore[log2sz]);
+            if (!kSkew) {
+              Jitter(A,
+                     "s3="       // sav3 = <pop>
+                     "L"         // load effective address
+                     "s3a1="     // arg1 = sav3
+                     "t"         // arg0 = res0
+                     LOADSTORE,  // call micro-op (write word to shared memory)
+                     kStore[log2sz]);
+            } else {
+              Jitter(A,
+                     "s3="       // sav3 = <pop>
+                     "L"         // load effective address
+                     "t"         // arg0 = virtual address
+                     "m"         // call micro-op
+                     "s3a1="     // arg1 = sav3
+                     "t"         // arg0 = res0
+                     LOADSTORE,  // call micro-op (write word to shared memory)
+                     ResolveHost, kStore[log2sz]);
+            }
           } else {
             Jitter(A,
                    "s3="       // sav3 = <pop>
@@ -1564,17 +1594,31 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                    "m",     // call micro-op (xmm put register)
                    RexbRm(rde), kPutReg[log2sz]);
           } else if (HasLinearMapping(m)) {
-            Jitter(A,
-                   "r1s4="     // sav4 = res1
-                   "r0s3="     // sav3 = res0
-                   "L"         // load effective address
-                   "t"         // arg0 = virtual address
-                   "m"         // call micro-op
-                   "s4a2="     // arg2 = sav4
-                   "s3a1="     // arg1 = sav3
-                   "t"         // arg0 = res0
-                   LOADSTORE,  // call micro-op (store vector to shared memory)
-                   ResolveHost, kStore[log2sz]);
+            if (!kSkew) {
+              Jitter(
+                  A,
+                  "r1s4="     // sav4 = res1
+                  "r0s3="     // sav3 = res0
+                  "L"         // load effective address
+                  "s4a2="     // arg2 = sav4
+                  "s3a1="     // arg1 = sav3
+                  "t"         // arg0 = res0
+                  LOADSTORE,  // call micro-op (store vector to shared memory)
+                  kStore[log2sz]);
+            } else {
+              Jitter(
+                  A,
+                  "r1s4="     // sav4 = res1
+                  "r0s3="     // sav3 = res0
+                  "L"         // load effective address
+                  "t"         // arg0 = virtual address
+                  "m"         // call micro-op
+                  "s4a2="     // arg2 = sav4
+                  "s3a1="     // arg1 = sav3
+                  "t"         // arg0 = res0
+                  LOADSTORE,  // call micro-op (store vector to shared memory)
+                  ResolveHost, kStore[log2sz]);
+            }
           } else {
             Jitter(A,
                    "r1s4="     // sav4 = res1
@@ -1661,27 +1705,37 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
         }
         break;
 
-      case 'Q':  // res0 = GetXmmPointer(RexrReg)
+      case 'Q':  // res0 = GetRegPointer(RexrReg)
         Jitter(A,
                "a1i"  // arg1 = register index
                "q"    // arg0 = machine
                "m",   // call micro-op
-               RexrReg(rde), GetXmmPtr);
+               !log2sz ? (u64)kByteReg[RexrReg(rde)] : RexrReg(rde),
+               !log2sz      ? GetBegPtr
+               : log2sz < 4 ? GetWegPtr
+                            : GetXmmPtr);
         break;
 
-      case 'P':  // res0 = GetXmmOrMemPointer(RexbRm)
+      case 'P':  // res0 = GetRegOrMemPointer(RexbRm)
         if (IsModrmRegister(rde)) {
           Jitter(A,
                  "a1i"  // arg1 = register index
                  "q"    // arg0 = machine
                  "m",   // call micro-op
-                 RexbRm(rde), GetXmmPtr);
+                 !log2sz ? (u64)kByteReg[RexbRm(rde)] : RexbRm(rde),
+                 !log2sz      ? GetBegPtr
+                 : log2sz < 4 ? GetWegPtr
+                              : GetXmmPtr);
         } else if (HasLinearMapping(m)) {
-          Jitter(A,
-                 "L"   // load effective address
-                 "t"   // arg0 = virtual address
-                 "m",  // res0 = call micro-op (turn virtual into pointer)
-                 ResolveHost);
+          if (!kSkew) {
+            Jitter(A, "L");  // load effective address
+          } else {
+            Jitter(A,
+                   "L"   // load effective address
+                   "t"   // arg0 = virtual address
+                   "m",  // res0 = call micro-op (turn virtual into pointer)
+                   ResolveHost);
+          }
         } else {
           Jitter(A,
                  "L"      // load effective address

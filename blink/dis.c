@@ -137,6 +137,7 @@ static char *DisCode(struct Dis *d, char *p, int err) {
 }
 
 static char *DisLineCode(struct Dis *d, char *p, int err) {
+  intptr_t hook;
   int blen, plen;
   if (0 <= d->addr && d->addr < 0x10fff0) {
     plen = 2;
@@ -147,16 +148,16 @@ static char *DisLineCode(struct Dis *d, char *p, int err) {
   }
   p = DisColumn(DisAddr(d, p), p, ADDRLEN);
   if (d->m && !IsJitDisabled(&d->m->system->jit)) {
-    if (HasHook(d->m, d->addr)) {
-      if (GetHook(d->m, d->addr) == GeneralDispatch) {
-        *p++ = ' ';  // no hook
-      } else if (GetHook(d->m, d->addr) == JitlessDispatch) {
+    if ((hook = GetJitHook(&d->m->system->jit, d->addr, 0))) {
+      if (hook == (intptr_t)GeneralDispatch) {
+        *p++ = 'G';  // general explicit
+      } else if (hook == (intptr_t)JitlessDispatch) {
         *p++ = 'S';  // staging hook
       } else {
         *p++ = '*';  // committed jit hook
       }
     } else {
-      *p++ = '!';
+      *p++ = ' ';  // no hook
     }
   }
   if (!d->noraw) {
@@ -204,7 +205,7 @@ static long DisAppendOpLines(struct Dis *d, struct Machine *m, i64 addr) {
   long n, symbol;
   struct DisOp op;
   n = 15;
-  ip = addr - m->cs;
+  ip = addr - m->cs.base;
   if ((symbol = DisFindSym(d, ip)) != -1) {
     if (d->syms.p[symbol].addr <= ip &&
         ip < d->syms.p[symbol].addr + d->syms.p[symbol].size) {

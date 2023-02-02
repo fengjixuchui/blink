@@ -55,6 +55,7 @@ extern char **environ;
 static bool FLAG_zero;
 static bool FLAG_nojit;
 static bool FLAG_nolinear;
+static char g_pathbuf[PATH_MAX];
 
 static void OnSigSys(int sig) {
   // do nothing
@@ -101,26 +102,35 @@ static int Exec(char *prog, char **argv, char **envp) {
   int i;
   struct Machine *old;
   if ((old = g_machine)) KillOtherThreads(old->system);
-  unassert((g_machine = NewMachine(NewSystem(), 0)));
+  unassert((g_machine = NewMachine(NewSystem(XED_MODE_LONG), 0)));
   if (FLAG_nojit) DisableJit(&g_machine->system->jit);
-  SetMachineMode(g_machine, XED_MODE_LONG);
   g_machine->system->exec = Exec;
   g_machine->nolinear = FLAG_nolinear;
   g_machine->system->nolinear = FLAG_nolinear;
   if (!old) {
+    // this is the first time a program is being loaded
     LoadProgram(g_machine, prog, argv, envp);
     SetupCod(g_machine);
     for (i = 0; i < 10; ++i) {
       AddStdFd(&g_machine->system->fds, i);
     }
   } else {
+    // execve() was called and emulation has been requested.
+    // we don't currently wipe out all the mappings that the last
+    // program made so we need to disable the fixed map safety check
+    g_wasteland = true;
     LoadProgram(g_machine, prog, argv, envp);
+    // locks are only superficially required since we killed everything
     LOCK(&old->system->fds.lock);
     g_machine->system->fds.list = old->system->fds.list;
     old->system->fds.list = 0;
     UNLOCK(&old->system->fds.lock);
+    // releasing the execve() lock must come after unlocking fds
+    UNLOCK(&old->system->exec_lock);
+    // freeing the last machine in a system will free its system too
     FreeMachine(old);
   }
+  // meta interpreter loop
   for (;;) {
     if (!sigsetjmp(g_machine->onhalt, 1)) {
       g_machine->canhalt = true;
@@ -133,7 +143,7 @@ static int Exec(char *prog, char **argv, char **envp) {
 }
 
 static void Print(int fd, const char *s) {
-  write(fd, s, strlen(s));
+  (void)write(fd, s, strlen(s));
 }
 
 _Noreturn static void PrintUsage(int argc, char *argv[], int rc, int fd) {
@@ -216,5 +226,12 @@ int main(int argc, char *argv[]) {
   if (optind_ == argc) PrintUsage(argc, argv, 48, 2);
   WriteErrorInit();
   HandleSigs();
-  return Exec(argv[optind_], argv + optind_ + FLAG_zero, environ);
+  if (!Commandv(argv[optind_], g_pathbuf, sizeof(g_pathbuf))) {
+    WriteErrorString(argv[0]);
+    WriteErrorString(": command not found: ");
+    WriteErrorString(argv[optind_]);
+    WriteErrorString("\n");
+    exit(127);
+  }
+  return Exec(g_pathbuf, argv + optind_ + FLAG_zero, environ);
 }

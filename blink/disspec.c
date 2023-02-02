@@ -454,6 +454,7 @@ const char *DisSpecMap1(struct XedDecodedInst *x, char *p) {
     RCASE(0x02, "lar %Gvqp Ev");
     RCASE(0x03, "lsl %Gvqp Ev");
     RCASE(0x05, "syscall");
+    RCASE(0x09, "wbinvd");
     RCASE(0x0B, "ud2");
     RCASE(0x0D, "nop Ev");
     RCASE(0x18, "nop Ev");
@@ -462,6 +463,7 @@ const char *DisSpecMap1(struct XedDecodedInst *x, char *p) {
     RCASE(0x1B, "nop Ev");
     RCASE(0x1C, "nop Ev");
     RCASE(0x1D, "nop Ev");
+    RCASE(0x1E, "nop Ev");
     RCASE(0x20, "mov %Hd %Cd");
     RCASE(0x22, "mov %Cd %Hd");
     RCASE(0x28, "movapSD %Vps Wps");
@@ -1127,6 +1129,23 @@ const char *DisSpecMap3(struct XedDecodedInst *x, char *p) {
   switch (Opcode(x->op.rde)) {
     RCASE(0x0F, DisOpPqQqIbVdqWdqIb(x, p, "palignr"));
     RCASE(0xF0, "rorx %Gdqp Edqp Ib");
+    case 0x44:  // pclmulqdq
+      if (Osz(x->op.rde)) {
+        switch (x->op.uimm0) {
+          case 0x00:
+            return "pclmullqlqdq Wdq %Vdq";
+          case 0x01:
+            return "pclmulhqlqdq Wdq %Vdq";
+          case 0x10:
+            return "pclmullqhqdq Wdq %Vdq";
+          case 0x11:
+            return "pclmulhqhqdq Wdq %Vdq";
+          default:
+            return "wut";
+        }
+      } else {
+        return "wut";
+      }
     default:
       return UNKNOWN;
   }

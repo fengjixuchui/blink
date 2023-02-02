@@ -29,6 +29,7 @@
 #define XNU_     "XNU\0\0\0\0\0\0\0\0\0"
 #define WINDOWS_ "Windows\0\0\0\0\0"
 #define CYGWIN_  "Cygwin\0\0\0\0\0\0"
+#define HAIKU_   "Haiku\0\0\0\0\0\0\0"
 #define UNKNOWN_ "Unknown\0\0\0\0\0\0"
 
 #ifdef __COSMOPOLITAN__
@@ -52,6 +53,8 @@
 #define OS XNU_
 #elif defined(__CYGWIN__)
 #define OS CYGWIN_
+#elif defined(__HAIKU__)
+#define OS HAIKU_
 #else
 #define OS UNKNOWN_
 #endif
@@ -61,8 +64,11 @@ void OpCpuid(P) {
   ax = bx = cx = dx = 0;
   switch (Get32(m->ax)) {
     case 0:
-    case 0x80000000:
       ax = 7;
+      goto vendor;
+    case 0x80000000:
+      ax = 0x80000001;
+    vendor:
       // glibc binaries won't run unless we report blink as a
       // modern linux kernel on top of genuine intel hardware
       bx = Read32((const u8 *)INTEL + 0);

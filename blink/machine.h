@@ -45,7 +45,7 @@
 #define kMachineSimdException        -9
 
 #if CAN_64BIT
-#ifndef __SANITIZE_ADDRESS__
+#ifdef __APPLE__
 #define kSkew 0x088800000000
 #else
 #define kSkew 0x000000000000
@@ -71,6 +71,18 @@
 #define kSemSize    128       // number of bytes used for each semaphore
 #define kBusCount   256       // # load balanced semaphores in virtual bus
 #define kBusRegion  kSemSize  // 16 is sufficient for 8-byte loads/stores
+
+#define CR0_PE 0x01        // protected mode enabled
+#define CR0_MP 0x02        // monitor coprocessor
+#define CR0_EM 0x04        // no x87 fpu present if set
+#define CR0_TS 0x08        // task switched x87
+#define CR0_ET 0x10        // extension type 287 or 387
+#define CR0_NE 0x20        // enable x87 error reporting
+#define CR0_WP 0x00010000  // write protect read-only pages @pl0
+#define CR0_AM 0x00040000  // alignment mask
+#define CR0_NW 0x20000000  // global write-through cache disable
+#define CR0_CD 0x40000000  // global cache disable
+#define CR0_PG 0x80000000  // paging enabled
 
 #define PAGE_V    0x0001  // valid
 #define PAGE_RW   0x0002  // writeable
@@ -161,14 +173,23 @@ struct MachineMemstat {
   memstat_t pagetables;
 };
 
+// Segment descriptor cache
+// @see Intel Manual V3A §3.4.3
+// Currently only the base address for each segment register is maintained;
+// a full implementation will also cache its limit & access rights
+struct DescriptorCache {
+  u16 sel;   // visible selector value (or paragraph value in real mode)
+  u64 base;  // base linear address
+};
+
 struct MachineState {
   u64 ip;
-  u64 cs;
-  u64 ss;
-  u64 es;
-  u64 ds;
-  u64 fs;
-  u64 gs;
+  struct DescriptorCache cs;
+  struct DescriptorCache ss;
+  struct DescriptorCache es;
+  struct DescriptorCache ds;
+  struct DescriptorCache fs;
+  struct DescriptorCache gs;
   u8 weg[16][8];
   u8 xmm[16][16];
   u32 mxcsr;
@@ -181,9 +202,15 @@ struct Elf {
   Elf64_Ehdr_ *ehdr;
   long size;
   i64 base;
+  u64 aslr;
   char *map;
   long mapsize;
   bool debugonce;
+  i64 at_base;
+  i64 at_phdr;
+  i64 at_phent;
+  i64 at_entry;
+  i64 at_phnum;
 };
 
 struct OpCache {
@@ -212,6 +239,7 @@ struct System {
   u16 gdt_limit;
   u16 idt_limit;
   int pid;
+  u8 *real;
   u64 gdt_base;
   u64 idt_base;
   u64 cr0;
@@ -221,10 +249,7 @@ struct System {
   i64 brk;
   i64 automap;
   i64 codestart;
-  i64 codestart_prof;
-  _Atomic(int) *fun;
   unsigned long codesize;
-  unsigned long codesize_prof;
   struct MachineMemstat memstat;
   pthread_cond_t machines_cond;
   pthread_mutex_t machines_lock;
@@ -236,6 +261,7 @@ struct System {
   struct Elf elf;
   struct Dll *futexes;
   pthread_mutex_t futex_lock;
+  pthread_mutex_t exec_lock;
   pthread_mutex_t sig_lock;
   struct sigaction_linux hands[64] GUARDED_BY(sig_lock);
   u64 blinksigs;  // signals blink itself handles
@@ -244,7 +270,6 @@ struct System {
   void (*onlongbranch)(struct Machine *);
   int (*exec)(char *, char **, char **);
   void (*redraw)(bool);
-  _Alignas(4096) u8 real[kRealSize];
 };
 
 struct JitPath {
@@ -270,10 +295,7 @@ struct Machine {                           //
   i64 stashaddr;                           // page overlap buffer
   _Atomic(bool) invalidated;               // the tlb must be flushed
   _Atomic(bool) killed;                    // used to send a soft SIGKILL
-  _Atomic(int) *fun;                       // [dup] jit hooks for code bytes
   _Atomicish(u64) signals;                 // signals waiting for delivery
-  unsigned long codesize;                  // [dup] size of exe code section
-  i64 codestart;                           // [dup] virt of exe code section
   union {                                  // GENERAL REGISTER FILE
     u64 align8_;                           //
     u8 beg[128];                           //
@@ -329,14 +351,14 @@ struct Machine {                           //
   u32 readsize;                            // bytes length of last read op
   u32 writesize;                           // byte length of last write op
   union {                                  //
-    u64 seg[8];                            //
+    struct DescriptorCache seg[8];         //
     struct {                               //
-      u64 es;                              // xtra segment (legacy / real)
-      u64 cs;                              // code segment (legacy / real)
-      u64 ss;                              // stak segment (legacy / real)
-      u64 ds;                              // data segment (legacy / real)
-      u64 fs;                              // thred-local segment register
-      u64 gs;                              // winple thread-local register
+      struct DescriptorCache es;           // xtra segment (legacy / real)
+      struct DescriptorCache cs;           // code segment (legacy / real)
+      struct DescriptorCache ss;           // stak segment (legacy / real)
+      struct DescriptorCache ds;           // data segment (legacy / real)
+      struct DescriptorCache fs;           // thred-local segment register
+      struct DescriptorCache gs;           // winple thread-local register
     };                                     //
   };                                       //
   struct MachineFpu fpu;                   // FLOATING-POINT REGISTER FILE
@@ -369,8 +391,9 @@ extern _Thread_local struct Machine *g_machine;
 extern const nexgen32e_f kConvert[3];
 extern const nexgen32e_f kSax[3];
 extern bool FLAG_noconnect;
+extern bool g_wasteland;
 
-struct System *NewSystem(void);
+struct System *NewSystem(int);
 void FreeSystem(struct System *);
 _Noreturn void Actor(struct Machine *);
 void SetMachineMode(struct Machine *, int);
@@ -423,7 +446,6 @@ u8 *AccessRam(struct Machine *, i64, size_t, void *[2], u8 *, bool);
 u8 *BeginLoadStore(struct Machine *, i64, size_t, void *[2], u8 *);
 u8 *BeginStore(struct Machine *, i64, size_t, void *[2], u8 *);
 u8 *BeginStoreNp(struct Machine *, i64, size_t, void *[2], u8 *);
-u8 *CopyFromUser(struct Machine *, void *, i64, u64);
 u8 *LookupAddress(struct Machine *, i64);
 u8 *Load(struct Machine *, i64, size_t, u8 *);
 u8 *MallocPage(void);
@@ -432,9 +454,10 @@ u8 *ReserveAddress(struct Machine *, i64, size_t, bool);
 u8 *ResolveAddress(struct Machine *, i64);
 u8 *GetAddress(struct Machine *, i64);
 void CommitStash(struct Machine *);
-void CopyFromUserRead(struct Machine *, void *, i64, u64);
-void CopyToUser(struct Machine *, i64, void *, u64);
-void CopyToUserWrite(struct Machine *, i64, void *, u64);
+int CopyFromUser(struct Machine *, void *, i64, u64);
+int CopyFromUserRead(struct Machine *, void *, i64, u64);
+int CopyToUser(struct Machine *, i64, void *, u64);
+int CopyToUserWrite(struct Machine *, i64, void *, u64);
 void EndStore(struct Machine *, i64, size_t, void *[2], u8 *);
 void EndStoreNp(struct Machine *, i64, size_t, void *[2], u8 *);
 void ResetRam(struct Machine *);
@@ -538,17 +561,14 @@ void OpRorx(P);
 void FreeBig(void *, size_t);
 void *AllocateBig(size_t, int, int, int, off_t);
 
-bool HasHook(struct Machine *, u64);
-nexgen32e_f GetHook(struct Machine *, u64);
-void SetHook(struct Machine *, u64, nexgen32e_f);
-
 u64 MaskAddress(u32, u64);
 i64 GetIp(struct Machine *);
 i64 GetPc(struct Machine *);
 u64 AddressOb(P);
 u64 AddressDi(P);
 i64 AddressSi(P);
-u64 *GetSegment(P, unsigned);
+u64 GetSegmentBase(P, unsigned);
+void SetCs(P, u16);
 i64 DataSegment(P, u64);
 i64 AddSegment(P, u64, u64);
 
