@@ -19,6 +19,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <net/if.h>
@@ -48,7 +49,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "blink/endian.h"
+#include "blink/log.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -64,7 +65,9 @@
 #endif
 
 #include "blink/assert.h"
+#include "blink/bus.h"
 #include "blink/case.h"
+#include "blink/cygwin.h"
 #include "blink/debug.h"
 #include "blink/endian.h"
 #include "blink/errno.h"
@@ -76,7 +79,6 @@
 #include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/map.h"
-#include "blink/mop.h"
 #include "blink/pml4t.h"
 #include "blink/random.h"
 #include "blink/signal.h"
@@ -88,24 +90,11 @@
 #include "blink/util.h"
 #include "blink/xlat.h"
 
-#ifdef O_ASYNC
-#define O_ASYNC_SETFL O_ASYNC
+#ifdef SO_LINGER_SEC
+#define SO_LINGER_ SO_LINGER_SEC
 #else
-#define O_ASYNC_SETFL 0
+#define SO_LINGER_ SO_LINGER
 #endif
-#ifdef O_DIRECT
-#define O_DIRECT_SETFL O_DIRECT
-#else
-#define O_DIRECT_SETFL 0
-#endif
-#ifdef O_NOATIME
-#define O_NOATIME_SETFL O_NOATIME
-#else
-#define O_NOATIME_SETFL 0
-#endif
-
-#define SETFL_FLAGS \
-  (O_APPEND | O_NDELAY | O_ASYNC_SETFL | O_DIRECT_SETFL | O_NOATIME_SETFL)
 
 #define ASSIGN(D, S) memcpy(&D, &S, MIN(sizeof(S), sizeof(D)))
 #define SYSCALL(x, name, args)                                              \
@@ -214,8 +203,8 @@ bool CheckInterrupt(struct Machine *m) {
 
 static struct Futex *FindFutex(struct Machine *m, i64 addr) {
   struct Dll *e;
-  for (e = dll_first(m->system->futexes); e;
-       e = dll_next(m->system->futexes, e)) {
+  for (e = dll_first(g_bus->futexes.active); e;
+       e = dll_next(g_bus->futexes.active, e)) {
     if (FUTEX_CONTAINER(e)->addr == addr) {
       return FUTEX_CONTAINER(e);
     }
@@ -227,11 +216,11 @@ static int SysFutexWake(struct Machine *m, i64 uaddr, u32 count) {
   int rc;
   struct Futex *f;
   if (!count) return 0;
-  LOCK(&m->system->futex_lock);
+  LOCK(&g_bus->futexes.lock);
   if ((f = FindFutex(m, uaddr))) {
     LOCK(&f->lock);
   }
-  UNLOCK(&m->system->futex_lock);
+  UNLOCK(&g_bus->futexes.lock);
   if (f && f->waiters) {
     THR_LOGF("pid=%d tid=%d is waking %d waiters at address %#" PRIx64,
              m->system->pid, m->tid, f->waiters, uaddr);
@@ -306,18 +295,24 @@ static int SysFork(struct Machine *m) {
   LockFds(&m->system->fds);
   LOCK(&m->system->sig_lock);
   LOCK(&m->system->mmap_lock);
-  LOCK(&m->system->futex_lock);
   LOCK(&m->system->machines_lock);
+#if !CAN_PSHARE
+  LOCK(&g_bus->futexes.lock);
+#endif
   pid = fork();
+#if !CAN_PSHARE
+  UNLOCK(&g_bus->futexes.lock);
+#endif
   UNLOCK(&m->system->machines_lock);
-  UNLOCK(&m->system->futex_lock);
   UNLOCK(&m->system->mmap_lock);
   UNLOCK(&m->system->sig_lock);
   UnlockFds(&m->system->fds);
   UNLOCK(&m->system->exec_lock);
   if (!pid) {
     newpid = getpid();
-    InitBus();  // TODO(jart): use shared memory for g_bus
+#if !CAN_PSHARE
+    InitBus();
+#endif
     THR_LOGF("pid=%d tid=%d SysFork -> pid=%d tid=%d",  //
              m->system->pid, m->tid, newpid, newpid);
     m->tid = m->system->pid = newpid;
@@ -439,21 +434,22 @@ static int SysClone(struct Machine *m, u64 flags, u64 stack, u64 ptid, u64 ctid,
 }
 
 static struct Futex *NewFutex(i64 addr) {
+  struct Dll *e;
   struct Futex *f;
-  if ((f = (struct Futex *)calloc(1, sizeof(struct Futex)))) {
-    pthread_cond_init(&f->cond, 0);
-    pthread_mutex_init(&f->lock, 0);
-    dll_init(&f->elem);
-    f->waiters = 1;
-    f->addr = addr;
+  if (!(e = dll_first(g_bus->futexes.free))) {
+    LOG_ONCE(LOGF("ran out of futexes"));
+    enomem();
+    return 0;
   }
+  dll_remove(&g_bus->futexes.free, e);
+  f = FUTEX_CONTAINER(e);
+  f->waiters = 1;
+  f->addr = addr;
   return f;
 }
 
 static void FreeFutex(struct Futex *f) {
-  unassert(!pthread_mutex_destroy(&f->lock));
-  unassert(!pthread_cond_destroy(&f->cond));
-  free(f);
+  dll_make_first(&g_bus->futexes.free, &f->elem);
 }
 
 static int SysFutexWait(struct Machine *m,  //
@@ -482,9 +478,9 @@ static int SysFutexWait(struct Machine *m,  //
     deadline = GetMaxTime();
   }
   if (!(mem = GetAddress(m, uaddr))) return efault();
-  LOCK(&m->system->futex_lock);
+  LOCK(&g_bus->futexes.lock);
   if (Load32(mem) != expect) {
-    UNLOCK(&m->system->futex_lock);
+    UNLOCK(&g_bus->futexes.lock);
     return eagain();
   }
   if ((f = FindFutex(m, uaddr))) {
@@ -494,13 +490,13 @@ static int SysFutexWait(struct Machine *m,  //
   }
   if (!f) {
     if ((f = NewFutex(uaddr))) {
-      dll_make_first(&m->system->futexes, &f->elem);
+      dll_make_first(&g_bus->futexes.active, &f->elem);
     } else {
-      UNLOCK(&m->system->futex_lock);
+      UNLOCK(&g_bus->futexes.lock);
       return -1;
     }
   }
-  UNLOCK(&m->system->futex_lock);
+  UNLOCK(&g_bus->futexes.lock);
   THR_LOGF("pid=%d tid=%d is waiting at address %#" PRIx64, m->system->pid,
            m->tid, uaddr);
   do {
@@ -523,19 +519,24 @@ static int SysFutexWait(struct Machine *m,  //
       tick = AddTime(tick, FromMilliseconds(kPollingMs));
       if (CompareTime(tick, deadline) > 0) tick = deadline;
       rc = pthread_cond_timedwait(&f->cond, &f->lock, &tick);
+      if (rc == ETIMEDOUT) {
+        THR_LOGF("futex wait timed out");
+      } else {
+        THR_LOGF("futex wait returned %s", rc ? strerror(rc) : "0");
+      }
     }
     UNLOCK(&f->lock);
   } while (rc == ETIMEDOUT && CompareTime(tick, deadline) < 0);
-  LOCK(&m->system->futex_lock);
+  LOCK(&g_bus->futexes.lock);
   LOCK(&f->lock);
   if (!--f->waiters) {
-    dll_remove(&m->system->futexes, &f->elem);
+    dll_remove(&g_bus->futexes.active, &f->elem);
     UNLOCK(&f->lock);
-    UNLOCK(&m->system->futex_lock);
     FreeFutex(f);
+    UNLOCK(&g_bus->futexes.lock);
   } else {
     UNLOCK(&f->lock);
-    UNLOCK(&m->system->futex_lock);
+    UNLOCK(&g_bus->futexes.lock);
   }
   if (rc) {
     errno = rc;
@@ -869,7 +870,7 @@ static int SysMunmap(struct Machine *m, i64 virt, u64 size) {
   return rc;
 }
 
-static int GetOflags(struct Machine *m, int fildes) {
+int GetOflags(struct Machine *m, int fildes) {
   int oflags;
   struct Fd *fd;
   LockFds(&m->system->fds);
@@ -1000,7 +1001,8 @@ static int SysDup2(struct Machine *m, i32 fildes, i32 newfildes) {
   } else if ((rc = Dup2(m, fildes, newfildes)) != -1) {
     LockFds(&m->system->fds);
     if ((fd = GetFd(&m->system->fds, newfildes))) {
-      FreeFd(&m->system->fds, fd);
+      dll_remove(&m->system->fds.list, &fd->elem);
+      FreeFd(fd);
     }
     if ((fd = GetFd(&m->system->fds, fildes))) {
       oflags = fd->oflags & ~O_CLOEXEC;
@@ -1038,7 +1040,8 @@ static int SysDup3(struct Machine *m, i32 fildes, i32 newfildes, i32 flags) {
     }
     LockFds(&m->system->fds);
     if ((fd = GetFd(&m->system->fds, newfildes))) {
-      FreeFd(&m->system->fds, fd);
+      dll_remove(&m->system->fds.list, &fd->elem);
+      FreeFd(fd);
     }
     if ((fd = GetFd(&m->system->fds, fildes))) {
       oflags = fd->oflags & ~O_CLOEXEC;
@@ -1297,6 +1300,50 @@ static int XlatRecvFlags(int flags) {
   return hostflags;
 }
 
+static int UnXlatMsgFlags(int flags) {
+  int guestflags = 0;
+  if (flags & MSG_OOB) {
+    guestflags |= MSG_OOB_LINUX;
+    flags &= ~MSG_OOB;
+  }
+  if (flags & MSG_PEEK) {
+    guestflags |= MSG_PEEK_LINUX;
+    flags &= ~MSG_PEEK;
+  }
+  if (flags & MSG_TRUNC) {
+    guestflags |= MSG_TRUNC_LINUX;
+    flags &= ~MSG_TRUNC;
+  }
+  if (flags & MSG_CTRUNC) {
+    guestflags |= MSG_CTRUNC_LINUX;
+    flags &= ~MSG_CTRUNC;
+  }
+  if (flags & MSG_WAITALL) {
+    guestflags |= MSG_WAITALL_LINUX;
+    flags &= ~MSG_WAITALL;
+  }
+  if (flags & MSG_DONTROUTE) {
+    guestflags |= MSG_DONTROUTE_LINUX;
+    flags &= ~MSG_DONTROUTE;
+  }
+#ifdef MSG_EOR
+  if (flags & MSG_EOR) {
+    guestflags |= MSG_EOR_LINUX;
+    flags &= ~MSG_EOR;
+  }
+#endif
+#ifdef MSG_NOSIGNAL
+  if (flags & MSG_NOSIGNAL) {
+    guestflags |= MSG_NOSIGNAL_LINUX;
+    flags &= ~MSG_NOSIGNAL;
+  }
+#endif
+  if (flags) {
+    LOGF("unsupported %s flags %#x", "msg", flags);
+  }
+  return guestflags;
+}
+
 static i64 SysSendto(struct Machine *m,  //
                      i32 fildes,         //
                      i64 bufaddr,        //
@@ -1354,6 +1401,90 @@ static i64 SysRecvfrom(struct Machine *m,  //
   return rc;
 }
 
+static i64 SysSendmsg(struct Machine *m, i32 fildes, i64 msgaddr, i32 flags) {
+  i32 len;
+  u64 iovlen;
+  ssize_t rc;
+  i64 iovaddr;
+  struct Iovs iv;
+  struct msghdr msg;
+  struct sockaddr_storage ss;
+  const struct msghdr_linux *gm;
+  if ((flags = XlatSendFlags(flags)) == -1) {
+    return -1;
+  }
+  if (!(gm = (const struct msghdr_linux *)Schlep(m, msgaddr, sizeof(*gm)))) {
+    return -1;
+  }
+  if (Read64(gm->controllen)) {
+    LOGF("ancillary data not supported yet");
+    return enotsup();
+  }
+  memset(&msg, 0, sizeof(msg));
+  if ((len = Read32(gm->namelen)) > 0) {
+    if ((len = LoadSockaddr(m, Read64(gm->name), len, &ss)) == -1) {
+      return -1;
+    }
+    msg.msg_name = &ss;
+    msg.msg_namelen = len;
+  }
+  iovaddr = Read64(gm->iov);
+  iovlen = Read64(gm->iovlen);
+  if (!iovlen || iovlen > IOV_MAX_LINUX) {
+    errno = EMSGSIZE;
+    return -1;
+  }
+  InitIovs(&iv);
+  if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen)) != -1) {
+    msg.msg_iov = iv.p;
+    msg.msg_iovlen = iv.i;
+    INTERRUPTIBLE(rc = sendmsg(fildes, &msg, flags));
+  }
+  FreeIovs(&iv);
+  return rc;
+}
+
+static i64 SysRecvmsg(struct Machine *m, i32 fildes, i64 msgaddr, i32 flags) {
+  ssize_t rc;
+  u64 iovlen;
+  i64 iovaddr;
+  struct Iovs iv;
+  struct msghdr msg;
+  struct msghdr_linux gm;
+  struct sockaddr_storage addr;
+  if ((flags = XlatRecvFlags(flags)) == -1) return -1;
+  if (CopyFromUserRead(m, &gm, msgaddr, sizeof(gm)) == -1) return -1;
+  memset(&msg, 0, sizeof(msg));
+  iovaddr = Read64(gm.iov);
+  iovlen = Read64(gm.iovlen);
+  if (!iovlen || iovlen > IOV_MAX_LINUX) {
+    errno = EMSGSIZE;
+    return -1;
+  }
+  InitIovs(&iv);
+  if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen)) != -1) {
+    msg.msg_iov = iv.p;
+    msg.msg_iovlen = iv.i;
+    if (Read64(gm.name)) {
+      memset(&addr, 0, sizeof(addr));
+      msg.msg_name = &addr;
+      msg.msg_namelen = sizeof(addr);
+    }
+    INTERRUPTIBLE(rc = recvmsg(fildes, &msg, flags));
+    if (rc != -1) {
+      Write32(gm.flags, UnXlatMsgFlags(msg.msg_flags));
+      CopyToUserWrite(m, msgaddr, &gm, sizeof(gm));
+      if (Read64(gm.name)) {
+        StoreSockaddr(m, Read64(gm.name),
+                      msgaddr + offsetof(struct msghdr_linux, namelen),
+                      (struct sockaddr *)&addr, msg.msg_namelen);
+      }
+    }
+  }
+  FreeIovs(&iv);
+  return rc;
+}
+
 static int SysConnectBind(struct Machine *m, i32 fildes, i64 sockaddr_addr,
                           u32 sockaddr_size,
                           int impl(int, const struct sockaddr *, socklen_t)) {
@@ -1377,20 +1508,92 @@ static int SysConnect(struct Machine *m, int fd, i64 aa, u32 as) {
   return SysConnectBind(m, fd, aa, as, connect);
 }
 
+static int UnXlatSocketType(int x) {
+  if (x == SOCK_STREAM) return SOCK_STREAM_LINUX;
+  if (x == SOCK_DGRAM) return SOCK_DGRAM_LINUX;
+  LOGF("%s %d not supported yet", "socket type", x);
+  return einval();
+}
+
+static int GetsockoptInt32(struct Machine *m, i32 fd, int level, int optname,
+                           i64 optvaladdr, i64 optvalsizeaddr, int xlat(int)) {
+  u8 *psize;
+  u8 gval[4];
+  int rc, val;
+  socklen_t optvalsize;
+  u32 optvalsize_linux;
+  if (!(psize = (u8 *)Schlep(m, optvalsizeaddr, 4))) return -1;
+  optvalsize_linux = Read32(psize);
+  if (!IsValidMemory(m, optvaladdr, optvalsize_linux, PROT_WRITE)) {
+    return efault();
+  }
+  optvalsize = sizeof(val);
+  if ((rc = getsockopt(fd, level, optname, &val, &optvalsize)) != -1) {
+    if ((val = xlat(val)) == -1) return -1;
+    Write32(gval, val);
+    CopyToUserWrite(m, optvaladdr, &gval, MIN(sizeof(gval), optvalsize_linux));
+    Write32(psize, sizeof(gval));
+  }
+  return rc;
+}
+
+static int SetsockoptLinger(struct Machine *m, i32 fildes, i64 optvaladdr,
+                            u32 optvalsize) {
+  struct linger hl;
+  const struct linger_linux *gl;
+  if (optvalsize < sizeof(*gl)) return einval();
+  if (!(gl = (const struct linger_linux *)Schlep(m, optvaladdr, sizeof(*gl)))) {
+    return -1;
+  }
+  hl.l_onoff = (i32)Read32(gl->onoff);
+  hl.l_linger = (i32)Read32(gl->linger);
+  return setsockopt(fildes, SOL_SOCKET, SO_LINGER_, &hl, sizeof(hl));
+}
+
+static int GetsockoptLinger(struct Machine *m, i32 fd, i64 optvaladdr,
+                            i64 optvalsizeaddr) {
+  int rc;
+  u8 *psize;
+  struct linger hl;
+  socklen_t optvalsize;
+  u32 optvalsize_linux;
+  struct linger_linux gl;
+  if (!(psize = (u8 *)Schlep(m, optvalsizeaddr, 4))) return -1;
+  optvalsize_linux = Read32(psize);
+  if (!IsValidMemory(m, optvaladdr, optvalsize_linux, PROT_WRITE)) {
+    return efault();
+  }
+  optvalsize = sizeof(hl);
+  if ((rc = getsockopt(fd, SOL_SOCKET, SO_LINGER_, &hl, &optvalsize)) != -1) {
+    Write32(gl.onoff, hl.l_onoff);
+    Write32(gl.linger, hl.l_linger);
+    CopyToUserWrite(m, optvaladdr, &gl, MIN(sizeof(gl), optvalsize_linux));
+    Write32(psize, sizeof(gl));
+  }
+  return rc;
+}
+
 static int SysSetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
                          i64 optvaladdr, u32 optvalsize) {
-  int rc;
   void *optval;
   int syslevel, sysoptname;
+  switch (level) {
+    case SOL_SOCKET_LINUX:
+      switch (optname) {
+        case SO_LINGER_LINUX:
+          return SetsockoptLinger(m, fildes, optvaladdr, optvalsize);
+        default:
+          break;
+      }
+      break;
+    default:
+      break;
+  }
   if (optvalsize > 256) return einval();
   if (XlatSocketLevel(level, &syslevel) == -1) return -1;
   if ((sysoptname = XlatSocketOptname(level, optname)) == -1) return -1;
-  if (!(optval = calloc(1, optvalsize))) return -1;
-  if ((rc = CopyFromUserRead(m, optval, optvaladdr, optvalsize)) != -1) {
-    rc = setsockopt(fildes, syslevel, sysoptname, optval, optvalsize);
-  }
-  free(optval);
-  return rc;
+  if (!(optval = Schlep(m, optvaladdr, optvalsize))) return -1;
+  return setsockopt(fildes, syslevel, sysoptname, optval, optvalsize);
 }
 
 static int SysGetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
@@ -1400,6 +1603,24 @@ static int SysGetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
   socklen_t optvalsize;
   u8 optvalsize_linux[4];
   int syslevel, sysoptname;
+  switch (level) {
+    case SOL_SOCKET_LINUX:
+      switch (optname) {
+        case SO_TYPE_LINUX:
+          return GetsockoptInt32(m, fildes, SOL_SOCKET, SO_TYPE, optvaladdr,
+                                 optvalsizeaddr, UnXlatSocketType);
+        case SO_ERROR_LINUX:
+          return GetsockoptInt32(m, fildes, SOL_SOCKET, SO_ERROR, optvaladdr,
+                                 optvalsizeaddr, XlatErrno);
+        case SO_LINGER_LINUX:
+          return GetsockoptLinger(m, fildes, optvaladdr, optvalsizeaddr);
+        default:
+          break;
+      }
+      break;
+    default:
+      break;
+  }
   if (XlatSocketLevel(level, &syslevel) == -1) return -1;
   if ((sysoptname = XlatSocketOptname(level, optname)) == -1) return -1;
   if (CopyFromUserRead(m, optvalsize_linux, optvalsizeaddr,
@@ -1504,39 +1725,52 @@ static long CheckFdAccess(struct Machine *m, i32 fildes, bool writable,
 
 static i64 SysPread(struct Machine *m, i32 fildes, i64 addr, u64 size,
                     u64 offset) {
-  void *buf;
   ssize_t rc;
+  struct Iovs iv;
   if (CheckFdAccess(m, fildes, false, EBADF) == -1) return -1;
-  if (!IsValidMemory(m, addr, size, PROT_WRITE)) return efault();
   if (size) {
-    if ((buf = malloc(size))) {
-      INTERRUPTIBLE(rc = pread(fildes, buf, size, offset));
-      if (rc != -1) CopyToUserWrite(m, addr, buf, rc);
-      free(buf);
-    } else {
-      rc = -1;
+    InitIovs(&iv);
+    if ((rc = AppendIovsReal(m, &iv, addr, size)) != -1) {
+      INTERRUPTIBLE(rc = preadv(fildes, iv.p, iv.i, offset));
+      if (rc != -1) SetWriteAddr(m, addr, rc);
     }
+    FreeIovs(&iv);
   } else {
-    rc = pread(fildes, 0, 0, offset);
+    rc = 0;
   }
   return rc;
 }
 
 static i64 SysPwrite(struct Machine *m, i32 fildes, i64 addr, u64 size,
                      u64 offset) {
-  i64 rc;
+  ssize_t rc;
+  struct Iovs iv;
   if (CheckFdAccess(m, fildes, true, EBADF) == -1) return -1;
-  INTERRUPTIBLE(rc = pwrite(fildes, Schlep(m, addr, size), size, offset));
+  if (size) {
+    InitIovs(&iv);
+    if ((rc = AppendIovsReal(m, &iv, addr, size)) != -1) {
+      INTERRUPTIBLE(rc = pwritev(fildes, iv.p, iv.i, offset));
+      if (rc != -1) SetReadAddr(m, addr, rc);
+    }
+    FreeIovs(&iv);
+  } else {
+    rc = 0;
+  }
   return rc;
 }
 
-static i64 SysReadv(struct Machine *m, i32 fildes, i64 iovaddr, i32 iovlen) {
+static i64 SysPreadv2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
+                      i64 offset, i32 flags) {
   i64 rc;
   int oflags;
   struct Fd *fd;
   struct Iovs iv;
   ssize_t (*readv_impl)(int, const struct iovec *, int);
-  if (iovlen <= 0 || iovlen > IOV_MAX) return einval();
+  if (flags) {
+    LOGF("%s flags not supported yet: %#" PRIx32, "preadv2", flags);
+    return einval();
+  }
+  if (iovlen > IOV_MAX_LINUX) return einval();
   LockFds(&m->system->fds);
   if ((fd = GetFd(&m->system->fds, fildes))) {
     unassert(fd->cb);
@@ -1549,25 +1783,38 @@ static i64 SysReadv(struct Machine *m, i32 fildes, i64 iovaddr, i32 iovlen) {
   UnlockFds(&m->system->fds);
   if (!fd) return -1;
   if ((oflags & O_ACCMODE) == O_WRONLY) return ebadf();
-  InitIovs(&iv);
-  if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen)) != -1) {
-    if (iv.i) {
-      INTERRUPTIBLE(rc = readv_impl(fildes, iv.p, iv.i));
-    } else {
-      rc = 0;
+  if (iovlen) {
+    InitIovs(&iv);
+    if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen)) != -1) {
+      if (iv.i) {
+        if (offset == -1) {
+          INTERRUPTIBLE(rc = readv_impl(fildes, iv.p, iv.i));
+        } else {
+          INTERRUPTIBLE(rc = preadv(fildes, iv.p, iv.i, offset));
+        }
+      } else {
+        rc = 0;
+      }
     }
+    FreeIovs(&iv);
+  } else {
+    rc = 0;
   }
-  FreeIovs(&iv);
   return rc;
 }
 
-static i64 SysWritev(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen) {
+static i64 SysPwritev2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
+                       i64 offset, i32 flags) {
   i64 rc;
   int oflags;
   struct Fd *fd;
   struct Iovs iv;
   ssize_t (*writev_impl)(int, const struct iovec *, int);
-  if (iovlen <= 0 || iovlen > IOV_MAX) return einval();
+  if (flags) {
+    LOGF("%s flags not supported yet: %#" PRIx32, "pwritev2", flags);
+    return einval();
+  }
+  if (iovlen > IOV_MAX_LINUX) return einval();
   LockFds(&m->system->fds);
   if ((fd = GetFd(&m->system->fds, fildes))) {
     unassert(fd->cb);
@@ -1580,16 +1827,44 @@ static i64 SysWritev(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen) {
   UnlockFds(&m->system->fds);
   if (!fd) return -1;
   if ((oflags & O_ACCMODE) == O_RDONLY) return ebadf();
-  InitIovs(&iv);
-  if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen)) != -1) {
-    if (iv.i) {
-      INTERRUPTIBLE(rc = writev_impl(fildes, iv.p, iv.i));
-    } else {
-      rc = 0;
+  if (iovlen) {
+    InitIovs(&iv);
+    if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen)) != -1) {
+      if (iv.i) {
+        if (offset == -1) {
+          INTERRUPTIBLE(rc = writev_impl(fildes, iv.p, iv.i));
+        } else {
+          INTERRUPTIBLE(rc = pwritev(fildes, iv.p, iv.i, offset));
+        }
+      } else {
+        rc = 0;
+      }
     }
+    FreeIovs(&iv);
+  } else {
+    rc = 0;
   }
-  FreeIovs(&iv);
   return rc;
+}
+
+static i64 SysReadv(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen) {
+  return SysPreadv2(m, fildes, iovaddr, iovlen, -1, 0);
+}
+
+static i64 SysWritev(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen) {
+  return SysPwritev2(m, fildes, iovaddr, iovlen, -1, 0);
+}
+
+static i64 SysPreadv(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
+                     i64 offset) {
+  if (offset < 0) return einval();
+  return SysPreadv2(m, fildes, iovaddr, iovlen, offset, 0);
+}
+
+static i64 SysPwritev(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
+                      i64 offset) {
+  if (offset < 0) return einval();
+  return SysPwritev2(m, fildes, iovaddr, iovlen, offset, 0);
 }
 
 static int UnXlatDt(int x) {
@@ -1692,270 +1967,6 @@ static int SysSetTidAddress(struct Machine *m, i64 ctid) {
 static int SysFadvise(struct Machine *m, u32 fd, u64 offset, u64 len,
                       i32 advice) {
   return 0;
-}
-
-static int IoctlTiocgwinsz(struct Machine *m, int fd, i64 addr,
-                           int fn(int, struct winsize *)) {
-  int rc;
-  struct winsize ws;
-  struct winsize_linux gws;
-  if ((rc = fn(fd, &ws)) != -1) {
-    XlatWinsizeToLinux(&gws, &ws);
-    if (CopyToUserWrite(m, addr, &gws, sizeof(gws)) == -1) rc = -1;
-  }
-  return rc;
-}
-
-static int IoctlTiocswinsz(struct Machine *m, int fd, i64 addr,
-                           int fn(int, const struct winsize *)) {
-  struct winsize ws;
-  struct winsize_linux gws;
-  if (CopyFromUserRead(m, &gws, addr, sizeof(gws)) == -1) return -1;
-  XlatWinsizeToHost(&ws, &gws);
-  return fn(fd, &ws);
-}
-
-static int IoctlTcgets(struct Machine *m, int fd, i64 addr,
-                       int fn(int, struct termios *)) {
-  int rc;
-  struct termios tio;
-  struct termios_linux gtio;
-  if ((rc = fn(fd, &tio)) != -1) {
-    XlatTermiosToLinux(&gtio, &tio);
-    if (CopyToUserWrite(m, addr, &gtio, sizeof(gtio)) == -1) rc = -1;
-  }
-  return rc;
-}
-
-static int IoctlTcsets(struct Machine *m, int fd, int request, i64 addr,
-                       int fn(int, int, const struct termios *)) {
-  struct termios tio;
-  struct termios_linux gtio;
-  if (CopyFromUserRead(m, &gtio, addr, sizeof(gtio)) == -1) return -1;
-  XlatLinuxToTermios(&tio, &gtio);
-  return fn(fd, request, &tio);
-}
-
-static int IoctlTiocgpgrp(struct Machine *m, int fd, i64 addr) {
-  int rc;
-  u8 *pgrp;
-#ifdef __EMSCRIPTEN__
-  // Force shells to disable job control in emscripten
-  errno = ENOTTY;
-  return -1;
-#endif
-  if (!(pgrp = (u8 *)Schlep(m, addr, 4))) return -1;
-  if ((rc = tcgetpgrp(fd)) == -1) return -1;
-  Write32(pgrp, rc);
-  return 0;
-}
-
-static int IoctlTiocspgrp(struct Machine *m, int fd, i64 addr) {
-  u8 *pgrp;
-  if (!(pgrp = (u8 *)Schlep(m, addr, 4))) return -1;
-  return tcsetpgrp(fd, Read32(pgrp));
-}
-
-static int IoctlSiocgifconf(struct Machine *m, int systemfd, i64 ifconf_addr) {
-  size_t i;
-  char *buf;
-  size_t len;
-  size_t bufsize;
-  char *buf_linux;
-  size_t len_linux;
-  struct ifreq *ifreq;
-  struct ifconf ifconf;
-  struct ifreq_linux ifreq_linux;
-  struct ifconf_linux ifconf_linux;
-  memset(&ifreq_linux, 0, sizeof(ifreq_linux));
-  if (CopyFromUserRead(m, &ifconf_linux, ifconf_addr, sizeof(ifconf_linux)) ==
-      -1) {
-    return -1;
-  }
-  bufsize = MIN(16384, Read64(ifconf_linux.len));
-  if (!(buf = (char *)malloc(bufsize))) return -1;
-  if (!(buf_linux = (char *)malloc(bufsize))) {
-    free(buf);
-    return -1;
-  }
-  ifconf.ifc_len = bufsize;
-  ifconf.ifc_buf = buf;
-  if (ioctl(systemfd, SIOCGIFCONF, &ifconf)) {
-    free(buf_linux);
-    free(buf);
-    return -1;
-  }
-  len_linux = 0;
-  ifreq = ifconf.ifc_req;
-  for (i = 0; i < ifconf.ifc_len;) {
-    if (len_linux + sizeof(ifreq_linux) > bufsize) break;
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
-    defined(__NetBSD__)
-    len = IFNAMSIZ + ifreq->ifr_addr.sa_len;
-#else
-    len = sizeof(*ifreq);
-#endif
-    if (ifreq->ifr_addr.sa_family == AF_INET) {
-      memset(ifreq_linux.name, 0, sizeof(ifreq_linux.name));
-      memcpy(ifreq_linux.name, ifreq->ifr_name,
-             MIN(sizeof(ifreq_linux.name) - 1, sizeof(ifreq->ifr_name)));
-      unassert(XlatSockaddrToLinux(
-                   (struct sockaddr_storage_linux *)&ifreq_linux.addr,
-                   (const struct sockaddr *)&ifreq->ifr_addr,
-                   sizeof(ifreq->ifr_addr)) ==
-               sizeof(struct sockaddr_in_linux));
-      memcpy(buf_linux + len_linux, &ifreq_linux, sizeof(ifreq_linux));
-      len_linux += sizeof(ifreq_linux);
-    }
-    ifreq = (struct ifreq *)((char *)ifreq + len);
-    i += len;
-  }
-  Write64(ifconf_linux.len, len_linux);
-  CopyToUserWrite(m, ifconf_addr, &ifconf_linux, sizeof(ifconf_linux));
-  CopyToUserWrite(m, Read64(ifconf_linux.buf), buf_linux, len_linux);
-  free(buf_linux);
-  free(buf);
-  return 0;
-}
-
-static int IoctlSiocgifaddr(struct Machine *m, int systemfd, i64 ifreq_addr,
-                            unsigned long kind) {
-  struct ifreq ifreq;
-  struct ifreq_linux ifreq_linux;
-  if (CopyFromUserRead(m, &ifreq_linux, ifreq_addr, sizeof(ifreq_linux)) ==
-      -1) {
-    return -1;
-  }
-  memset(ifreq.ifr_name, 0, sizeof(ifreq.ifr_name));
-  memcpy(ifreq.ifr_name, ifreq_linux.name,
-         MIN(sizeof(ifreq_linux.name) - 1, sizeof(ifreq.ifr_name)));
-  if (Read16(ifreq_linux.addr.family) != AF_INET_LINUX) return einval();
-  unassert(XlatSockaddrToHost((struct sockaddr_storage *)&ifreq.ifr_addr,
-                              (const struct sockaddr_linux *)&ifreq_linux.addr,
-                              sizeof(struct sockaddr_in_linux)) ==
-           sizeof(struct sockaddr_in));
-  if (ioctl(systemfd, kind, &ifreq)) return -1;
-  memset(ifreq_linux.name, 0, sizeof(ifreq_linux.name));
-  memcpy(ifreq_linux.name, ifreq.ifr_name,
-         MIN(sizeof(ifreq_linux.name) - 1, sizeof(ifreq.ifr_name)));
-  unassert(XlatSockaddrToLinux(
-               (struct sockaddr_storage_linux *)&ifreq_linux.addr,
-               (struct sockaddr *)&ifreq.ifr_addr,
-               sizeof(ifreq.ifr_addr)) == sizeof(struct sockaddr_in_linux));
-  CopyToUserWrite(m, ifreq_addr, &ifreq_linux, sizeof(ifreq_linux));
-  return 0;
-}
-
-static int IoctlFionbio(struct Machine *m, int fildes) {
-  int oflags;
-  if ((oflags = GetOflags(m, fildes)) == -1) return -1;
-  return fcntl(fildes, F_SETFL, (oflags & SETFL_FLAGS) | O_NDELAY);
-}
-
-static int IoctlFioclex(struct Machine *m, int fildes) {
-  return fcntl(fildes, F_SETFD, FD_CLOEXEC);
-}
-
-static int IoctlFionclex(struct Machine *m, int fildes) {
-  return fcntl(fildes, F_SETFD, 0);
-}
-
-static int IoctlTcsbrk(struct Machine *m, int fildes, int drain) {
-  int rc;
-  if (drain) {
-    INTERRUPTIBLE(rc = tcdrain(fildes));
-  } else {
-    rc = tcsendbreak(fildes, 0);
-  }
-  return rc;
-}
-
-static int IoctlTcxonc(struct Machine *m, int fildes, int arg) {
-  return tcflow(fildes, arg);
-}
-
-static int IoctlGetInt32(struct Machine *m, int fildes, unsigned long cmd,
-                         i64 addr) {
-  u8 buf[4];
-  int rc, hostint;
-  if (!IsValidMemory(m, addr, 4, PROT_WRITE)) return efault();
-  if ((rc = ioctl(fildes, cmd, &hostint)) != -1) {
-    Write32(buf, hostint);
-    CopyToUserWrite(m, addr, buf, 4);
-  }
-  return rc;
-}
-
-static int SysIoctl(struct Machine *m, int fildes, u64 request, i64 addr) {
-  struct Fd *fd;
-  int (*tcgetattr_impl)(int, struct termios *);
-  int (*tcsetattr_impl)(int, int, const struct termios *);
-  int (*tcgetwinsize_impl)(int, struct winsize *);
-  int (*tcsetwinsize_impl)(int, const struct winsize *);
-  LockFds(&m->system->fds);
-  if ((fd = GetFd(&m->system->fds, fildes))) {
-    unassert(fd->cb);
-    unassert(tcgetattr_impl = fd->cb->tcgetattr);
-    unassert(tcsetattr_impl = fd->cb->tcsetattr);
-    unassert(tcgetwinsize_impl = fd->cb->tcgetwinsize);
-    unassert(tcsetwinsize_impl = fd->cb->tcsetwinsize);
-  } else {
-    tcsetattr_impl = 0;
-    tcgetattr_impl = 0;
-    tcgetwinsize_impl = 0;
-    tcsetwinsize_impl = 0;
-  }
-  UnlockFds(&m->system->fds);
-  if (!fd) return -1;
-  switch (request) {
-    case TIOCGWINSZ_LINUX:
-      return IoctlTiocgwinsz(m, fildes, addr, tcgetwinsize_impl);
-    case TIOCSWINSZ_LINUX:
-      return IoctlTiocswinsz(m, fildes, addr, tcsetwinsize_impl);
-    case TCGETS_LINUX:
-      return IoctlTcgets(m, fildes, addr, tcgetattr_impl);
-    case TCSETS_LINUX:
-      return IoctlTcsets(m, fildes, TCSANOW, addr, tcsetattr_impl);
-    case TCSETSW_LINUX:
-      return IoctlTcsets(m, fildes, TCSADRAIN, addr, tcsetattr_impl);
-    case TCSETSF_LINUX:
-      return IoctlTcsets(m, fildes, TCSAFLUSH, addr, tcsetattr_impl);
-    case SIOCGIFCONF_LINUX:
-      return IoctlSiocgifconf(m, fildes, addr);
-    case SIOCGIFADDR_LINUX:
-      return IoctlSiocgifaddr(m, fildes, addr, SIOCGIFADDR);
-    case SIOCGIFNETMASK_LINUX:
-      return IoctlSiocgifaddr(m, fildes, addr, SIOCGIFNETMASK);
-    case SIOCGIFBRDADDR_LINUX:
-      return IoctlSiocgifaddr(m, fildes, addr, SIOCGIFBRDADDR);
-    case SIOCGIFDSTADDR_LINUX:
-      return IoctlSiocgifaddr(m, fildes, addr, SIOCGIFDSTADDR);
-    case TIOCGPGRP_LINUX:
-      return IoctlTiocgpgrp(m, fildes, addr);
-    case TIOCSPGRP_LINUX:
-      return IoctlTiocspgrp(m, fildes, addr);
-    case FIONBIO_LINUX:
-      return IoctlFionbio(m, fildes);
-    case FIOCLEX_LINUX:
-      return IoctlFioclex(m, fildes);
-    case FIONCLEX_LINUX:
-      return IoctlFionclex(m, fildes);
-    case TCSBRK_LINUX:
-      return IoctlTcsbrk(m, fildes, addr);
-    case TCXONC_LINUX:
-      return IoctlTcxonc(m, fildes, addr);
-#ifdef FIONREAD
-    case FIONREAD_LINUX:
-      return IoctlGetInt32(m, fildes, FIONREAD, addr);
-#endif
-#ifdef TIOCOUTQ
-    case TIOCOUTQ_LINUX:
-      return IoctlGetInt32(m, fildes, TIOCOUTQ, addr);
-#endif
-    default:
-      LOGF("missing ioctl %#" PRIx64, request);
-      return einval();
-  }
 }
 
 static i64 SysLseek(struct Machine *m, i32 fildes, i64 offset, int whence) {
@@ -2338,15 +2349,15 @@ static int SysFcntlSetownEx(struct Machine *m, i32 fildes, i64 addr) {
   switch (Read32(gowner->type)) {
     case F_OWNER_TID_LINUX:
       howner.type = F_OWNER_TID;
-      howner.pid = Read32(gowner->pid);
+      howner.pid = (i32)Read32(gowner->pid);
       break;
     case F_OWNER_PID_LINUX:
       howner.type = F_OWNER_PID;
-      howner.pid = Read32(gowner->pid);
+      howner.pid = (i32)Read32(gowner->pid);
       break;
     case F_OWNER_PGRP_LINUX:
       howner.type = F_OWNER_PGRP;
-      howner.pid = Read32(gowner->pid);
+      howner.pid = (i32)Read32(gowner->pid);
       break;
     default:
       LOGF("unknown f_owner_ex::type %" PRId32, Read32(gowner->type));
@@ -2357,14 +2368,14 @@ static int SysFcntlSetownEx(struct Machine *m, i32 fildes, i64 addr) {
   pid_t pid;
   switch (Read32(gowner->type)) {
     case F_OWNER_PID_LINUX:
-      pid = Read32(gowner->pid);
+      pid = (i32)Read32(gowner->pid);
       break;
     case F_OWNER_PGRP_LINUX:
-      pid = -Read32(gowner->pid);
+      pid = (i32)-Read32(gowner->pid);
       break;
     case F_OWNER_TID_LINUX:
       // POSIX doesn't specify fcntl() as applying per-thread
-      if (!(pid = Read32(gowner->pid)) || pid == m->system->pid) {
+      if (!(pid = (i32)Read32(gowner->pid)) || pid == m->system->pid) {
         break;
       }
       // fallthrough
@@ -2621,6 +2632,7 @@ static int SysWait4(struct Machine *m, int pid, i64 opt_out_wstatus_addr,
     return efault();
   }
 #ifndef __EMSCRIPTEN__
+  wstatus = 0;
   INTERRUPTIBLE(rc = wait4(pid, &wstatus, options, &hrusage));
 #else
   memset(&hrusage, 0, sizeof(hrusage));
@@ -2630,7 +2642,14 @@ static int SysWait4(struct Machine *m, int pid, i64 opt_out_wstatus_addr,
     if (opt_out_wstatus_addr) {
       if (WIFEXITED(wstatus)) {
         gwstatus = (WEXITSTATUS(wstatus) & 255) << 8;
+      } else if (WIFSTOPPED(wstatus)) {
+        gwstatus = UnXlatSignal(WSTOPSIG(wstatus)) << 8 | 127;
+#ifdef WIFCONTINUED
+      } else if (WIFCONTINUED(wstatus)) {
+        gwstatus = 0xffff;
+#endif
       } else {
+        if (!WIFSIGNALED(wstatus)) LOGF("unsupported wstatus %#x", wstatus);
         unassert(WIFSIGNALED(wstatus));
         gwstatus = UnXlatSignal(WTERMSIG(wstatus)) & 127;
 #ifdef WCOREDUMP
@@ -3594,6 +3613,12 @@ static int SysSigprocmask(struct Machine *m, int how, i64 setaddr,
   return 0;
 }
 
+static int SysSigpending(struct Machine *m, i64 setaddr) {
+  u8 word[8];
+  Write64(word, m->signals);
+  return CopyToUserWrite(m, setaddr, word, 8);
+}
+
 static int SysKill(struct Machine *m, int pid, int sig) {
   return kill(pid, sig ? XlatSignal(sig) : 0);
 }
@@ -3689,6 +3714,52 @@ static int SysGeteuid(struct Machine *m) {
 
 static int SysGetegid(struct Machine *m) {
   return getegid();
+}
+
+static i32 SysGetgroups(struct Machine *m, i32 size, i64 addr) {
+  gid_t *group;
+  u8 i32buf[4];
+  int i, ngroups;
+  long ngroups_max;
+  if (!size) {
+    return getgroups(0, 0);
+  } else {
+    // POSIX.1 recommends adding 1 to ngroups_max but the Linux manual
+    // says this can result in EINVAL. Apple M1 says NGROUPS_MAX is 16
+    // even though it usually returns 18 groups or more...
+#ifdef __APPLE__
+    ngroups_max = size;
+#else
+    ngroups_max = sysconf(_SC_NGROUPS_MAX);
+#endif
+    size = MIN(size, ngroups_max);
+    if (!IsValidMemory(m, addr, (size_t)size * 4, PROT_WRITE)) return efault();
+    if (!(group = (gid_t *)malloc(size * sizeof(gid_t)))) return -1;
+    if ((ngroups = getgroups(size, group)) != -1) {
+      for (i = 0; i < ngroups; ++i) {
+        Write32(i32buf, group[i]);
+        CopyToUserWrite(m, addr + (size_t)i * 4, i32buf, 4);
+      }
+    }
+    free(group);
+    return ngroups;
+  }
+}
+
+static i32 SysSetgroups(struct Machine *m, i32 size, i64 addr) {
+  int i, rc;
+  gid_t *group;
+  const u8 *group_linux;
+  if (!(group_linux = (const u8 *)Schlep(m, addr, (size_t)size * 4)) ||
+      !(group = (gid_t *)malloc(size * sizeof(gid_t)))) {
+    return -1;
+  }
+  for (i = 0; i < size; ++i) {
+    group[i] = Read32(group_linux + (size_t)i * 4);
+  }
+  rc = setgroups(size, group);
+  free(group);
+  return rc;
 }
 
 static int SysSchedYield(struct Machine *m) {
@@ -3798,7 +3869,7 @@ void OpSyscall(P) {
     SYSCALL(0x000, SysRead, (m, di, si, dx));
     SYSCALL(0x001, SysWrite, (m, di, si, dx));
     SYSCALL(0x002, SysOpen, (m, di, si, dx));
-    SYSCALL(0x003, SysClose, (m->system, di));
+    SYSCALL(0x003, SysClose, (m, di));
     SYSCALL(0x004, SysStat, (m, di, si));
     SYSCALL(0x005, SysFstat, (m, di, si));
     SYSCALL(0x006, SysLstat, (m, di, si));
@@ -3839,6 +3910,8 @@ void OpSyscall(P) {
     SYSCALL(0x02B, SysAccept, (m, di, si, dx));
     SYSCALL(0x02C, SysSendto, (m, di, si, dx, r0, r8, r9));
     SYSCALL(0x02D, SysRecvfrom, (m, di, si, dx, r0, r8, r9));
+    SYSCALL(0x02E, SysSendmsg, (m, di, si, dx));
+    SYSCALL(0x02F, SysRecvmsg, (m, di, si, dx));
     SYSCALL(0x030, SysShutdown, (m, di, si));
     SYSCALL(0x031, SysBind, (m, di, si, dx));
     SYSCALL(0x032, SysListen, (m, di, si));
@@ -3885,8 +3958,11 @@ void OpSyscall(P) {
     SYSCALL(0x064, SysTimes, (m, di));
     SYSCALL(0x06F, SysGetpgrp, (m));
     SYSCALL(0x070, SysSetsid, (m));
-    SYSCALL(0x07C, SysGetsid, (m, di));
+    SYSCALL(0x073, SysGetgroups, (m, di, si));
+    SYSCALL(0x074, SysSetgroups, (m, di, si));
     SYSCALL(0x079, SysGetpgid, (m, di));
+    SYSCALL(0x07C, SysGetsid, (m, di));
+    SYSCALL(0x07F, SysSigpending, (m, di));
     SYSCALL(0x089, SysStatfs, (m, di, si));
     SYSCALL(0x08A, SysFstatfs, (m, di, si));
     SYSCALL(0x06D, SysSetpgid, (m, di, si));
@@ -3941,9 +4017,13 @@ void OpSyscall(P) {
     SYSCALL(0x120, SysAccept4, (m, di, si, dx, r0));
     SYSCALL(0x111, SysSetRobustList, (m, di, si));
     SYSCALL(0x112, SysGetRobustList, (m, di, si, dx));
+    SYSCALL(0x127, SysPreadv, (m, di, si, dx, r0));
+    SYSCALL(0x128, SysPwritev, (m, di, si, dx, r0));
     SYSCALL(0x12E, SysPrlimit, (m, di, si, dx, r0));
     SYSCALL(0x13E, SysGetrandom, (m, di, si, dx));
-    SYSCALL(0x1B4, SysCloseRange, (m->system, di, si, dx));
+    SYSCALL(0x147, SysPreadv2, (m, di, si, dx, r0, r8));
+    SYSCALL(0x148, SysPwritev2, (m, di, si, dx, r0, r8));
+    SYSCALL(0x1B4, SysCloseRange, (m, di, si, dx));
     case 0x3C:
       SysExit(m, di);
     case 0xE7:

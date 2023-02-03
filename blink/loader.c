@@ -37,6 +37,7 @@
 #include "blink/macros.h"
 #include "blink/map.h"
 #include "blink/util.h"
+#include "blink/x86.h"
 
 #define READ64(p) Read64((const u8 *)(p))
 #define READ32(p) Read32((const u8 *)(p))
@@ -87,11 +88,11 @@ static i64 LoadElfLoadSegment(struct Machine *m, void *image, size_t imagesize,
     exit(127);
   }
   if (skew != (offset & (pagesize - 1))) {
-    LOGF("p_vaddr p_offset skew unequal w.r.t. page size; try either "
-         "(1) rebuilding your program using the linker flags: -static "
-         "-Wl,-z,common-page-size=%ld,-z,max-page-size=%ld or (2) "
-         "using `blink -m` to disable the linear memory optimization",
-         pagesize, pagesize);
+    WriteErrorString(
+        "p_vaddr p_offset skew unequal w.r.t. page size; try either "
+        "(1) rebuilding your program using the linker flags: -static "
+        "-Wl,-z,common-page-size=65536,-z,max-page-size=65536 or (2) "
+        "using `blink -m` to disable the linear memory optimization\n");
     exit(127);
   }
 

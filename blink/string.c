@@ -22,15 +22,16 @@
 
 #include "blink/alu.h"
 #include "blink/builtin.h"
+#include "blink/bus.h"
 #include "blink/endian.h"
 #include "blink/flags.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
-#include "blink/modrm.h"
-#include "blink/mop.h"
+#include "blink/rde.h"
 #include "blink/string.h"
 #include "blink/tsan.h"
 #include "blink/util.h"
+#include "blink/x86.h"
 
 static u64 ReadInt(u8 p[8], unsigned long w) {
   switch (w) {

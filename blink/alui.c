@@ -18,10 +18,11 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include "blink/alu.h"
 #include "blink/builtin.h"
+#include "blink/bus.h"
 #include "blink/flags.h"
 #include "blink/machine.h"
 #include "blink/modrm.h"
-#include "blink/mop.h"
+#include "blink/rde.h"
 #include "blink/stats.h"
 
 static void AluiRo(P, const aluop_f ops[4], const aluop_f fast[4]) {

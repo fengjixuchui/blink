@@ -27,9 +27,11 @@
 #include "blink/assert.h"
 #include "blink/bitscan.h"
 #include "blink/builtin.h"
+#include "blink/bus.h"
 #include "blink/case.h"
 #include "blink/debug.h"
 #include "blink/endian.h"
+#include "blink/flag.h"
 #include "blink/flags.h"
 #include "blink/fpu.h"
 #include "blink/jit.h"
@@ -38,8 +40,6 @@
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
-#include "blink/modrm.h"
-#include "blink/mop.h"
 #include "blink/random.h"
 #include "blink/signal.h"
 #include "blink/sse.h"
@@ -49,8 +49,8 @@
 #include "blink/syscall.h"
 #include "blink/time.h"
 #include "blink/util.h"
+#include "blink/x86.h"
 
-bool FLAG_noconnect;
 _Thread_local struct Machine *g_machine;
 
 static void OpHintNopEv(P) {

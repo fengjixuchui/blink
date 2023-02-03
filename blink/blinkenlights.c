@@ -40,6 +40,7 @@
 #include "blink/bitscan.h"
 #include "blink/breakpoint.h"
 #include "blink/builtin.h"
+#include "blink/bus.h"
 #include "blink/case.h"
 #include "blink/cga.h"
 #include "blink/debug.h"
@@ -47,6 +48,7 @@
 #include "blink/endian.h"
 #include "blink/errno.h"
 #include "blink/fds.h"
+#include "blink/flag.h"
 #include "blink/flags.h"
 #include "blink/fpu.h"
 #include "blink/high.h"
@@ -57,11 +59,10 @@
 #include "blink/macros.h"
 #include "blink/map.h"
 #include "blink/mda.h"
-#include "blink/modrm.h"
-#include "blink/mop.h"
 #include "blink/panel.h"
 #include "blink/pml4t.h"
 #include "blink/pty.h"
+#include "blink/rde.h"
 #include "blink/signal.h"
 #include "blink/sigwinch.h"
 #include "blink/stats.h"
@@ -3632,7 +3633,6 @@ static void GetOpts(int argc, char *argv[]) {
   int opt;
   bool wantjit = false;
   bool wantunsafe = false;
-  const char *logpath = 0;
   while ((opt = GetOpt(argc, argv, "hjmCvtrzRNsb:Hw:L:")) != -1) {
     switch (opt) {
       case 'j':
@@ -3681,7 +3681,7 @@ static void GetOpts(int argc, char *argv[]) {
         ++verbose;
         break;
       case 'L':
-        logpath = optarg_;
+        FLAG_logpath = optarg_;
         break;
       case 'z':
         ++codeview.zoom;
@@ -3695,7 +3695,7 @@ static void GetOpts(int argc, char *argv[]) {
         PrintUsage(48, stderr);
     }
   }
-  LogInit(logpath);
+  LogInit(FLAG_logpath);
   if (!wantjit) {
     DisableJit(&m->system->jit);
   }
@@ -3805,6 +3805,7 @@ int main(int argc, char *argv[]) {
   react = true;
   tuimode = true;
   WriteErrorInit();
+  InitBus();
   AddPath_StartOp_Hook = AddPath_StartOp_Tui;
   unassert((pty = NewPty()));
   unassert((s = NewSystem(XED_MODE_REAL)));
