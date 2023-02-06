@@ -14,7 +14,7 @@
 #define kJitJumpTries    16
 #define kJitMemorySize   32505856
 #define kJitMemoryAlign  65536
-#define kJitAveragePath  300
+#define kJitAveragePath  200
 #define kJitMinBlockSize 262144
 
 #ifdef __x86_64__
@@ -155,6 +155,7 @@ int ShutdownJit(void);
 int InitJit(struct Jit *);
 int DestroyJit(struct Jit *);
 int DisableJit(struct Jit *);
+int FixJitProtection(struct Jit *);
 bool CanJitForImmediateEffect(void) nosideeffect;
 bool AppendJit(struct JitBlock *, const void *, long);
 int AbandonJit(struct Jit *, struct JitBlock *);

@@ -30,7 +30,9 @@
 #include "blink/debug.h"
 #include "blink/errno.h"
 #include "blink/fds.h"
+#include "blink/lock.h"
 #include "blink/log.h"
+#include "blink/overlays.h"
 #include "blink/random.h"
 #include "blink/syscall.h"
 #include "blink/xlat.h"
@@ -66,8 +68,8 @@ static int SysTmpfile(struct Machine *m, i32 dirfildes, i64 pathaddr,
   }
   unassert(!sigfillset(&ss));
   unassert(!pthread_sigmask(SIG_BLOCK, &ss, &oldss));
-  if ((tmpdir = openat(GetDirFildes(dirfildes), LoadStr(m, pathaddr),
-                       O_RDONLY | O_DIRECTORY | O_CLOEXEC)) != -1) {
+  if ((tmpdir = OverlaysOpen(GetDirFildes(dirfildes), LoadStr(m, pathaddr),
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0)) != -1) {
     if (GetRandom(&rng, 8) != 8) {
       LOGF("GetRandom() for O_TMPFILE failed");
       abort();
@@ -84,9 +86,9 @@ static int SysTmpfile(struct Machine *m, i32 dirfildes, i64 pathaddr,
       if (oflags & O_CLOEXEC_LINUX) {
         unassert(!fcntl(fildes, F_SETFD, FD_CLOEXEC));
       }
-      LockFds(&m->system->fds);
+      LOCK(&m->system->fds.lock);
       unassert(AddFd(&m->system->fds, fildes, oflags));
-      UnlockFds(&m->system->fds);
+      UNLOCK(&m->system->fds.lock);
     } else {
       unassert(!close(tmpdir));
     }
@@ -109,14 +111,13 @@ int SysOpenat(struct Machine *m, i32 dirfildes, i64 pathaddr, i32 oflags,
 #endif
   if ((sysflags = XlatOpenFlags(oflags)) == -1) return -1;
   if (!(path = LoadStr(m, pathaddr))) return efault();
-  SYS_LOGF("Openat(%s)", path);
-  INTERRUPTIBLE(fildes = openat(GetDirFildes(dirfildes), path, sysflags, mode));
+  INTERRUPTIBLE(
+      fildes = OverlaysOpen(GetDirFildes(dirfildes), path, sysflags, mode));
   if (fildes != -1) {
-    LockFds(&m->system->fds);
+    LOCK(&m->system->fds.lock);
     unassert(AddFd(&m->system->fds, fildes, sysflags));
-    UnlockFds(&m->system->fds);
+    UNLOCK(&m->system->fds.lock);
   } else {
-    SYS_LOGF("%s(%s) failed: %s", "openat", path, strerror(errno));
 #ifdef __FreeBSD__
     // Address FreeBSD divergence from IEEE Std 1003.1-2008 (POSIX.1)
     // in the case when O_NOFOLLOW is used, but fails due to symlink.

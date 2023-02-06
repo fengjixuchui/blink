@@ -36,6 +36,7 @@
 #include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/map.h"
+#include "blink/overlays.h"
 #include "blink/util.h"
 #include "blink/x86.h"
 
@@ -61,6 +62,7 @@ static i64 LoadElfLoadSegment(struct Machine *m, void *image, size_t imagesize,
             (flags & PF_X_ ? 0 : PAGE_XD);
 
   ELF_LOGF("PROGRAM HEADER");
+  ELF_LOGF("  aslr = %" PRIx64, aslr);
   ELF_LOGF("  vaddr = %" PRIx64, vaddr);
   ELF_LOGF("  memsz = %" PRIx64, memsz);
   ELF_LOGF("  offset = %" PRIx64, offset);
@@ -189,8 +191,9 @@ bool IsSupportedExecutable(const char *path, void *image) {
   Elf64_Ehdr_ *ehdr;
   if (READ32(image) == READ32("\177ELF")) {
     ehdr = (Elf64_Ehdr_ *)image;
-    return (Read16(ehdr->type) == ET_EXEC_ ||  //
-            Read16(ehdr->type) == ET_DYN_) &&
+    return (Read16(ehdr->type) == ET_EXEC_ ||
+            (Read16(ehdr->type) == ET_DYN_ &&
+             ehdr->ident[EI_OSABI_] != ELFOSABI_FREEBSD_)) &&
            ehdr->ident[EI_CLASS_] == ELFCLASS64_ &&
            Read16(ehdr->machine) == EM_NEXGEN32E_;
   }
@@ -256,9 +259,8 @@ static bool LoadElf(struct Machine *m, struct Elf *elf, u64 aslr, int fd) {
     Elf64_Ehdr_ *ehdr;
     end = INT64_MIN;
     ELF_LOGF("loading elf interpreter %s", interpreter);
-    aslr = Read16(elf->ehdr->type) == ET_DYN_ ? 0x200000 : 0;
     errno = 0;
-    if ((fd = open(interpreter, O_RDONLY)) == -1 ||
+    if ((fd = OverlaysOpen(AT_FDCWD, interpreter, O_RDONLY, 0)) == -1 ||
         (fstat(fd, &st) == -1 || !st.st_size) ||
         (ehdr = (Elf64_Ehdr_ *)Mmap(0, st.st_size, PROT_READ | PROT_WRITE,
                                     MAP_PRIVATE, fd, 0, "loader")) ==
@@ -271,6 +273,7 @@ static bool LoadElf(struct Machine *m, struct Elf *elf, u64 aslr, int fd) {
       WriteErrorString(")\n");
       exit(127);
     }
+    aslr = Read16(ehdr->type) == ET_DYN_ ? kDynInterpAddr : 0;
     elf->at_base = m->ip = Read64(ehdr->entry) + aslr;
     for (i = 0; i < Read16(ehdr->phnum); ++i) {
       phdr = GetElfSegmentHeaderAddress(ehdr, st.st_size, i);
@@ -372,7 +375,7 @@ void LoadProgram(struct Machine *m, char *prog, char **args, char **vars) {
   elf->at_phent = 56;
   free(g_progname);
   g_progname = strdup(prog);
-  if ((fd = open(prog, O_RDONLY)) == -1 ||
+  if ((fd = OverlaysOpen(AT_FDCWD, prog, O_RDONLY, 0)) == -1 ||
       (fstat(fd, &st) == -1 || !st.st_size) ||
       (elf->map =
            (char *)Mmap(0, (elf->mapsize = st.st_size), PROT_READ | PROT_WRITE,
@@ -405,7 +408,7 @@ error: unsupported executable; we need:\n\
       elf->ehdr = (Elf64_Ehdr_ *)elf->map;
       elf->size = elf->mapsize;
       execstack = LoadElf(
-          m, elf, Read16(elf->ehdr->type) == ET_DYN_ ? 0x400000 : 0, fd);
+          m, elf, Read16(elf->ehdr->type) == ET_DYN_ ? kDynExecAddr : 0, fd);
     } else if (READ64(elf->map) == READ64("MZqFpD='") ||
                READ64(elf->map) == READ64("jartsr='")) {
       if (GetElfHeader(ehdr, prog, elf->map) == -1) exit(127);

@@ -27,6 +27,7 @@
 #include "blink/assert.h"
 #include "blink/bitscan.h"
 #include "blink/builtin.h"
+#include "blink/debug.h"
 #include "blink/dll.h"
 #include "blink/end.h"
 #include "blink/endian.h"
@@ -385,6 +386,22 @@ int DisableJit(struct Jit *jit) {
   return 0;
 }
 
+/**
+ * Fixes the memory protection for existing Just-In-Time code blocks.
+ */
+int FixJitProtection(struct Jit *jit) {
+  struct Dll *e;
+  LOCK(&jit->lock);
+  int prot;
+  prot = atomic_load_explicit(&g_jit.prot, memory_order_relaxed);
+  for (e = dll_first(jit->blocks); e; e = dll_next(jit->blocks, e)) {
+    unassert(!Mprotect(JITBLOCK_CONTAINER(e)->addr, jit->blocksize, prot,
+                       "jit"));
+  }
+  UNLOCK(&jit->lock);
+  return 0;
+}
+
 bool SetJitHook(struct Jit *jit, u64 virt, intptr_t func) {
   int offset;
   unsigned i;
@@ -405,7 +422,8 @@ bool SetJitHook(struct Jit *jit, u64 virt, intptr_t func) {
   i = atomic_load_explicit(&jit->hooks.i, memory_order_relaxed);
   do {
     if (i == jit->hooks.n / 2) {
-      LOGF("ran out of jit hooks");
+      LOG_ONCE(LOGF("ran out of jit hooks"));
+      DisableJit(jit);
       return false;
     }
   } while (!atomic_compare_exchange_weak_explicit(
@@ -461,12 +479,12 @@ int ClearJitHooks(struct Jit *jit) {
 
 static bool CheckMmapResult(void *want, void *got) {
   if (got == MAP_FAILED) {
-    LOGF("failed to mmap() jit block: %s", strerror(errno));
+    LOGF("failed to mmap() jit block: %s", DescribeHostErrno(errno));
     return false;
   }
   if (got != want) {
     LOGF("jit block mmap(%p) returned unexpected address %p: %s", want, got,
-         strerror(errno));
+         DescribeHostErrno(errno));
     return false;
   }
   return true;
@@ -477,7 +495,7 @@ static bool PrepareJitMemory(void *addr, size_t size) {
   // Apple M1 only permits RWX memory if we use MAP_JIT, which Apple has
   // chosen to make incompatible with MAP_FIXED.
   if (Munmap(addr, size)) {
-    LOGF("failed to munmap() jit block: %s", strerror(errno));
+    LOGF("failed to munmap() jit block: %s", DescribeHostErrno(errno));
     return false;
   }
   return CheckMmapResult(
@@ -490,7 +508,7 @@ static bool PrepareJitMemory(void *addr, size_t size) {
     return true;
   }
   if (~prot & PROT_EXEC) {
-    LOGF("failed to mprotect() jit block: %s", strerror(errno));
+    LOGF("failed to mprotect() jit block: %s", DescribeHostErrno(errno));
     return false;
   }
   // OpenBSD imposes a R^X invariant and raises ENOTSUP if RWX
@@ -1111,6 +1129,7 @@ STUB(int, InitJit, (struct Jit *jit), 0)
 STUB(int, DestroyJit, (struct Jit *jit), 0)
 STUB(int, ShutdownJit, (void), 0)
 STUB(int, DisableJit, (struct Jit *jit), 0)
+STUB(int, FixJitProtection, (struct Jit *jit), 0)
 STUB(bool, AppendJit, (struct JitBlock *jb, const void *data, long size), 0)
 STUB(bool, AppendJitMovReg, (struct JitBlock *jb, int dst, int src), 0)
 STUB(int, AbandonJit, (struct Jit *jit, struct JitBlock *jb), 0)

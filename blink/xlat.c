@@ -37,6 +37,7 @@
 
 #include "blink/builtin.h"
 #include "blink/case.h"
+#include "blink/debug.h"
 #include "blink/endian.h"
 #include "blink/errno.h"
 #include "blink/linux.h"
@@ -488,9 +489,20 @@ int XlatLock(int x) {
 
 int XlatWait(int x) {
   int r = 0;
-  if (x & 1) r |= WNOHANG, x &= ~1;
-  if (x & 2) r |= WUNTRACED, x &= ~2;
-  if (x & 8) r |= WCONTINUED, x &= ~8;
+  if (x & WNOHANG_LINUX) {
+    r |= WNOHANG;
+    x &= ~WNOHANG_LINUX;
+  }
+  if (x & WUNTRACED_LINUX) {
+    r |= WUNTRACED;
+    x &= ~WUNTRACED_LINUX;
+  }
+#ifdef WCONTINUED
+  if (x & WCONTINUED_LINUX) {
+    r |= WCONTINUED;
+    x &= ~WCONTINUED_LINUX;
+  }
+#endif
   if (x) LOGF("%s %d not supported yet", "wait", x);
   return r;
 }
@@ -1647,7 +1659,7 @@ void XlatTermiosToLinux(struct termios_linux *dst, const struct termios *src) {
       speed = B38400;
     }
   } else {
-    LOGF("failed to get baud rate: %s", strerror(errno));
+    LOGF("failed to get baud rate: %s", DescribeHostErrno(errno));
     speed = B38400;
   }
   Write32(dst->cflag, (Read32(dst->cflag) & ~CBAUD_LINUX) | speed);

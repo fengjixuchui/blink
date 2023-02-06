@@ -40,8 +40,10 @@ check2:	o/$(MODE)/test/sse		\
 	o/$(MODE)/test/sys		\
 	o/$(MODE)/test/func		\
 	o/$(MODE)/test/asm		\
+	o/$(MODE)/third_party/ltp	\
 	o/$(MODE)/test/asm/emulates	\
-	o/$(MODE)/test/func/emulates
+	o/$(MODE)/test/func/emulates	\
+	o/$(MODE)/third_party/ltp/medium
 
 emulates:				\
 	o/$(MODE)/test/asm		\
@@ -50,9 +52,6 @@ emulates:				\
 	o/$(MODE)/third_party/cosmo/emulates
 
 tags: TAGS HTAGS
-
-clean:
-	rm -rf o
 
 include build/config.mk
 include build/rules.mk
@@ -65,6 +64,8 @@ include test/flat/flat.mk
 include test/metal/metal.mk
 include test/blink/test.mk
 include third_party/gcc/gcc.mk
+include third_party/ltp/ltp.mk
+include third_party/musl/musl.mk
 include third_party/qemu/qemu.mk
 include third_party/cosmo/cosmo.mk
 
@@ -156,6 +157,9 @@ TAGS:	o/$(MODE)/srcs.txt $(SRCS)
 HTAGS:	o/$(MODE)/hdrs.txt $(HDRS)
 	$(RM) $@
 	build/htags -L $< -o $@
+
+clean:
+	rm -f $(OBJS)
 
 $(SRCS):
 $(HDRS):

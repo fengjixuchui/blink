@@ -59,6 +59,7 @@
 #include "blink/macros.h"
 #include "blink/map.h"
 #include "blink/mda.h"
+#include "blink/overlays.h"
 #include "blink/panel.h"
 #include "blink/pml4t.h"
 #include "blink/pty.h"
@@ -79,7 +80,7 @@
 #include "blink/xmmtype.h"
 
 #define USAGE \
-  " [-?HhrRstv] [ROM] [ARGS...]\n\
+  " [-?HhrRsStv] [ROM] [ARGS...]\n\
 \n\
 DESCRIPTION\n\
 \n\
@@ -129,8 +130,8 @@ x       hex                       -v       increase verbosity\n\
 ?       help                      -j       enables jit\n\
 t       sse type                  -m       disables memory safety\n\
 w       sse width                 -N       natural scroll wheel\n\
-B       pop breakpoint            -?       help\n\
-p       profiling mode\n\
+B       pop breakpoint            -S       system call logging\n\
+p       profiling mode            -?       help\n\
 ctrl-t  turbo\n\
 alt-t   slowmo"
 
@@ -1896,9 +1897,9 @@ static void DrawStatus(struct Panel *p) {
   rw += AppendStat(s, 12, "ips", ips, false);
   toto = kRealSize + (long)m->system->memstat.allocated * 4096;
   rw += AppendStat(s, 10, "kb", toto / 1024, false);
-  if (m->nolinear) rw += AppendStat(s, 8, "reserve", MEMSTAT(reserved));
-  if (m->nolinear) rw += AppendStat(s, 8, "commit", MEMSTAT(committed));
-  if (m->nolinear) rw += AppendStat(s, 5, "freed", MEMSTAT(freed));
+  if (FLAG_nolinear) rw += AppendStat(s, 8, "reserve", MEMSTAT(reserved));
+  if (FLAG_nolinear) rw += AppendStat(s, 8, "commit", MEMSTAT(committed));
+  if (FLAG_nolinear) rw += AppendStat(s, 5, "freed", MEMSTAT(freed));
   rw += AppendStat(s, 5, "tables", MEMSTAT(pagetables));
   rw += AppendStat(s, 3, "fds", fds, fds != lastfds);
   status = GetStatus(xn - rw);
@@ -3292,7 +3293,7 @@ static void ReadKeyboard(void) {
       LOGF("ReadKeyboard interrupted");
       return;
     }
-    fprintf(stderr, "ReadKeyboard failed: %s\n", strerror(errno));
+    fprintf(stderr, "ReadKeyboard failed: %s\n", DescribeHostErrno(errno));
     exit(1);
   }
   HandleKeyboard(buf);
@@ -3633,13 +3634,16 @@ static void GetOpts(int argc, char *argv[]) {
   int opt;
   bool wantjit = false;
   bool wantunsafe = false;
-  while ((opt = GetOpt(argc, argv, "hjmCvtrzRNsb:Hw:L:")) != -1) {
+  while ((opt = GetOpt(argc, argv, "hjmCvtrzRNsSb:Hw:L:")) != -1) {
     switch (opt) {
       case 'j':
         wantjit = true;
         break;
       case 't':
         tuimode = false;
+        break;
+      case 'S':
+        FLAG_strace = true;
         break;
       case 'C':
         FLAG_noconnect = true;
@@ -3699,8 +3703,7 @@ static void GetOpts(int argc, char *argv[]) {
   if (!wantjit) {
     DisableJit(&m->system->jit);
   }
-  m->nolinear = !wantunsafe;
-  m->system->nolinear = !wantunsafe;
+  FLAG_nolinear = !wantunsafe;
 }
 
 static int OpenDevTty(void) {
@@ -3818,6 +3821,7 @@ int main(int argc, char *argv[]) {
   SetXmmSize(2);
   SetXmmDisp(kXmmHex);
   GetOpts(argc, argv);
+  SetOverlays(getenv("BLINK_OVERLAYS"));
   sigfillset(&sa.sa_mask);
   sa.sa_flags = 0;
   sa.sa_handler = OnSigSys;

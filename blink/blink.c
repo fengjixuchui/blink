@@ -16,6 +16,7 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +37,7 @@
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
+#include "blink/overlays.h"
 #include "blink/signal.h"
 #include "blink/sigwinch.h"
 #include "blink/stats.h"
@@ -45,21 +47,23 @@
 #include "blink/x86.h"
 #include "blink/xlat.h"
 
-#define OPTS "hjms0L:"
+#define OPTS "hjemsS0L:"
 #define USAGE \
   " [-" OPTS "] PROG [ARGS...]\n\
   -h                   help\n\
   -j                   disable jit\n\
+  -e                   also log to stderr\n\
   -0                   to specify argv[0]\n\
   -m                   enable memory safety\n\
   -s                   print statistics on exit\n\
+  -S                   enable system call logging\n\
   -L PATH              log filename (default ${TMPDIR:-/tmp}/blink.log)\n\
+  $BLINK_OVERLAYS      file system roots [default \":o\"\n\
   $BLINK_LOG_FILENAME  log filename (same as -L flag)\n"
 
 extern char **environ;
 static bool FLAG_zero;
 static bool FLAG_nojit;
-static bool FLAG_nolinear;
 static char g_pathbuf[PATH_MAX];
 
 static void OnSigSys(int sig) {
@@ -105,13 +109,12 @@ static void OnSigSegv(int sig, siginfo_t *si, void *ptr) {
 
 static int Exec(char *prog, char **argv, char **envp) {
   int i;
+  sigset_t oldmask;
   struct Machine *old;
   if ((old = g_machine)) KillOtherThreads(old->system);
   unassert((g_machine = NewMachine(NewSystem(XED_MODE_LONG), 0)));
   if (FLAG_nojit) DisableJit(&g_machine->system->jit);
   g_machine->system->exec = Exec;
-  g_machine->nolinear = FLAG_nolinear;
-  g_machine->system->nolinear = FLAG_nolinear;
   if (!old) {
     // this is the first time a program is being loaded
     LoadProgram(g_machine, prog, argv, envp);
@@ -131,9 +134,12 @@ static int Exec(char *prog, char **argv, char **envp) {
     old->system->fds.list = 0;
     UNLOCK(&old->system->fds.lock);
     // releasing the execve() lock must come after unlocking fds
+    memcpy(&oldmask, &old->system->exec_sigmask, sizeof(oldmask));
     UNLOCK(&old->system->exec_lock);
     // freeing the last machine in a system will free its system too
     FreeMachine(old);
+    // restore the signal mask we had before execve() was called
+    pthread_sigmask(SIG_SETMASK, &oldmask, 0);
   }
   // meta interpreter loop
   for (;;) {
@@ -161,10 +167,8 @@ _Noreturn static void PrintUsage(int argc, char *argv[], int rc, int fd) {
 static void GetOpts(int argc, char *argv[]) {
   int opt;
   FLAG_nolinear = !CanHaveLinearMemory();
+#if LOG_ENABLED
   FLAG_logpath = getenv("BLINK_LOG_FILENAME");
-#ifdef __CYGWIN__
-  FLAG_nojit = true;
-  FLAG_nolinear = true;
 #endif
 #ifdef __COSMOPOLITAN__
   if (IsWindows()) {
@@ -180,11 +184,17 @@ static void GetOpts(int argc, char *argv[]) {
       case 'j':
         FLAG_nojit = true;
         break;
+      case 'S':
+        FLAG_strace = true;
+        break;
       case 'm':
         FLAG_nolinear = true;
         break;
       case 's':
         FLAG_statistics = true;
+        break;
+      case 'e':
+        FLAG_alsologtostderr = true;
         break;
       case 'L':
         FLAG_logpath = optarg_;
@@ -236,6 +246,7 @@ int main(int argc, char *argv[]) {
   g_blink_path = argc > 0 ? argv[0] : 0;
   GetOpts(argc, argv);
   if (optind_ == argc) PrintUsage(argc, argv, 48, 2);
+  SetOverlays(getenv("BLINK_OVERLAYS"));
   WriteErrorInit();
   HandleSigs();
   InitBus();

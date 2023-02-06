@@ -660,6 +660,14 @@
 
 #define IOV_MAX_LINUX 1024
 
+#define WNOHANG_LINUX    1
+#define WUNTRACED_LINUX  2
+#define WCONTINUED_LINUX 8
+
+#define MS_SYNC_LINUX       4
+#define MS_ASYNC_LINUX      1
+#define MS_INVALIDATE_LINUX 2
+
 struct iovec_linux {
   u8 base[8];
   u8 len[8];

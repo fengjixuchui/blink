@@ -27,6 +27,7 @@
 #include "blink/endian.h"
 #include "blink/errno.h"
 #include "blink/likely.h"
+#include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/pml4t.h"
@@ -64,15 +65,26 @@ u64 HandlePageFault(struct Machine *m, u64 entry, u64 table, unsigned index) {
   u64 x;
   u64 page;
   unassert(entry & PAGE_RSRV);
-  unassert(!(entry & (PAGE_HOST | PAGE_MAP | PAGE_MUG)));
-  if ((page = AllocatePage(m->system)) != -1) {
+  // page faults should only happen in non-linear mode
+  if (!(entry & (PAGE_HOST | PAGE_MAP | PAGE_MUG))) {
+    // an anonymous page is being accessed for the first time
+    if ((page = AllocatePage(m->system)) != -1) {
+      --m->system->memstat.reserved;
+      ++m->system->memstat.committed;
+      x = (page & (PAGE_TA | PAGE_HOST)) | (entry & ~(PAGE_TA | PAGE_RSRV));
+      Store64(GetPageAddress(m->system, table) + index * 8, x);
+      return x;
+    } else {
+      return 0;
+    }
+  } else {
+    // a file-mapped page is being accessed for the first time
+    unassert((entry & (PAGE_HOST | PAGE_MAP)) == (PAGE_HOST | PAGE_MAP));
     --m->system->memstat.reserved;
     ++m->system->memstat.committed;
-    x = (page & (PAGE_TA | PAGE_HOST)) | (entry & ~(PAGE_TA | PAGE_RSRV));
+    x = entry & ~PAGE_RSRV;
     Store64(GetPageAddress(m->system, table) + index * 8, x);
     return x;
-  } else {
-    return 0;
   }
 }
 
@@ -361,10 +373,7 @@ void *Schlep(struct Machine *m, i64 addr, size_t size) {
   return res;
 }
 
-// Returns pointer to string in guest memory. If the string overlaps a
-// page boundary, then it's copied, and the temporary memory is pushed
-// to the free list. Returns NULL w/ EFAULT or ENOMEM on error.
-char *LoadStr(struct Machine *m, i64 addr) {
+static char *LoadStrImpl(struct Machine *m, i64 addr) {
   size_t have;
   char *copy, *page, *p;
   have = 4096 - (addr & 4095);
@@ -388,6 +397,17 @@ char *LoadStr(struct Machine *m, i64 addr) {
   }
   free(copy);
   return 0;
+}
+
+// Returns pointer to string in guest memory. If the string overlaps a
+// page boundary, then it's copied, and the temporary memory is pushed
+// to the free list. Returns NULL w/ EFAULT or ENOMEM on error.
+char *LoadStr(struct Machine *m, i64 addr) {
+  char *res;
+  if ((res = LoadStrImpl(m, addr))) {
+    SYS_LOGF("LoadStr(%#" PRIx64 ") -> \"%s\"", addr, res);
+  }
+  return res;
 }
 
 // Copies string from guest memory. The returned memory is pushed to the

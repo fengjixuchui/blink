@@ -19,6 +19,7 @@
 #include <limits.h>
 #include <stdatomic.h>
 
+#include "blink/assert.h"
 #include "blink/builtin.h"
 #include "blink/bus.h"
 #include "blink/dll.h"
@@ -78,9 +79,7 @@ void UnlockBus(const u8 *locality) {
 }
 
 i64 Load8(const u8 p[1]) {
-  i64 z;
-  z = atomic_load_explicit((_Atomic(u8) *)p, ACQUIRE);
-  return z;
+  return atomic_load_explicit((_Atomic(u8) *)p, ACQUIRE);
 }
 
 i64 Load16(const u8 p[2]) {

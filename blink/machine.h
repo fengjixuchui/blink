@@ -13,6 +13,7 @@
 #include "blink/fds.h"
 #include "blink/jit.h"
 #include "blink/linux.h"
+#include "blink/log.h"
 #include "blink/tsan.h"
 #include "blink/tunables.h"
 
@@ -74,7 +75,7 @@
 #define MACHINE_CONTAINER(e)  DLL_CONTAINER(struct Machine, elem, e)
 #define HOSTPAGE_CONTAINER(e) DLL_CONTAINER(struct HostPage, elem, e)
 
-#if defined(NOLINEAR) || defined(__SANITIZE_THREAD__)
+#if defined(NOLINEAR) || defined(__SANITIZE_THREAD__) || defined(__CYGWIN__)
 #define CanHaveLinearMemory() false
 #else
 #define CanHaveLinearMemory() CAN_64BIT
@@ -86,7 +87,7 @@
 #define IsMakingPath(m) 0
 #endif
 
-#define HasLinearMapping(x) (CanHaveLinearMemory() && !(x)->nolinear)
+#define HasLinearMapping(x) (CanHaveLinearMemory() && !FLAG_nolinear)
 
 #if CAN_64BIT
 #define _Atomicish(t) _Atomic(t)
@@ -195,7 +196,6 @@ struct System {
   u8 mode;
   bool dlab;
   bool isfork;
-  bool nolinear;
   u16 gdt_limit;
   u16 idt_limit;
   int pid;
@@ -219,6 +219,7 @@ struct System {
   struct Jit jit;
   struct Fds fds;
   struct Elf elf;
+  sigset_t exec_sigmask;
   pthread_mutex_t exec_lock;
   pthread_mutex_t sig_lock;
   struct sigaction_linux hands[64] GUARDED_BY(sig_lock);
@@ -247,12 +248,11 @@ struct Machine {                           //
   u64 ip;                                  // instruction pointer
   u8 oplen;                                // length of operation
   u8 mode;                                 // [dup] XED_MODE_{REAL,LEGACY,LONG}
-  bool nolinear;                           // [dup] no linear address resolution
   bool reserving;                          // did it call ReserveAddress?
   u32 flags;                               // x86 eflags register
   i64 stashaddr;                           // page overlap buffer
-  _Atomic(bool) invalidated;               // the tlb must be flushed
   _Atomic(bool) killed;                    // used to send a soft SIGKILL
+  _Atomic(bool) invalidated;               // the tlb must be flushed
   _Atomicish(u64) signals;                 // signals waiting for delivery
   union {                                  // GENERAL REGISTER FILE
     u64 align8_;                           //
@@ -420,8 +420,10 @@ void EndStoreNp(struct Machine *, i64, size_t, void *[2], u8 *);
 void ResetRam(struct Machine *);
 void SetReadAddr(struct Machine *, i64, u32);
 void SetWriteAddr(struct Machine *, i64, u32);
+int SyncVirtual(struct System *, i64, i64, int);
 int ProtectVirtual(struct System *, i64, i64, int);
-int CheckVirtual(struct System *, i64, i64);
+bool IsFullyMapped(struct System *, i64, i64);
+bool IsFullyUnmapped(struct System *, i64, i64);
 int GetProtection(u64);
 u64 SetProtection(int);
 int ClassifyOp(u64) pureconst;
@@ -581,11 +583,11 @@ extern void (*AddPath_StartOp_Hook)(P);
 bool AddPath(P);
 void FlushSkew(P);
 bool CreatePath(P);
-void Connect(P, u64);
 void CompletePath(P);
 void AddPath_EndOp(P);
 bool FuseBranchTest(P);
 void AddPath_StartOp(P);
+void Connect(P, u64, bool);
 long GetPrologueSize(void);
 bool FuseBranchCmp(P, bool);
 i64 GetIp(struct Machine *);
@@ -633,7 +635,7 @@ int GetInstruction(struct Machine *, i64, struct XedDecodedInst *);
 void SetupCod(struct Machine *);
 void FlushCod(struct JitBlock *);
 #if LOG_COD
-void WriteCod(const char *, ...) printfesque(1);
+void WriteCod(const char *, ...) printf_attr(1);
 void LogCodOp(struct Machine *, const char *);
 #else
 #define LogCodOp(m, s) (void)0

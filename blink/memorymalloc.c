@@ -25,6 +25,7 @@
 
 #include "blink/assert.h"
 #include "blink/bus.h"
+#include "blink/debug.h"
 #include "blink/errno.h"
 #include "blink/linux.h"
 #include "blink/lock.h"
@@ -244,7 +245,6 @@ struct Machine *NewMachine(struct System *system, struct Machine *parent) {
   m->system = system;
   m->mode = system->mode;
   m->thread = pthread_self();
-  m->nolinear = system->nolinear;
   Write32(m->sigaltstack.flags, SS_DISABLE_LINUX);
   if (parent) {
     m->tid = (system->next_tid++ & (kMaxThreadIds - 1)) + kMinThreadId;
@@ -377,10 +377,7 @@ static bool FreePage(struct System *s, u64 entry) {
   long pagesize;
   struct HostPage *h;
   unassert(entry & PAGE_V);
-  if (entry & PAGE_RSRV) {
-    --s->memstat.reserved;
-    return false;
-  } else if ((entry & (PAGE_HOST | PAGE_MAP | PAGE_MUG)) == PAGE_HOST) {
+  if ((entry & (PAGE_HOST | PAGE_MAP | PAGE_MUG)) == PAGE_HOST) {
     ++s->memstat.freed;
     --s->memstat.committed;
     ClearPage((page = (u8 *)(intptr_t)(entry & PAGE_TA)));
@@ -393,17 +390,26 @@ static bool FreePage(struct System *s, u64 entry) {
     return false;
   } else if ((entry & (PAGE_HOST | PAGE_MAP | PAGE_MUG)) ==
              (PAGE_HOST | PAGE_MAP | PAGE_MUG)) {
-    --s->memstat.allocated;
-    --s->memstat.committed;
+    if (entry & PAGE_RSRV) {
+      --s->memstat.reserved;
+    } else {
+      --s->memstat.committed;
+    }
     pagesize = GetSystemPageSize();
     unassert(!Munmap((void *)ROUNDDOWN((intptr_t)(entry & PAGE_TA), pagesize),
                      pagesize));
     return false;
   } else if ((entry & (PAGE_HOST | PAGE_MAP | PAGE_MUG)) ==
              (PAGE_HOST | PAGE_MAP)) {
-    --s->memstat.allocated;
-    --s->memstat.committed;
+    if (entry & PAGE_RSRV) {
+      --s->memstat.reserved;
+    } else {
+      --s->memstat.committed;
+    }
     return true;
+  } else if (entry & PAGE_RSRV) {
+    --s->memstat.reserved;
+    return false;
   } else {
     unassert((entry & PAGE_TA) < kRealSize);
     return false;
@@ -460,6 +466,7 @@ int ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
   int prot;
   long pagesize;
   int greenfield;
+  void *got, *want;
   i64 ti, pt, end, level, entry;
 
   // we determine these
@@ -527,28 +534,29 @@ int ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
     // please note we need to take off the seatbelt after an execve().
     if (g_wasteland) greenfield = false;
     errno = 0;
-    if (Mmap(ToHost(virt), size, prot,                 //
-             ((greenfield ? MAP_DEMAND : MAP_FIXED) |  //
-              (fd == -1 ? MAP_ANONYMOUS : 0) |         //
-              (shared ? MAP_SHARED : MAP_PRIVATE)),    //
-             fd, offset, "linear") != ToHost(virt)) {
-      LOGF("mmap(%#" PRIx64 "[%p], %#" PRIx64 ") crisis: %s", virt,
-           ToHost(virt), size,
+    want = ToHost(virt);
+    if ((got = Mmap(want, size, prot,                         //
+                    ((greenfield ? MAP_DEMAND : MAP_FIXED) |  //
+                     (fd == -1 ? MAP_ANONYMOUS : 0) |         //
+                     (shared ? MAP_SHARED : MAP_PRIVATE)),    //
+                    fd, offset, "linear")) != want) {
+      ERRF("mmap(%#" PRIx64 "[%p], %#" PRIx64 ")"
+           "-> %#" PRIx64 "[%p] crisis: %s",
+           virt, want, size, ToGuest(got), got,
            (greenfield && errno == MAP_DENIED)
                ? "requested memory overlapped blink image or system memory. "
                  "try using `blink -m` to disable memory optimizations, or "
                  "try compiling blink using -Wl,--image-base=0x23000000 or "
                  "possibly -Wl,-Ttext-segment=0x23000000 in LDFLAGS"
-               : strerror(errno));
+               : DescribeHostErrno(errno));
       PanicDueToMmap();
     }
     s->memstat.allocated += size / 4096;
     s->memstat.committed += size / 4096;
     flags |= PAGE_HOST | PAGE_MAP;
   } else if (fd != -1 || shared) {
-    s->memstat.allocated += size / 4096;
-    s->memstat.committed += size / 4096;
     flags |= PAGE_HOST | PAGE_MAP | PAGE_MUG;
+    s->memstat.reserved += size / 4096;
   } else {
     s->memstat.reserved += size / 4096;
   }
@@ -596,7 +604,7 @@ int ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
                    ", brk=%p size=%ld, flags=%#x, fd=%d, offset=%#" PRIx64
                    ") crisis: %s",
                    virt, g_allocator.brk, lilsize, lilflags, fd, (u64)liloff,
-                   strerror(errno));
+                   DescribeHostErrno(errno));
               PanicDueToMmap();
             }
             real = (intptr_t)lil + lilskew;
@@ -605,7 +613,7 @@ int ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
             real = (intptr_t)ToHost(virt);
           }
           unassert(!(real & ~PAGE_TA));
-          entry = real | flags | PAGE_V;
+          entry = real | flags | PAGE_RSRV | PAGE_V;
         } else {
           entry = flags | PAGE_RSRV | PAGE_V;
         }
@@ -685,7 +693,7 @@ u64 SetProtection(int prot) {
   return key;
 }
 
-int CheckVirtual(struct System *s, i64 virt, i64 size) {
+bool IsFullyMapped(struct System *s, i64 virt, i64 size) {
   u8 *mi;
   u64 pt;
   i64 ti, end, level;
@@ -696,22 +704,41 @@ int CheckVirtual(struct System *s, i64 virt, i64 size) {
       pt = Get64(mi);
       if (level > 12) {
         if (!(pt & PAGE_V)) {
-          return enomem();
+          return false;
         }
         continue;
       }
       for (;;) {
         if (!(pt & PAGE_V)) {
-          return enomem();
+          return false;
         }
         if ((virt += 4096) >= end) {
-          return 0;
+          return true;
         }
         if (++ti == 512) break;
         pt = Get64((mi += 8));
       }
     }
   }
+}
+
+bool IsFullyUnmapped(struct System *s, i64 virt, i64 size) {
+  u8 *mi;
+  i64 end;
+  u64 i, pt;
+  if (OverlapsPrecious(virt, size)) return false;
+  for (end = virt + size; virt < end; virt += 1ull << i) {
+    for (pt = s->cr3, i = 39;; i -= 9) {
+      mi = GetPageAddress(s, pt) + ((virt >> i) & 511) * 8;
+      pt = Load64(mi);
+      if (!(pt & PAGE_V)) {
+        break;
+      } else if (i == 12) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 int ProtectVirtual(struct System *s, i64 virt, i64 size, int prot) {
@@ -724,10 +751,10 @@ int ProtectVirtual(struct System *s, i64 virt, i64 size, int prot) {
   if (!IsValidAddrSize(virt, size)) {
     return einval();
   }
-  if (CheckVirtual(s, virt, size) == -1) {
+  if (!IsFullyMapped(s, virt, size)) {
     LOGF("mprotect(%#" PRIx64 ", %#" PRIx64 ") interval has unmapped pages",
          virt, size);
-    return -1;
+    return enomem();
   }
   key = SetProtection(prot);
   // some operating systems e.g. openbsd and apple M1, have a
@@ -759,17 +786,17 @@ int ProtectVirtual(struct System *s, i64 virt, i64 size, int prot) {
             (mpstart = ROUNDDOWN(virt, pagesize)) != last) {
           last = mpstart;
           if (Mprotect(ToHost(mpstart), pagesize, sysprot, "linear")) {
-            LOGF("mprotect(%#" PRIx64 " [%p], %#lx, %d) failed: %s", mpstart,
-                 ToHost(mpstart), pagesize, prot, strerror(errno));
+            ERRF("mprotect(%#" PRIx64 " [%p], %#lx, %d) failed: %s", mpstart,
+                 ToHost(mpstart), pagesize, prot, DescribeHostErrno(errno));
             Abort();
           }
         } else if ((pt & (PAGE_HOST | PAGE_MAP | PAGE_MUG)) ==
                    (PAGE_HOST | PAGE_MAP | PAGE_MUG)) {
           real = (u8 *)ROUNDDOWN((intptr_t)(pt & PAGE_TA), pagesize);
           if (Mprotect(real, pagesize, sysprot, "mug")) {
-            LOGF("mprotect(pt=%#" PRIx64
+            ERRF("mprotect(pt=%#" PRIx64
                  ", real=%p, size=%#lx, prot=%d) failed: %s",
-                 pt, real, pagesize, prot, strerror(errno));
+                 pt, real, pagesize, prot, DescribeHostErrno(errno));
             Abort();
           }
         }
@@ -783,4 +810,65 @@ int ProtectVirtual(struct System *s, i64 virt, i64 size, int prot) {
     }
   }
   InvalidateSystem(s, true, false);
+}
+
+static void SyncPage(struct System *s, u64 entry) {
+  if ((entry & (PAGE_HOST | PAGE_MAP | PAGE_MUG)) == PAGE_HOST) {
+    return;  // don't need to do anything for anonymous private memory
+  }
+}
+
+int SyncVirtual(struct System *s, i64 virt, i64 size, int sysflags) {
+  u8 *mi;
+  u64 pt;
+  long skew, pagesize;
+  i64 ti, end, level, mpstart, last = -1;
+  if (!IsValidAddrSize(virt, size)) {
+    return einval();
+  }
+  pagesize = GetSystemPageSize();
+  if (HasLinearMapping(s) && (skew = virt & (pagesize - 1))) {
+    size += skew;
+    virt -= skew;
+  }
+  for (end = virt + size;;) {
+    for (pt = s->cr3, level = 39; level >= 12; level -= 9) {
+      ti = (virt >> level) & 511;
+      mi = GetPageAddress(s, pt) + ti * 8;
+      pt = Get64(mi);
+      if (level > 12) {
+        unassert(pt & PAGE_V);
+        continue;
+      }
+      for (;;) {
+        unassert(pt & PAGE_V);
+        if (HasLinearMapping(s) &&
+            (pt & (PAGE_HOST | PAGE_MAP | PAGE_MUG)) ==
+                (PAGE_HOST | PAGE_MAP) &&
+            (mpstart = ROUNDDOWN(virt, pagesize)) != last) {
+          last = mpstart;
+          if (Msync(ToHost(mpstart), pagesize, sysflags, "linear")) {
+            ERRF("msync(%#" PRIx64 " [%p], %#lx, %d) failed: %s", mpstart,
+                 ToHost(mpstart), pagesize, sysflags, DescribeHostErrno(errno));
+            Abort();
+          }
+        } else if ((pt & (PAGE_HOST | PAGE_MAP | PAGE_MUG)) ==
+                   (PAGE_HOST | PAGE_MAP | PAGE_MUG)) {
+          intptr_t real = pt & PAGE_TA;
+          intptr_t page = ROUNDDOWN(real, pagesize);
+          long lilsize = (real - page) + MIN(4096, end - virt);
+          if (Msync((void *)page, lilsize, sysflags, "mug")) {
+            ERRF("msync(%p [pt=%#" PRIx64
+                 "], size=%#lx, flags=%d) failed: %s\n%s",
+                 (void *)page, pt, pagesize, sysflags, DescribeHostErrno(errno),
+                 FormatPml4t(g_machine));
+            Abort();
+          }
+        }
+        if ((virt += 4096) >= end) return 0;
+        if (++ti == 512) break;
+        pt = Get64((mi += 8));
+      }
+    }
+  }
 }
