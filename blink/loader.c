@@ -63,6 +63,10 @@ static i64 LoadElfLoadSegment(struct Machine *m, void *image, size_t imagesize,
 
   ELF_LOGF("PROGRAM HEADER");
   ELF_LOGF("  aslr = %" PRIx64, aslr);
+  ELF_LOGF("  flags = %s%s%s",          //
+           (flags & PF_R_ ? "R" : ""),  //
+           (flags & PF_W_ ? "W" : ""),  //
+           (flags & PF_X_ ? "X" : ""));
   ELF_LOGF("  vaddr = %" PRIx64, vaddr);
   ELF_LOGF("  memsz = %" PRIx64, memsz);
   ELF_LOGF("  offset = %" PRIx64, offset);
@@ -260,6 +264,7 @@ static bool LoadElf(struct Machine *m, struct Elf *elf, u64 aslr, int fd) {
     end = INT64_MIN;
     ELF_LOGF("loading elf interpreter %s", interpreter);
     errno = 0;
+    SYS_LOGF("LoadInterpreter %s", interpreter);
     if ((fd = OverlaysOpen(AT_FDCWD, interpreter, O_RDONLY, 0)) == -1 ||
         (fstat(fd, &st) == -1 || !st.st_size) ||
         (ehdr = (Elf64_Ehdr_ *)Mmap(0, st.st_size, PROT_READ | PROT_WRITE,
@@ -358,6 +363,10 @@ static int GetElfHeader(char ehdr[64], const char *prog, const char *image) {
   return -1;
 }
 
+static void FreeProgName(void) {
+  free(g_progname);
+}
+
 void LoadProgram(struct Machine *m, char *prog, char **args, char **vars) {
   int fd;
   i64 sp;
@@ -367,6 +376,11 @@ void LoadProgram(struct Machine *m, char *prog, char **args, char **vars) {
   bool execstack;
   struct stat st;
   struct Elf *elf;
+  static bool once;
+  if (!once) {
+    atexit(FreeProgName);
+    once = true;
+  }
   unassert(prog);
   elf = &m->system->elf;
   elf->prog = prog;
@@ -375,6 +389,7 @@ void LoadProgram(struct Machine *m, char *prog, char **args, char **vars) {
   elf->at_phent = 56;
   free(g_progname);
   g_progname = strdup(prog);
+  SYS_LOGF("LoadProgram %s", prog);
   if ((fd = OverlaysOpen(AT_FDCWD, prog, O_RDONLY, 0)) == -1 ||
       (fstat(fd, &st) == -1 || !st.st_size) ||
       (elf->map =

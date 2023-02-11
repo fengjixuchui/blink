@@ -32,11 +32,12 @@
 #include "blink/macros.h"
 #include "blink/tsan.h"
 #include "blink/types.h"
+#include "blink/util.h"
 
 #define LOG_ERR  0
 #define LOG_INFO 1
 
-#define LOG_TMPDIR_SUFFIX "/blink.log"
+#define DEFAULT_LOG_PATH "blink.log"
 
 #define APPEND(F, ...) n += F(b + n, PIPE_BUF - n, __VA_ARGS__)
 
@@ -44,7 +45,7 @@ static struct Log {
   pthread_once_t once;
   int level;
   int fd;
-  char path[PATH_MAX];
+  char *path;
 } g_log = {
     PTHREAD_ONCE_INIT,
     LOG_ERR,
@@ -111,7 +112,8 @@ static void OpenLog(void) {
     fd = open(g_log.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     if (fd == -1) {
       perror(g_log.path);
-      exit(1);
+      g_log.fd = -1;
+      return;
     }
   }
   unassert((g_log.fd = fcntl(fd, F_DUPFD_CLOEXEC, kMinBlinkFd)) != -1);
@@ -135,8 +137,10 @@ static void Log(const char *file, int line, const char *fmt, va_list va,
     b[--n] = '.';
     b[--n] = '.';
   }
-  WriteError(g_log.fd, b, n);
-  if (FLAG_alsologtostderr || level <= g_log.level) {
+  if (g_log.fd != -1) {
+    WriteError(g_log.fd, b, n);
+  }
+  if (FLAG_alsologtostderr || (!FLAG_nologstderr && level <= g_log.level)) {
     WriteError(2, b, n);
   }
   errno = err;
@@ -163,19 +167,21 @@ void LogSys(const char *file, int line, const char *fmt, ...) {
   va_end(va);
 }
 
+static void FreeLogPath(void) {
+  free(g_log.path);
+}
+
 static void SetLogPath(const char *path) {
-  size_t n;
-  const char *tmpdir;
-  if (path && (n = strlen(path)) < PATH_MAX) {
-    memcpy(g_log.path, path, n + 1);
-  } else if ((tmpdir = getenv("TMPDIR")) &&
-             (n = strlen(tmpdir)) < PATH_MAX - sizeof(LOG_TMPDIR_SUFFIX) - 1) {
-    memcpy(g_log.path, tmpdir, n);
-    memcpy(g_log.path + n, LOG_TMPDIR_SUFFIX, sizeof(LOG_TMPDIR_SUFFIX));
+  char cwd[PATH_MAX];
+  if (path) {
+    g_log.path = ExpandUser(path);
   } else {
-    memcpy(g_log.path, "/tmp", 4);
-    memcpy(g_log.path + 4, LOG_TMPDIR_SUFFIX, sizeof(LOG_TMPDIR_SUFFIX));
+    strcpy(cwd, ".");
+    getcwd(cwd, sizeof(cwd));
+    g_log.path = (char *)malloc(strlen(cwd) + 1 + strlen(DEFAULT_LOG_PATH) + 1);
+    stpcpy(stpcpy(stpcpy(g_log.path, cwd), "/"), DEFAULT_LOG_PATH);
   }
+  atexit(FreeLogPath);
 }
 
 void LogInit(const char *path) {

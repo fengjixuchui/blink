@@ -225,49 +225,59 @@ int XlatSignal(int x) {
 #ifdef SIGIO
     XLAT(SIGIO_LINUX, SIGIO);
 #endif
+#ifdef SIGPWR
+    XLAT(SIGPWR_LINUX, SIGPWR);
+#endif
     XLAT(SIGSYS_LINUX, SIGSYS);
     default:
-      return einval();
+      break;
   }
+#ifdef SIGRTMIN
+  if ((SIGRTMIN_LINUX <= x && x <= SIGRTMAX_LINUX) &&
+      SIGRTMIN + (x - SIGRTMIN_LINUX) <= SIGRTMAX) {
+    return SIGRTMIN + (x - SIGRTMIN_LINUX);
+  }
+#endif
+  return einval();
 }
 
 int XlatResource(int x) {
   switch (x) {
-    XLAT(0, RLIMIT_CPU);
-    XLAT(1, RLIMIT_FSIZE);
-    XLAT(2, RLIMIT_DATA);
-    XLAT(3, RLIMIT_STACK);
-    XLAT(4, RLIMIT_CORE);
+    XLAT(RLIMIT_CPU_LINUX, RLIMIT_CPU);
+    XLAT(RLIMIT_FSIZE_LINUX, RLIMIT_FSIZE);
+    XLAT(RLIMIT_DATA_LINUX, RLIMIT_DATA);
+    XLAT(RLIMIT_STACK_LINUX, RLIMIT_STACK);
+    XLAT(RLIMIT_CORE_LINUX, RLIMIT_CORE);
 #ifdef RLIMIT_RSS
-    XLAT(5, RLIMIT_RSS);
+    XLAT(RLIMIT_RSS_LINUX, RLIMIT_RSS);
 #endif
 #ifdef RLIMIT_NPROC
-    XLAT(6, RLIMIT_NPROC);
+    XLAT(RLIMIT_NPROC_LINUX, RLIMIT_NPROC);
 #endif
-    XLAT(7, RLIMIT_NOFILE);
+    XLAT(RLIMIT_NOFILE_LINUX, RLIMIT_NOFILE);
 #ifdef RLIMIT_MEMLOCK
-    XLAT(8, RLIMIT_MEMLOCK);
+    XLAT(RLIMIT_MEMLOCK_LINUX, RLIMIT_MEMLOCK);
 #endif
 #ifdef RLIMIT_AS
-    XLAT(9, RLIMIT_AS);
+    XLAT(RLIMIT_AS_LINUX, RLIMIT_AS);
 #endif
 #ifdef RLIMIT_LOCKS
-    XLAT(10, RLIMIT_LOCKS);
+    XLAT(RLIMIT_LOCKS_LINUX, RLIMIT_LOCKS);
 #endif
 #ifdef RLIMIT_SIGPENDING
-    XLAT(11, RLIMIT_SIGPENDING);
+    XLAT(RLIMIT_SIGPENDING_LINUX, RLIMIT_SIGPENDING);
 #endif
 #ifdef RLIMIT_MSGQUEUE
-    XLAT(12, RLIMIT_MSGQUEUE);
+    XLAT(RLIMIT_MSGQUEUE_LINUX, RLIMIT_MSGQUEUE);
 #endif
 #ifdef RLIMIT_NICE
-    XLAT(13, RLIMIT_NICE);
+    XLAT(RLIMIT_NICE_LINUX, RLIMIT_NICE);
 #endif
 #ifdef RLIMIT_RTPRIO
-    XLAT(14, RLIMIT_RTPRIO);
+    XLAT(RLIMIT_RTPRIO_LINUX, RLIMIT_RTPRIO);
 #endif
 #ifdef RLIMIT_RTTIME
-    XLAT(15, RLIMIT_RTTIME);
+    XLAT(RLIMIT_RTTIME_LINUX, RLIMIT_RTTIME);
 #endif
     default:
       LOGF("rlimit %d not supported yet", x);
@@ -303,6 +313,9 @@ int UnXlatSignal(int x) {
 #ifdef SIGIO
   if (x == SIGIO) return SIGIO_LINUX;
 #endif
+#ifdef SIGPWR
+  if (x == SIGPWR) return SIGPWR_LINUX;
+#endif
 #ifdef SIGSTKFLT
   if (x == SIGSTKFLT) return SIGSTKFLT_LINUX;
 #endif
@@ -310,6 +323,12 @@ int UnXlatSignal(int x) {
   if (x == SIGSYS) return SIGSYS_LINUX;
   if (x == SIGTSTP) return SIGTSTP_LINUX;
   if (x == SIGURG) return SIGURG_LINUX;
+#ifdef SIGRTMIN
+  if ((SIGRTMIN <= x && x <= SIGRTMAX) &&
+      SIGRTMIN_LINUX + (x - SIGRTMIN) <= SIGRTMAX_LINUX) {
+    return SIGRTMIN_LINUX + (x - SIGRTMIN);
+  }
+#endif
   return einval();
 }
 
@@ -349,6 +368,7 @@ int XlatSocketType(int x) {
   switch (x) {
     XLAT(SOCK_STREAM_LINUX, SOCK_STREAM);
     XLAT(SOCK_DGRAM_LINUX, SOCK_DGRAM);
+    XLAT(SOCK_RAW_LINUX, SOCK_RAW);
     default:
       LOGF("%s %d not supported yet", "socket type", x);
       return einval();
@@ -358,8 +378,12 @@ int XlatSocketType(int x) {
 int XlatSocketProtocol(int x) {
   switch (x) {
     XLAT(0, 0);
-    XLAT(6, IPPROTO_TCP);
-    XLAT(17, IPPROTO_UDP);
+    XLAT(IPPROTO_TCP_LINUX, IPPROTO_TCP);
+    XLAT(IPPROTO_UDP_LINUX, IPPROTO_UDP);
+    XLAT(IPPROTO_ICMP_LINUX, IPPROTO_ICMP);
+#ifdef IPPROTO_ICMPV6
+    XLAT(IPPROTO_ICMPV6_LINUX, IPPROTO_ICMPV6);
+#endif
     default:
       LOGF("%s %d not supported yet", "socket protocol", x);
       return einval();
@@ -370,9 +394,10 @@ int XlatSocketLevel(int x, int *level) {
   // Haiku defines SOL_SOCKET as -1
   int res;
   switch (x) {
-    CASE(1, res = SOL_SOCKET);
-    CASE(6, res = IPPROTO_TCP);
-    CASE(17, res = IPPROTO_UDP);
+    CASE(SOL_SOCKET_LINUX, res = SOL_SOCKET);
+    CASE(SOL_IP_LINUX, res = IPPROTO_IP);
+    CASE(SOL_TCP_LINUX, res = IPPROTO_TCP);
+    CASE(SOL_UDP_LINUX, res = IPPROTO_UDP);
     default:
       LOGF("%s %d not supported yet", "socket level", x);
       return einval();
@@ -392,6 +417,7 @@ int XlatSocketOptname(int level, int optname) {
         XLAT(SO_DONTROUTE_LINUX, SO_DONTROUTE);
         XLAT(SO_SNDBUF_LINUX, SO_SNDBUF);
         XLAT(SO_RCVBUF_LINUX, SO_RCVBUF);
+        XLAT(SO_BROADCAST_LINUX, SO_BROADCAST);
         XLAT(SO_KEEPALIVE_LINUX, SO_KEEPALIVE);
 #ifdef SO_REUSEPORT
         XLAT(SO_REUSEPORT_LINUX, SO_REUSEPORT);
@@ -407,6 +433,21 @@ int XlatSocketOptname(int level, int optname) {
         default:
           break;
       }
+      break;
+    case SOL_IP_LINUX:
+      switch (optname) {
+        XLAT(IP_TOS_LINUX, IP_TOS);
+        XLAT(IP_TTL_LINUX, IP_TTL);
+        XLAT(IP_HDRINCL_LINUX, IP_HDRINCL);
+        XLAT(IP_OPTIONS_LINUX, IP_OPTIONS);
+        XLAT(IP_RECVTTL_LINUX, IP_RECVTTL);
+#ifdef IP_RETOPTS
+        XLAT(IP_RETOPTS_LINUX, IP_RETOPTS);
+#endif
+        default:
+          break;
+      }
+      break;
     case SOL_TCP_LINUX:
       switch (optname) {
         XLAT(TCP_NODELAY_LINUX, TCP_NODELAY);
@@ -454,6 +495,7 @@ int XlatSocketOptname(int level, int optname) {
         default:
           break;
       }
+      break;
     default:
       break;
   }
@@ -476,15 +518,6 @@ int XlatShutdown(int x) {
   if (x == SHUT_WR_LINUX) return SHUT_WR;
   if (x == SHUT_RDWR_LINUX) return SHUT_RDWR;
   return einval();
-}
-
-int XlatLock(int x) {
-  int r = 0;
-  if (x & 1) r |= LOCK_SH;
-  if (x & 2) r |= LOCK_EX;
-  if (x & 4) r |= LOCK_NB;
-  if (x & 8) r |= LOCK_UN;
-  return r;
 }
 
 int XlatWait(int x) {
@@ -757,10 +790,14 @@ int UnXlatItimer(int x) {
 int XlatSockaddrToHost(struct sockaddr_storage *dst,
                        const struct sockaddr_linux *src, u32 srclen) {
   if (srclen < 2) {
-    LOGF("sockaddr size too small for %s", "family");
+    LOGF("sockaddr size %d too small for %s", (int)srclen, "family");
     return einval();
   }
   switch (Read16(src->family)) {
+    case AF_UNSPEC_LINUX:
+      memset(dst, 0, sizeof(*dst));
+      dst->ss_family = AF_UNSPEC;
+      return sizeof(*dst);
     case AF_UNIX_LINUX: {
       size_t n;
       struct sockaddr_un *dst_un;
@@ -826,7 +863,7 @@ int XlatSockaddrToHost(struct sockaddr_storage *dst,
 int XlatSockaddrToLinux(struct sockaddr_storage_linux *dst,
                         const struct sockaddr *src, socklen_t srclen) {
   if (srclen < 2) {
-    LOGF("sockaddr size too small for %s", "family");
+    LOGF("sockaddr size %d too small for %s", (int)srclen, "family");
     return einval();
   }
   if (src->sa_family == AF_UNIX) {
@@ -834,7 +871,7 @@ int XlatSockaddrToLinux(struct sockaddr_storage_linux *dst,
     struct sockaddr_un_linux *dst_un;
     const struct sockaddr_un *src_un;
     if (srclen < offsetof(struct sockaddr_un, sun_path)) {
-      LOGF("sockaddr size too small for %s", "sockaddr_un");
+      LOGF("sockaddr size %d too small for %s", (int)srclen, "sockaddr_un");
       return einval();
     }
     dst_un = (struct sockaddr_un_linux *)dst;
@@ -855,7 +892,7 @@ int XlatSockaddrToLinux(struct sockaddr_storage_linux *dst,
     struct sockaddr_in_linux *dst_in;
     const struct sockaddr_in *src_in;
     if (srclen < sizeof(struct sockaddr_in)) {
-      LOGF("sockaddr size too small for %s", "sockaddr_in");
+      LOGF("sockaddr size %d too small for %s", (int)srclen, "sockaddr_in");
       return einval();
     }
     dst_in = (struct sockaddr_in_linux *)dst;
@@ -869,7 +906,7 @@ int XlatSockaddrToLinux(struct sockaddr_storage_linux *dst,
     struct sockaddr_in6_linux *dst_in;
     const struct sockaddr_in6 *src_in;
     if (srclen < sizeof(struct sockaddr_in6)) {
-      LOGF("sockaddr size too small for %s", "sockaddr_in6");
+      LOGF("sockaddr size %d too small for %s", (int)srclen, "sockaddr_in6");
       return einval();
     }
     dst_in = (struct sockaddr_in6_linux *)dst;
@@ -994,7 +1031,7 @@ void XlatWinsizeToHost(struct winsize *dst, const struct winsize_linux *src) {
 void XlatSigsetToLinux(u8 dst[8], const sigset_t *src) {
   u64 set = 0;
   int syssig, linuxsig;
-  for (syssig = 1; syssig <= 32; ++syssig) {
+  for (syssig = 1; syssig <= MIN(64, NSIG); ++syssig) {
     if (sigismember(src, syssig) == 1 &&
         (linuxsig = UnXlatSignal(syssig)) != -1) {
       set |= 1ull << (linuxsig - 1);
@@ -1008,7 +1045,7 @@ void XlatLinuxToSigset(sigset_t *dst, const u8 src[8]) {
   int syssig, linuxsig;
   set = Read64(src);
   sigemptyset(dst);
-  for (linuxsig = 1; linuxsig <= 32; ++linuxsig) {
+  for (linuxsig = 1; linuxsig <= MIN(64, NSIG); ++linuxsig) {
     if (((1ull << (linuxsig - 1)) & set) &&
         (syssig = XlatSignal(linuxsig)) != -1) {
       sigaddset(dst, syssig);

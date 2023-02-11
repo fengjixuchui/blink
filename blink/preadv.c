@@ -16,7 +16,7 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
-#if defined(__CYGWIN__) || defined(__HAIKU__)
+#if defined(__CYGWIN__) || defined(__HAIKU__) || defined(__APPLE__)
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -25,6 +25,8 @@
 #include "blink/limits.h"
 #include "blink/macros.h"
 #include "blink/preadv.h"
+
+// preadv() and pwritev() need MacOS 11+ c. 2020
 
 ssize_t preadv(int fd, const struct iovec *iov, int iovcnt, off_t offset) {
   int i;

@@ -6,6 +6,7 @@
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/time.h>
 #include <termios.h>
 
@@ -18,7 +19,6 @@ int UnXlatItimer(int);
 int XlatAccess(int);
 int XlatClock(int, clock_t *);
 int XlatErrno(int);
-int XlatLock(int);
 int XlatOpenFlags(int);
 int XlatAccMode(int);
 int XlatResource(int);

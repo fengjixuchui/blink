@@ -1670,8 +1670,8 @@ static const nexgen32e_f kNexgen32e[] = {
     /*023*/ OpAluFlip,               // #41   (0.279852%)
     /*024*/ OpAluAxImm,              // #279  (0.000001%)
     /*025*/ OpAluAxImm,              // #43   (0.275823%)
-    /*026*/ OpPushSeg,               //
-    /*027*/ OpPopSeg,                //
+    /*026*/ OpUd,                    //
+    /*027*/ OpDaa,                   //
     /*028*/ OpAlub,                  //
     /*029*/ OpAluw,                  // #29   (0.334693%)
     /*02A*/ OpAluFlip,               // #179  (0.000087%)
@@ -2306,14 +2306,14 @@ void ExecuteInstruction(struct Machine *m) {
 #endif
 }
 
-static void CheckForSignals(struct Machine *m) {
+void CheckForSignals(struct Machine *m) {
   int sig;
   if (atomic_load_explicit(&m->killed, memory_order_relaxed)) {
     SysExit(m, 0);
   }
   if (m->signals &&                  //
       (m->signals & ~m->sigmask) &&  //
-      (sig = ConsumeSignal(m))) {
+      (sig = ConsumeSignal(m, 0, 0))) {
     TerminateSignal(m, sig);
   }
 }

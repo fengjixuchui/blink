@@ -2,8 +2,11 @@
 #define BLINK_FDS_H_
 #include <dirent.h>
 #include <limits.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdbool.h>
+#include <sys/socket.h>
 #include <sys/uio.h>
 #include <termios.h>
 
@@ -28,13 +31,17 @@ struct FdCb {
 struct Fd {
   int fildes;      // file descriptor
   int oflags;      // host O_XXX constants
-  int family;      // host AF_XXX constants
-  int type;        // host SOCK_XXX constants
-  int protocol;    // host IPPROTO_XXX constants
+  int socktype;    // host SOCK_XXX constants
+  bool norestart;  // is SO_RCVTIMEO in play?
   DIR *dirstream;  // for getdents() lazilly
   struct Dll elem;
   pthread_mutex_t lock;
   const struct FdCb *cb;
+  union {
+    struct sockaddr sa;
+    struct sockaddr_in sin;
+    struct sockaddr_in6 sin6;
+  } saddr;
 };
 
 struct Fds {
@@ -53,5 +60,6 @@ void UnlockFd(struct Fd *);
 int CountFds(struct Fds *);
 void FreeFd(struct Fd *);
 void DestroyFds(struct Fds *);
+void InheritFd(struct Fd *);
 
 #endif /* BLINK_FDS_H_ */

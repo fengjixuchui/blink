@@ -50,6 +50,11 @@ long efault(void) {
   return ReturnErrno(EFAULT);
 }
 
+void *efault0(void) {
+  efault();
+  return 0;
+}
+
 long eintr(void) {
   return ReturnErrno(EINTR);
 }
@@ -76,4 +81,16 @@ long enotsup(void) {
 
 long enoent(void) {
   return ReturnErrno(ENOENT);
+}
+
+long enotdir(void) {
+  return ReturnErrno(ENOTDIR);
+}
+
+long erange(void) {
+  return ReturnErrno(ERANGE);
+}
+
+long eopnotsupp(void) {
+  return ReturnErrno(EOPNOTSUPP);
 }

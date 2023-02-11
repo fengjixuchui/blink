@@ -19,6 +19,7 @@ endif
 HOST_SYSTEM := $(shell uname -s)
 HOST_ARCH := $(shell uname -m)
 HOST_OS := $(shell uname -o 2>/dev/null)
+TMPDIR := $(shell mkdir -p o/tmp; echo $(shell pwd)/o/tmp)
 
 ifneq ($(HOST_SYSTEM), Linux)
 VM = o/$(MODE)/blink/blink
@@ -29,26 +30,27 @@ endif
 
 o:	o/$(MODE)/blink
 
-test:	o				\
+test:	o					\
 	o/$(MODE)/test
 
-check:	test				\
-	o/$(MODE)/third_party/cosmo
+check:	test					\
+	o/$(MODE)/third_party/cosmo		\
+	o/$(MODE)/third_party/libc-test
 
-check2:	o/$(MODE)/test/sse		\
-	o/$(MODE)/test/lib		\
-	o/$(MODE)/test/sys		\
-	o/$(MODE)/test/func		\
-	o/$(MODE)/test/asm		\
-	o/$(MODE)/third_party/ltp	\
-	o/$(MODE)/test/asm/emulates	\
-	o/$(MODE)/test/func/emulates	\
-	o/$(MODE)/third_party/ltp/medium
+check2:	o/$(MODE)/test/sse			\
+	o/$(MODE)/test/lib			\
+	o/$(MODE)/test/sys			\
+	o/$(MODE)/test/func			\
+	o/$(MODE)/test/asm			\
+	o/$(MODE)/third_party/ltp		\
+	o/$(MODE)/test/asm/emulates		\
+	o/$(MODE)/test/func/emulates
 
-emulates:				\
-	o/$(MODE)/test/asm		\
-	o/$(MODE)/test/flat		\
-	o/$(MODE)/test/metal		\
+emulates:					\
+	o/$(MODE)/test/asm			\
+	o/$(MODE)/test/flat			\
+	o/$(MODE)/test/metal			\
+	o/$(MODE)/third_party/ltp/medium	\
 	o/$(MODE)/third_party/cosmo/emulates
 
 tags: TAGS HTAGS
@@ -68,6 +70,7 @@ include third_party/ltp/ltp.mk
 include third_party/musl/musl.mk
 include third_party/qemu/qemu.mk
 include third_party/cosmo/cosmo.mk
+include third_party/libc-test/libc-test.mk
 
 OBJS	 = $(foreach x,$(PKGS),$($(x)_OBJS))
 SRCS	:= $(foreach x,$(PKGS),$($(x)_SRCS))
@@ -159,7 +162,7 @@ HTAGS:	o/$(MODE)/hdrs.txt $(HDRS)
 	build/htags -L $< -o $@
 
 clean:
-	rm -f $(OBJS)
+	rm -f $(OBJS) o/$(MODE)/blink/blink o/$(MODE)/blink/blinkenlights o/$(MODE)/blink/blink.a
 
 $(SRCS):
 $(HDRS):

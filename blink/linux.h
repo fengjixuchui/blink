@@ -326,9 +326,16 @@
 #define AF_INET_LINUX   2
 #define AF_INET6_LINUX  10
 
+#define SOL_IP_LINUX     0
 #define SOL_SOCKET_LINUX 1
 #define SOL_TCP_LINUX    6
 #define SOL_UDP_LINUX    17
+
+#define IPPROTO_IP_LINUX     0
+#define IPPROTO_ICMP_LINUX   1
+#define IPPROTO_TCP_LINUX    6
+#define IPPROTO_UDP_LINUX    17
+#define IPPROTO_ICMPV6_LINUX 58
 
 #define SA_NOCLDSTOP_LINUX 1
 #define SA_NOCLDWAIT_LINUX 2
@@ -397,7 +404,24 @@
 #define VLNEXT_LINUX   15
 #define VEOL2_LINUX    16
 
-#define RLIM_INFINITY_LINUX 0xffffffffffffffffull
+#define RLIMIT_CPU_LINUX        0
+#define RLIMIT_FSIZE_LINUX      1
+#define RLIMIT_DATA_LINUX       2
+#define RLIMIT_STACK_LINUX      3
+#define RLIMIT_CORE_LINUX       4
+#define RLIMIT_RSS_LINUX        5
+#define RLIMIT_NPROC_LINUX      6
+#define RLIMIT_NOFILE_LINUX     7
+#define RLIMIT_MEMLOCK_LINUX    8
+#define RLIMIT_AS_LINUX         9
+#define RLIMIT_LOCKS_LINUX      10
+#define RLIMIT_SIGPENDING_LINUX 11
+#define RLIMIT_MSGQUEUE_LINUX   12
+#define RLIMIT_NICE_LINUX       13
+#define RLIMIT_RTPRIO_LINUX     14
+#define RLIMIT_RTTIME_LINUX     15
+#define RLIM_INFINITY_LINUX     0xffffffffffffffffull
+#define RLIM_NLIMITS_LINUX      16
 
 #define MINSIGSTKSZ_LINUX   2048
 #define SS_ONSTACK_LINUX    1
@@ -636,6 +660,14 @@
 #define SO_SNDTIMEO_LINUX          21
 #define SO_RCVLOWAT_LINUX          18
 #define SO_SNDLOWAT_LINUX          19
+#define SO_BROADCAST_LINUX         6
+#define IP_TOS_LINUX               1
+#define IP_TTL_LINUX               2
+#define IP_HDRINCL_LINUX           3
+#define IP_OPTIONS_LINUX           4
+#define IP_RETOPTS_LINUX           7
+#define IP_RECVTTL_LINUX           12
+#define IP_MTU_LINUX               14
 #define TCP_NODELAY_LINUX          1
 #define TCP_MAXSEG_LINUX           2
 #define TCP_CORK_LINUX             3
@@ -657,6 +689,7 @@
 
 #define SOCK_STREAM_LINUX 1
 #define SOCK_DGRAM_LINUX  2
+#define SOCK_RAW_LINUX    3
 
 #define IOV_MAX_LINUX 1024
 
@@ -667,6 +700,79 @@
 #define MS_SYNC_LINUX       4
 #define MS_ASYNC_LINUX      1
 #define MS_INVALIDATE_LINUX 2
+
+#define LOCK_SH_LINUX 1
+#define LOCK_EX_LINUX 2
+#define LOCK_NB_LINUX 4
+#define LOCK_UN_LINUX 8
+
+#define SCM_RIGHTS_LINUX      1
+#define SCM_CREDENTIALS_LINUX 2
+
+#define ST_RDONLY_LINUX      1
+#define ST_NOSUID_LINUX      2
+#define ST_NODEV_LINUX       4
+#define ST_NOEXEC_LINUX      8
+#define ST_SYNCHRONOUS_LINUX 16
+#define ST_NOATIME_LINUX     0x0040
+#define ST_RELATIME_LINUX    0x1000
+#define ST_APPEND_LINUX      0x0100
+#define ST_IMMUTABLE_LINUX   0x0200
+#define ST_MANDLOCK_LINUX    0x0040
+#define ST_NODIRATIME_LINUX  0x0800
+#define ST_WRITE_LINUX       0x0080
+#define ST_NOSYMFOLLOW_LINUX 0x2000
+
+#define SCM_MAX_FD_LINUX 253
+
+#define SI_USER_LINUX       0
+#define SI_QUEUE_LINUX      -1
+#define SI_TIMER_LINUX      -2
+#define SI_TKILL_LINUX      -6
+#define SI_MESGQ_LINUX      -3
+#define SI_ASYNCIO_LINUX    -4
+#define SI_ASYNCNL_LINUX    -60
+#define SI_KERNEL_LINUX     128
+#define SI_NOINFO_LINUX     32767
+#define CLD_EXITED_LINUX    1
+#define CLD_KILLED_LINUX    2
+#define CLD_DUMPED_LINUX    3
+#define CLD_TRAPPED_LINUX   4
+#define CLD_STOPPED_LINUX   5
+#define CLD_CONTINUED_LINUX 6
+#define TRAP_BRKPT_LINUX    1
+#define TRAP_TRACE_LINUX    2
+#define SEGV_MAPERR_LINUX   1
+#define SEGV_ACCERR_LINUX   2
+#define SEGV_PKUERR_LINUX   -1
+#define FPE_INTDIV_LINUX    1
+#define FPE_INTOVF_LINUX    2
+#define FPE_FLTDIV_LINUX    3
+#define FPE_FLTOVF_LINUX    4
+#define FPE_FLTUND_LINUX    5
+#define FPE_FLTRES_LINUX    6
+#define FPE_FLTINV_LINUX    7
+#define FPE_FLTSUB_LINUX    8
+#define ILL_ILLOPC_LINUX    1
+#define ILL_ILLOPN_LINUX    2
+#define ILL_ILLADR_LINUX    3
+#define ILL_ILLTRP_LINUX    4
+#define ILL_PRVOPC_LINUX    5
+#define ILL_PRVREG_LINUX    6
+#define ILL_COPROC_LINUX    7
+#define ILL_BADSTK_LINUX    8
+#define BUS_ADRALN_LINUX    1
+#define BUS_ADRERR_LINUX    2
+#define BUS_OBJERR_LINUX    3
+#define BUS_OOMERR_LINUX    -1
+#define BUS_MCEERR_AR_LINUX 4
+#define BUS_MCEERR_AO_LINUX 5
+#define POLL_IN_LINUX       1
+#define POLL_OUT_LINUX      2
+#define POLL_MSG_LINUX      3
+#define POLL_ERR_LINUX      4
+#define POLL_PRI_LINUX      5
+#define POLL_HUP_LINUX      6
 
 struct iovec_linux {
   u8 base[8];
@@ -958,7 +1064,7 @@ struct statfs_linux {
   u8 bsize[8];    // optimal transfer block size
   u8 blocks[8];   // total data blocks in filesystem
   u8 bfree[8];    // free blocks in filesystem
-  u8 bavail[8];   // free blocks available to
+  u8 bavail[8];   // free blocks available to unprivileged user
   u8 files[8];    // total file nodes in filesystem
   u8 ffree[8];    // free file nodes in filesystem
   u8 fsid[2][4];  // filesystem id
@@ -983,6 +1089,18 @@ struct msghdr_linux {
   u8 controllen[8];  // u64 ancillary data buffer len
   u8 flags[4];       // u32 MSG_XXX (only applies to recvmsg)
   u8 pad2_[4];       //
+};
+
+struct cmsghdr_linux {
+  u8 len[8];    // u64 bytes in message (including this)
+  u8 level[4];  // i32 e.g. SOL_SOCKET
+  u8 type[4];   // i32 e.g. SCM_RIGHTS
+};
+
+struct ucred_linux {  // 8-byte aligned
+  u8 pid[4];          // process id of sending process
+  u8 uid[4];          // user id of sending process
+  u8 gid[4];          // group id of sending process
 };
 
 int sysinfo_linux(struct sysinfo_linux *);

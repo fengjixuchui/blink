@@ -20,6 +20,7 @@
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -58,9 +59,9 @@ struct Fd *ForkFd(struct Fds *fds, struct Fd *fd, int fildes, int oflags) {
   struct Fd *fd2;
   if ((fd2 = AddFd(fds, fildes, oflags))) {
     if (fd) {
-      fd2->type = fd->type;
-      fd2->family = fd->family;
-      fd2->protocol = fd->protocol;
+      fd2->socktype = fd->socktype;
+      fd2->norestart = fd->norestart;
+      memcpy(&fd2->saddr, &fd->saddr, sizeof(fd->saddr));
     }
   }
   return fd2;
@@ -119,4 +120,33 @@ void DestroyFds(struct Fds *fds) {
   }
   unassert(!fds->list);
   unassert(!pthread_mutex_destroy(&fds->lock));
+}
+
+static int GetFdSocketType(int fildes, int *type) {
+  socklen_t len = sizeof(*type);
+  return getsockopt(fildes, SOL_SOCKET, SO_TYPE, type, &len);
+}
+
+static bool IsNoRestartSocket(int fildes) {
+  struct timeval tv = {0};
+  socklen_t len = sizeof(tv);
+  getsockopt(fildes, SOL_SOCKET, SO_RCVTIMEO, &tv, &len);
+  return tv.tv_sec || tv.tv_usec;
+}
+
+void InheritFd(struct Fd *fd) {
+  socklen_t addrlen;
+  if (!fd) return;
+  if (!GetFdSocketType(fd->fildes, &fd->socktype)) {
+    fd->norestart = IsNoRestartSocket(fd->fildes);
+    addrlen = sizeof(fd->saddr);
+    getsockname(fd->fildes, (struct sockaddr *)&fd->saddr, &addrlen);
+  }
+}
+
+void AddStdFd(struct Fds *fds, int fildes) {
+  int flags;
+  if ((flags = fcntl(fildes, F_GETFL, 0)) >= 0) {
+    InheritFd(AddFd(fds, fildes, flags));
+  }
 }

@@ -26,6 +26,7 @@
 
 #include "blink/debug.h"
 #include "blink/lock.h"
+#include "blink/macros.h"
 #include "blink/overlays.h"
 
 #ifdef UNWIND
@@ -157,7 +158,8 @@ const char *DescribeProt(int prot) {
 }
 
 const char *DescribeSignal(int sig) {
-  _Thread_local static char buf[21];
+  char *p;
+  _Thread_local static char buf[30];
   switch (sig) {
     case SIGHUP_LINUX:
       return "SIGHUP";
@@ -224,9 +226,14 @@ const char *DescribeSignal(int sig) {
     case SIGPWR_LINUX:
       return "SIGPWR";
     default:
-      FormatInt64(buf, sig);
-      return buf;
+      break;
   }
+  p = buf;
+  if (SIGRTMIN_LINUX <= sig && sig <= SIGRTMAX_LINUX) {
+    p = stpcpy(p, "SIGRTMIN+");
+  }
+  p = FormatInt64(p, sig);
+  return buf;
 }
 
 const char *DescribeSyscallResult(i64 ax) {
@@ -391,22 +398,19 @@ const char *DescribeFlags(int flags) {
 
 const char *DescribeOp(struct Machine *m, i64 pc) {
   _Thread_local static char b[256];
-  int i, o = 0, n = sizeof(b);
+  int e, i, k, o = 0, n = sizeof(b);
   struct Dis d = {true};
   char spec[64];
-  if (!GetInstruction(m, pc, d.xedd)) {
-    DisInst(&d, b + o, DisSpec(d.xedd, spec));
-  } else if (d.xedd->length) {
-    for (i = 0; i < d.xedd->length; ++i) {
-      if (i) {
-        APPEND(",");
-      } else {
-        APPEND(".byte\t");
-      }
-      APPEND("0x%02x", d.xedd->bytes[i]);
+  if (!(e = GetInstruction(m, pc, d.xedd))) {
+    o = DisInst(&d, b, DisSpec(d.xedd, spec)) - b;
+  }
+  if (e != kMachineSegmentationFault) {
+    k = MAX(8, d.xedd->length);
+    for (i = 0; i < k; ++i) {
+      APPEND(" %02x", d.xedd->bytes[i]);
     }
   } else {
-    APPEND("indescribable");
+    APPEND("segfault");
   }
   DisFree(&d);
   return b;

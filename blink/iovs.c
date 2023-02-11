@@ -19,13 +19,16 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include "blink/endian.h"
 #include "blink/errno.h"
 #include "blink/iovs.h"
+#include "blink/limits.h"
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
+#include "blink/stats.h"
 #include "blink/types.h"
 #include "blink/util.h"
 
@@ -53,9 +56,18 @@ static int AppendIovs(struct Iovs *ib, void *base, size_t len) {
     n = ib->n;
     if (i &&
         (uintptr_t)base == (uintptr_t)p[i - 1].iov_base + p[i - 1].iov_len) {
+      STATISTIC(++iov_stretches);
+      if (p[i - 1].iov_len + len > NUMERIC_MAX(ssize_t)) return einval();
       p[i - 1].iov_len += len;
     } else {
-      if (i == n) {
+      if (i < n) {
+        if (!i) {
+          STATISTIC(++iov_created);
+        } else {
+          STATISTIC(++iov_fragments);
+        }
+      } else {
+        STATISTIC(++iov_reallocs);
         n += n >> 1;
         if (p == ib->init) {
           if (!(p = (struct iovec *)malloc(sizeof(*p) * n))) return -1;
@@ -74,12 +86,24 @@ static int AppendIovs(struct Iovs *ib, void *base, size_t len) {
   return 0;
 }
 
-int AppendIovsReal(struct Machine *m, struct Iovs *ib, i64 addr, u64 size) {
+int AppendIovsReal(struct Machine *m, struct Iovs *ib, i64 addr, u64 size,
+                   int prot) {
   void *real;
   unsigned got;
-  u64 have;
+  u64 have, mask, need;
+  if (size > NUMERIC_MAX(ssize_t)) return einval();
+  need = 0;
+  mask = 0;
+  if (prot & PROT_READ) {
+    mask |= PAGE_U;
+    need |= PAGE_U;
+  }
+  if (prot & PROT_WRITE) {
+    mask |= PAGE_RW;
+    need |= PAGE_RW;
+  }
   while (size && ib->i < IOV_MAX) {
-    if (!(real = LookupAddress(m, addr))) return efault();
+    if (!(real = LookupAddress2(m, addr, mask, need))) return efault();
     have = 4096 - (addr & 4095);
     got = MIN(size, have);
     if (AppendIovs(ib, real, got) == -1) return -1;
@@ -89,27 +113,23 @@ int AppendIovsReal(struct Machine *m, struct Iovs *ib, i64 addr, u64 size) {
   return 0;
 }
 
-int AppendIovsGuest(struct Machine *m, struct Iovs *iv, i64 iovaddr,
-                    i64 iovlen) {
+int AppendIovsGuest(struct Machine *m, struct Iovs *iv, i64 iovaddr, int iovlen,
+                    int prot) {
   int rc;
-  size_t i;
-  u64 iovsize;
+  size_t i, iovsize;
   const struct iovec_linux *guestiovs;
-  if (!mulo(iovlen, sizeof(struct iovec_linux), &iovsize) &&
-      (0 <= iovsize && iovsize <= 0x7ffff000)) {
-    if ((guestiovs = (const struct iovec_linux *)Schlep(m, iovaddr, iovsize))) {
-      for (rc = i = 0; i < iovlen && iv->i < IOV_MAX; ++i) {
-        if (AppendIovsReal(m, iv, Read64(guestiovs[i].base),
-                           Read64(guestiovs[i].len)) == -1) {
-          rc = -1;
-          break;
-        }
+  if (iovlen > IOV_MAX_LINUX) return einval();
+  iovsize = iovlen * sizeof(struct iovec_linux);
+  if ((guestiovs = (const struct iovec_linux *)SchlepR(m, iovaddr, iovsize))) {
+    for (rc = i = 0; i < iovlen && iv->i < IOV_MAX; ++i) {
+      if (AppendIovsReal(m, iv, Read64(guestiovs[i].base),
+                         Read64(guestiovs[i].len), prot) == -1) {
+        rc = -1;
+        break;
       }
-      return rc;
-    } else {
-      return -1;
     }
+    return rc;
   } else {
-    return eoverflow();
+    return -1;
   }
 }

@@ -207,7 +207,10 @@ struct System {
   u64 cr3;
   u64 cr4;
   i64 brk;
+  i64 rss;
+  i64 vss;
   i64 automap;
+  i64 memchurn;
   i64 codestart;
   unsigned long codesize;
   struct MachineMemstat memstat;
@@ -225,6 +228,7 @@ struct System {
   struct sigaction_linux hands[64] GUARDED_BY(sig_lock);
   u64 blinksigs;  // signals blink itself handles
   pthread_mutex_t mmap_lock;
+  struct rlimit_linux rlim[RLIM_NLIMITS_LINUX];
   void (*onbinbase)(struct Machine *);
   void (*onlongbranch)(struct Machine *);
   int (*exec)(char *, char **, char **);
@@ -328,13 +332,13 @@ struct Machine {                           //
   i64 faultaddr;                           // used for tui error reporting
   _Atomicish(u64) sigmask;                 // signals that've been blocked
   u32 tlbindex;                            //
-  int sig;                                 // signal under active delivery
-  u64 siguc;                               // hosted address of ucontext_t
-  u64 sigfp;                               // virtual address of fpstate_t
   struct System *system;                   //
+  int sigdepth;                            //
   bool canhalt;                            //
   bool metal;                              //
+  bool restored;                           //
   bool interrupted;                        //
+  bool issigsuspend;                       //
   sigjmp_buf onhalt;                       //
   struct sigaltstack_linux sigaltstack;    //
   i64 robust_list;                         //
@@ -348,7 +352,6 @@ struct Machine {                           //
 extern _Thread_local struct Machine *g_machine;
 extern const nexgen32e_f kConvert[3];
 extern const nexgen32e_f kSax[3];
-extern bool g_wasteland;
 
 struct System *NewSystem(int);
 void FreeSystem(struct System *);
@@ -364,7 +367,7 @@ void RemoveOtherThreads(struct System *);
 void KillOtherThreads(struct System *);
 void ResetCpu(struct Machine *);
 void ResetTlb(struct Machine *);
-void CollectGarbage(struct Machine *);
+void CollectGarbage(struct Machine *, size_t);
 void ResetInstructionCache(struct Machine *);
 void GeneralDispatch(P);
 nexgen32e_f GetOp(long);
@@ -377,6 +380,7 @@ int ReserveVirtual(struct System *, i64, i64, u64, int, i64, bool);
 char *FormatPml4t(struct Machine *);
 i64 FindVirtual(struct System *, i64, i64);
 int FreeVirtual(struct System *, i64, i64);
+void CleanseMemory(struct System *, size_t);
 void LoadArgv(struct Machine *, char *, char **, char **);
 _Noreturn void HaltMachine(struct Machine *, int);
 _Noreturn void RaiseDivideError(struct Machine *);
@@ -387,14 +391,18 @@ _Noreturn void OpUd(P);
 _Noreturn void OpHlt(P);
 void JitlessDispatch(P);
 void RestoreIp(struct Machine *);
+void CheckForSignals(struct Machine *);
 void UnlockRobustFutexes(struct Machine *);
+void *AddToFreeList(struct Machine *, void *);
 
 bool IsValidAddrSize(i64, i64) pureconst;
 bool OverlapsPrecious(i64, i64) pureconst;
 char **CopyStrList(struct Machine *, i64);
 char *CopyStr(struct Machine *, i64);
 char *LoadStr(struct Machine *, i64);
-void *Schlep(struct Machine *, i64, size_t);
+void *SchlepR(struct Machine *, i64, size_t);
+void *SchlepW(struct Machine *, i64, size_t);
+void *SchlepRW(struct Machine *, i64, size_t);
 bool IsValidMemory(struct Machine *, i64, i64, int);
 int RegisterMemory(struct Machine *, i64, void *, size_t);
 u8 *GetPageAddress(struct System *, u64);
@@ -404,6 +412,7 @@ u8 *BeginLoadStore(struct Machine *, i64, size_t, void *[2], u8 *);
 u8 *BeginStore(struct Machine *, i64, size_t, void *[2], u8 *);
 u8 *BeginStoreNp(struct Machine *, i64, size_t, void *[2], u8 *);
 u8 *LookupAddress(struct Machine *, i64);
+u8 *LookupAddress2(struct Machine *, i64, u64, u64);
 u8 *Load(struct Machine *, i64, size_t, u8 *);
 u8 *MallocPage(void);
 u8 *RealAddress(struct Machine *, i64);
@@ -428,6 +437,8 @@ int GetProtection(u64);
 u64 SetProtection(int);
 int ClassifyOp(u64) pureconst;
 void Terminate(P, void (*)(struct Machine *, u64));
+i64 GetMaxRss(struct System *);
+i64 GetMaxVss(struct System *);
 
 void CountOp(long *);
 void FastPush(struct Machine *, long);
@@ -477,6 +488,7 @@ void OpCvt0f5a(P);
 void OpCvt0f5b(P);
 void OpCvt0fE6(P);
 void OpCvtt0f2c(P);
+void OpDaa(P);
 void OpDas(P);
 void OpDecEvqp(P);
 void OpDivAlAhAxEbSigned(P);

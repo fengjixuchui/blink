@@ -11,7 +11,7 @@ This project contains two programs:
 different operating systems and hardware architectures. It's designed to
 do the same thing as the `qemu-x86_64` command, except that
 
-1. blink is 180kb in size, whereas the qemu-x86_64 executable is 4mb
+1. blink is 190kb in size, whereas the qemu-x86_64 executable is 4mb
 
 2. blink will run your Linux binaries on any POSIX platform, whereas
    qemu-x86_64 only supports Linux
@@ -35,7 +35,7 @@ We regularly test that Blink is able run x86-64-linux binaries on the
 following platforms:
 
 - Linux (x86, ARM, RISC-V, MIPS, PowerPC, s390x)
-- MacOS (x86, ARM)
+- macOS (x86, ARM)
 - FreeBSD
 - OpenBSD
 - NetBSD
@@ -72,11 +72,43 @@ step, `c` for continue, and scroll wheel for reverse debugging.
 o//blink/blinkenlights third_party/cosmo/tinyhello.elf
 ```
 
+### Alternative Builds
+
+For maximum tinyness, use `MODE=tiny`, since it makes Blink's binary
+footprint 50% smaller. Performance isn't impacted. Please note that all
+assertions will be removed, as well as all logging. Use this mode if
+you're confident that Blink is bug-free for your use case.
+
+```sh
+make MODE=tiny
+strip o/tiny/blink/blink
+ls -hal o/tiny/blink/blink
+```
+
+The traditional `MODE=rel` or `MODE=opt` modes are available. Use this
+mode if you're on a non-JIT architecture (since this won't improve
+performance on AMD64 and ARM64) and you're confident that Blink is
+bug-free for your use case, and would rather have Blink not create a
+`blink.log` or print `SIGSEGV` delivery warnings to standard error,
+since many apps implement their own crash reporting.
+
+```sh
+make MODE=rel
+o/rel/blink/blink -h
+```
+
+You can hunt down bugs in Blink using the following build modes:
+
+- `MODE=asan` helps find memory safety bugs
+- `MODE=tsan` helps find threading related bugs
+- `MODE=ubsan` to find violations of the C standard
+- `MODE=msan` helps find uninitialized memory errors
+
 ### Testing
 
-Blink is tested primarily using precompiled x86 binaries, which are
-downloaded automatically. You can check how well Blink works on your
-local platform by running:
+Blink is tested primarily using precompiled binaries downloaded
+automatically. Blink has more than 700 test programs total. You can
+check how well Blink works on your local platform by running:
 
 ```sh
 make check
@@ -96,42 +128,17 @@ make emulates
 
 ### Production Worthiness
 
-For independent objective analysis of how far Blink has come thus far,
-we've also been using test suites developed by other people. Blink
-passes 329 test suites from the [Linux Test
-Project](https://github.com/linux-test-project/ltp), see
-<https://justine.lol/blink-ltp.txt>. If you run [Musl Libc's unit test
-suite](https://github.com/jart/libc-test) on Blink, then 76% of the test
-binaries work successfully, see
-<https://justine.lol/blink-musl-tests.sh.txt>.
-
-### Alternative Builds
-
-For maximum performance, use `MODE=rel` or `MODE=opt`. Please note the
-release mode builds will remove all the logging and assertion statements
-and Blink isn't mature enough for that yet. So extra caution is advised.
-
-```sh
-make MODE=rel
-o/rel/blink/blink -h
-```
-
-For maximum tinyness, use `MODE=tiny`. This build mode will not only
-remove logging and assertion statements, but also reduce performance in
-favor of smaller binary size whenever possible.
-
-```sh
-make MODE=tiny
-strip o/tiny/blink/blink
-ls -hal o/tiny/blink/blink
-```
-
-You can hunt down bugs in Blink using the following build modes:
-
-- `MODE=asan` helps find memory safety bugs
-- `MODE=tsan` helps find threading related bugs
-- `MODE=ubsan` to find violations of the C standard
-- `MODE=msan` helps find uninitialized memory errors
+Blink passes 194 test suites from the Cosmopolitan Libc project (see
+[third_party/cosmo](third_party/cosmo). Blink passes 350 test suites
+from the [Linux Test Project](https://github.com/linux-test-project/ltp)
+(see [third_party/ltp](third_party/ltp). Blink passes 108 of [Musl
+Libc's unit test suite](https://github.com/jart/libc-test) (see
+[third_party/libc-test](third_party/libc-test)). The tests we haven't
+included are usually due to (1) floating ULP rounding errors (Blink aims
+to be fast and tiny, so we're on the fence about floating point
+emulation), and (2) APIs that can't or won't be supported, e.g. System V
+message queues. Blink runs the precompiled Linux test binaries above on
+other operating systems too, e.g. Apple M1, FreeBSD, Cygwin.
 
 ## Reference
 
@@ -157,6 +164,10 @@ The following `FLAG` arguments are provided:
 
 - `-h` shows this help
 
+- `-e` means log to standard error (fd 2) in addition to the log file.
+  If logging to *only* standard error is desired, then `-eL/dev/null`
+  may be used.
+
 - `-j` disables Just-In-Time (JIT) compilation, which will make Blink go
   ~10x slower.
 
@@ -168,15 +179,16 @@ The following `FLAG` arguments are provided:
 
 - `-0` allows `argv[0]` to be specified on the command line. Under
   normal circumstances, `blink cmd arg1` is equivalent to `execve("cmd",
-  {"cmd", "arg1})` since that's how most programs are launched. However
+  {"cmd", "arg1"})` since that's how most programs are launched. However
   if you need the full power of execve() process spawning, you can say
   `blink -0 cmd arg0 arg1` which is equivalent to `execve("cmd",
-  {"arg0", "arg1})`.
+  {"arg0", "arg1"})`.
 
-- `-L PATH` specifies the log path. The default log path is
-  `$TMPDIR/blink.log` or `/tmp/blink.log` if `$TMPDIR` isn't defined. If
-  a log file isn't desired, this flag may be set to `-` or `/dev/stderr`
-  for logging to standard error.
+- `-L PATH` specifies the log path. The default log path is `blink.log`
+  in the current directory at startup. This log file won't be created
+  until something is actually logged. If logging to a file isn't
+  desired, then `-L /dev/null` may be used. See also the `-e` flag for
+  logging to standard error.
 
 - `-S` enables system call logging. This will emit to the log file the
   names of system calls each time a `SYSCALL` operation in invoked,
@@ -199,7 +211,7 @@ recommend the following terminals, ordered by preference:
 - [KiTTY](https://sw.kovidgoyal.net/kitty/) (Linux)
 - [PuTTY](https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html) (Windows)
 - Gnome Terminal (Linux)
-- Terminal.app (MacOS)
+- Terminal.app (macOS)
 - CMD.EXE (Windows 10+)
 - PowerShell (Windows 10+)
 - Xterm (Linux)
@@ -268,10 +280,10 @@ The following `FLAG` arguments are provided:
 
 - `-0` allows `argv[0]` to be specified on the command line. Under
   normal circumstances, `blinkenlights cmd arg1` is equivalent to
-  `execve("cmd", {"cmd", "arg1})` since that's how most programs are
+  `execve("cmd", {"cmd", "arg1"})` since that's how most programs are
   launched. However if you need the full power of execve() process
   spawning, you can say `blinkenlights -0 cmd arg0 arg1` which is
-  equivalent to `execve("cmd", {"arg0", "arg1})`.
+  equivalent to `execve("cmd", {"arg0", "arg1"})`.
 
 - `-t` may be used to disable Blinkenlights TUI mode. This makes the
   program behave similarly to the `blink` command, however not as good.
@@ -343,13 +355,32 @@ and `blinkenlights` commands:
 
 - `BLINK_LOG_FILENAME` may be specified to supply a log path to be used
   in cases where the `-L PATH` flag isn't specified. This value should
-  be an absolute path. It may be `/dev/stderr` to avoid needing a file.
+  be an absolute path. If logging to standard error is desired, use the
+  `blink -e` flag.
+
+- `BLINK_OVERLAYS` specifies root one or more directories to use as the
+  root filesystem. Similar to `$PATH` this is a colon delimited list of
+  pathnames. If relative paths are specified, they'll be resolved to an
+  absolute path at startup time. Overlays only apply to IO system calls
+  that specify an absolute path. The empty string overlay means use the
+  normal `/` root filesystem. The default value is `:o`, which means if
+  the absolute path `/$f` is opened, then first check if `/$f` exists,
+  and if it doesn't, then check if `o/$f` exists, in which case open
+  that instead. Blink uses this convention to open shared object tests.
+  It favors the system version if it exists, but also downloads
+  `ld-musl-x86_64.so.1` to `o/lib/ld-musl-x86_64.so.1` so the dynamic
+  linker can transparently find it on platforms like Apple, that don't
+  let users put files in the root folder. On the other hand, it's
+  possible to say `BLINK_OVERLAYS=o:` so that `o/...` takes precedence
+  over `/...` (noting again that empty string means root). If a single
+  overlay is specified that isn't empty string, then it'll effectively
+  act as a restricted chroot environment.
 
 ## Compiling and Running Programs under Blink
 
 Blink can be picky about which Linux binaries it'll execute. It may also
 be the case that your Linux binary will only run under Blink on Linux,
-but report errors if run under Blink on another platform, e.g. MacOS. In
+but report errors if run under Blink on another platform, e.g. macOS. In
 our experience, how successfully a program can run under Blink depends
 almost entirely on (1) how it was compiled, and (2) which C library it
 uses. This section will provide guidance on which tools will work best.
@@ -385,6 +416,7 @@ So the recommended approach is either:
 
 1. Build your app using Cosmopolitan Libc, otherwise
 2. Build your app using GNU Autotools on Alpine Linux
+3. Build your app using Buildroot
 
 For Cosmopolitan, please read [Getting Started with Cosmopolitan
 Libc](https://jeskin.net/blog/getting-started-with-cosmopolitan-libc/)
@@ -409,8 +441,32 @@ make -j8 o//examples/kilo.com
 blinkenlights -jm o//examples/kilo.com
 ```
 
-But let's say you want to build an Autotools project like Emacs. The
-best way to do that is to spin up an Alpine Linux container and use
+Blink is great for making single-file autonomous binaries like the above
+easily copyable across platforms. If you're more interested in building
+systems instead, then [Buildroot](https://buildroot.org/) is one way to
+create a Linux userspace that'll run under Blink. All you have to do is
+set the `$BLINK_OVERLAYS` environment variable to the buildroot target
+folder, which will ask Blink to create a chroot'd environment.
+
+```
+cd ~/buildroot
+export CC="gcc -Wl,-z,common-page-size=65536,-z,max-page-size=65536"
+make menuconfig
+make
+cp -R output/target ~/blinkroot
+sudo mount -t devtmpfs none ~/blinkroot/dev
+sudo mount -t sysfs none ~/blinkroot/sys
+sudo mount -t proc none ~/blinkroot/proc
+cd ~/blink
+make -j8
+export BLINK_OVERLAYS=$HOME/blinkroot
+o//blink/blink sh
+uname -a
+Linux hostname 4.5 blink-1.0 x86_64 GNU/Linux
+```
+
+If you want to build an Autotools project like Emacs, the best way to do
+that is to spin up an Alpine Linux container and use
 [jart/blink-isystem](https://github.com/jart/blink-isystem) as your
 system header subset. blink-isystem is basically just the Musl Linux
 headers with all the problematic APIs commented out. That way autoconf
@@ -574,7 +630,7 @@ currently does nothing to address) but they tend to be comparatively
 minor, e.g. an op returning `NAN` instead of `-NAN`.
 
 Blink has reasonably comprehensive coverage of the baseline ISAs,
-including even support for BCD operations (even in long mode!) But there
+including even support for BCD operations (even in long mode!). But there
 are some truly fringe instructions Blink hasn't implemented, such as
 `BOUND` and `ENTER`. Most of the unsupported instructions, are usually
 ring-0 system instructions, since Blink is primarily a user-mode VM, and
@@ -598,7 +654,7 @@ number:
   `EBX ‖ ECX ‖ EDX` with zero filling for strings shorter than 12:
 
   - `Linux` for Linux
-  - `XNU` for MacOS
+  - `XNU` for macOS
   - `FreeBSD` for FreeBSD
   - `NetBSD` for NetBSD
   - `OpenBSD` for OpenBSD

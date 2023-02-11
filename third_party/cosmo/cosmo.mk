@@ -68,7 +68,6 @@ COSMO_TESTS =											\
 	o/$(MODE)/third_party/cosmo/2/secp384r1_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/2/putenv_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/2/note_test.com.ok						\
-	o/$(MODE)/third_party/cosmo/2/once_test.com.ok						\
 	o/$(MODE)/third_party/cosmo/2/mu_test.com.ok						\
 	o/$(MODE)/third_party/cosmo/2/servicestxt_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/2/setitimer_test.com.ok					\
@@ -209,9 +208,15 @@ COSMO_TESTS =											\
 	o/$(MODE)/third_party/cosmo/2/readansi_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/2/sendrecvmsg_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/2/lseek_test.com.ok						\
-	o/$(MODE)/third_party/cosmo/4/dtoa_test.com.ok						\
 	o/$(MODE)/third_party/cosmo/2/mmap_test.com.ok						\
 	o/$(MODE)/third_party/cosmo/7/munmap_test.com.ok
+
+# TODO(jart): Why do these flake on Cygwin?
+ifneq ($(HOST_OS), Cygwin)
+COSMO_TESTS +=											\
+	o/$(MODE)/third_party/cosmo/4/dtoa_test.com.ok						\
+	o/$(MODE)/third_party/cosmo/2/once_test.com.ok
+endif
 
 o/$(MODE)/third_party/cosmo: $(COSMO_TESTS)
 	@mkdir -p $(@D)

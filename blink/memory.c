@@ -27,6 +27,7 @@
 #include "blink/endian.h"
 #include "blink/errno.h"
 #include "blink/likely.h"
+#include "blink/lock.h"
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
@@ -62,9 +63,9 @@ u8 *GetPageAddress(struct System *s, u64 entry) {
 }
 
 u64 HandlePageFault(struct Machine *m, u64 entry, u64 table, unsigned index) {
-  u64 x;
-  u64 page;
+  u64 x, res, page;
   unassert(entry & PAGE_RSRV);
+  LOCK(&m->system->mmap_lock);
   // page faults should only happen in non-linear mode
   if (!(entry & (PAGE_HOST | PAGE_MAP | PAGE_MUG))) {
     // an anonymous page is being accessed for the first time
@@ -73,9 +74,9 @@ u64 HandlePageFault(struct Machine *m, u64 entry, u64 table, unsigned index) {
       ++m->system->memstat.committed;
       x = (page & (PAGE_TA | PAGE_HOST)) | (entry & ~(PAGE_TA | PAGE_RSRV));
       Store64(GetPageAddress(m->system, table) + index * 8, x);
-      return x;
+      res = x;
     } else {
-      return 0;
+      res = 0;
     }
   } else {
     // a file-mapped page is being accessed for the first time
@@ -84,8 +85,10 @@ u64 HandlePageFault(struct Machine *m, u64 entry, u64 table, unsigned index) {
     ++m->system->memstat.committed;
     x = entry & ~PAGE_RSRV;
     Store64(GetPageAddress(m->system, table) + index * 8, x);
-    return x;
+    res = x;
   }
+  UNLOCK(&m->system->mmap_lock);
+  return res;
 }
 
 static u64 FindPageTableEntry(struct Machine *m, u64 page) {
@@ -123,7 +126,7 @@ static u64 FindPageTableEntry(struct Machine *m, u64 page) {
   return entry;
 }
 
-u8 *LookupAddress(struct Machine *m, i64 virt) {
+u8 *LookupAddress2(struct Machine *m, i64 virt, u64 mask, u64 need) {
   u8 *host;
   u64 entry, page;
   if (m->mode == XED_MODE_LONG ||
@@ -137,27 +140,30 @@ u8 *LookupAddress(struct Machine *m, i64 virt) {
       STATISTIC(++tlb_hits_1);
     } else if (-0x800000000000 <= virt && virt < 0x800000000000) {
       if (!(entry = FindPageTableEntry(m, page))) {
-        efault();
-        return 0;
+        return (u8 *)efault0();
       }
     } else {
-      efault();
-      return 0;
+      return (u8 *)efault0();
     }
   } else if (virt >= 0 && virt <= 0xffffffff &&
              (virt & 0xffffffff) + 4095 < kRealSize) {
     unassert(m->system->real);
     return m->system->real + virt;
   } else {
-    efault();
-    return 0;
+    return (u8 *)efault0();
+  }
+  if ((entry & mask) != need) {
+    return (u8 *)efault0();
   }
   if ((host = GetPageAddress(m->system, entry))) {
     return host + (virt & 4095);
   } else {
-    efault();
-    return 0;
+    return (u8 *)efault0();
   }
+}
+
+u8 *LookupAddress(struct Machine *m, i64 virt) {
+  return LookupAddress2(m, virt, PAGE_U, PAGE_U);
 }
 
 u8 *GetAddress(struct Machine *m, i64 v) {
@@ -348,12 +354,13 @@ void *AddToFreeList(struct Machine *m, void *mem) {
 // Returns pointer to memory in guest memory. If the memory overlaps a
 // page boundary, then it's copied, and the temporary memory is pushed
 // to the free list. Returns NULL w/ EFAULT or ENOMEM on error.
-void *Schlep(struct Machine *m, i64 addr, size_t size) {
+static void *Schlep(struct Machine *m, i64 addr, size_t size, u64 mask,
+                    u64 need) {
   char *copy;
   size_t have;
   void *res, *page;
   if (!size) return 0;
-  if (!(page = LookupAddress(m, addr))) return 0;
+  if (!(page = LookupAddress2(m, addr, mask, need))) return 0;
   have = 4096 - (addr & 4095);
   if (size <= have) {
     res = page;
@@ -361,7 +368,7 @@ void *Schlep(struct Machine *m, i64 addr, size_t size) {
     if (!(copy = (char *)malloc(size))) return 0;
     memcpy(copy, page, have);
     for (; have < size; have += 4096) {
-      if (!(page = LookupAddress(m, addr + have))) {
+      if (!(page = LookupAddress2(m, addr + have, mask, need))) {
         free(copy);
         return 0;
       }
@@ -369,8 +376,23 @@ void *Schlep(struct Machine *m, i64 addr, size_t size) {
     }
     res = AddToFreeList(m, copy);
   }
-  SetReadAddr(m, addr, size);
   return res;
+}
+
+void *SchlepR(struct Machine *m, i64 addr, size_t size) {
+  SetReadAddr(m, addr, size);
+  return Schlep(m, addr, size, PAGE_U, PAGE_U);
+}
+
+void *SchlepW(struct Machine *m, i64 addr, size_t size) {
+  SetWriteAddr(m, addr, size);
+  return Schlep(m, addr, size, PAGE_RW, PAGE_RW);
+}
+
+void *SchlepRW(struct Machine *m, i64 addr, size_t size) {
+  SetReadAddr(m, addr, size);
+  SetWriteAddr(m, addr, size);
+  return Schlep(m, addr, size, PAGE_U | PAGE_RW, PAGE_U | PAGE_RW);
 }
 
 static char *LoadStrImpl(struct Machine *m, i64 addr) {
@@ -378,7 +400,7 @@ static char *LoadStrImpl(struct Machine *m, i64 addr) {
   char *copy, *page, *p;
   have = 4096 - (addr & 4095);
   if (!addr) return 0;
-  if (!(page = (char *)LookupAddress(m, addr))) return 0;
+  if (!(page = (char *)LookupAddress2(m, addr, PAGE_U, PAGE_U))) return 0;
   if ((p = (char *)memchr(page, '\0', have))) {
     SetReadAddr(m, addr, p - page + 1);
     return page;
@@ -386,7 +408,7 @@ static char *LoadStrImpl(struct Machine *m, i64 addr) {
   if (!(copy = (char *)malloc(have + 4096))) return 0;
   memcpy(copy, page, have);
   for (;;) {
-    if (!(page = (char *)LookupAddress(m, addr + have))) break;
+    if (!(page = (char *)LookupAddress2(m, addr + have, PAGE_U, PAGE_U))) break;
     if ((p = (char *)memccpy(copy + have, page, '\0', 4096))) {
       SetReadAddr(m, addr, have + (p - (copy + have)) + 1);
       return (char *)AddToFreeList(m, copy);

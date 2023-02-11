@@ -38,6 +38,7 @@
 #include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/overlays.h"
+#include "blink/pml4t.h"
 #include "blink/signal.h"
 #include "blink/sigwinch.h"
 #include "blink/stats.h"
@@ -47,7 +48,7 @@
 #include "blink/x86.h"
 #include "blink/xlat.h"
 
-#define OPTS "hjemsS0L:"
+#define OPTS "hjemsS0L:C:"
 #define USAGE \
   " [-" OPTS "] PROG [ARGS...]\n\
   -h                   help\n\
@@ -58,7 +59,8 @@
   -s                   print statistics on exit\n\
   -S                   enable system call logging\n\
   -L PATH              log filename (default ${TMPDIR:-/tmp}/blink.log)\n\
-  $BLINK_OVERLAYS      file system roots [default \":o\"\n\
+  -C PATH              sets chroot dir or overlay spec [default \":o\"]\n\
+  $BLINK_OVERLAYS      file system roots [default \":o\"]\n\
   $BLINK_LOG_FILENAME  log filename (same as -L flag)\n"
 
 extern char **environ;
@@ -123,16 +125,17 @@ static int Exec(char *prog, char **argv, char **envp) {
       AddStdFd(&g_machine->system->fds, i);
     }
   } else {
-    // execve() was called and emulation has been requested.
-    // we don't currently wipe out all the mappings that the last
-    // program made so we need to disable the fixed map safety check
-    g_wasteland = true;
+    unassert(!FreeVirtual(old->system, -0x800000000000, 0x1000000000000));
+    for (i = 1; i <= 64; ++i) {
+      if (Read64(old->system->hands[i - 1].handler) == SIG_IGN_LINUX) {
+        Write64(g_machine->system->hands[i - 1].handler, SIG_IGN_LINUX);
+      }
+    }
+    memcpy(g_machine->system->rlim, old->system->rlim,
+           sizeof(old->system->rlim));
     LoadProgram(g_machine, prog, argv, envp);
-    // locks are only superficially required since we killed everything
-    LOCK(&old->system->fds.lock);
     g_machine->system->fds.list = old->system->fds.list;
     old->system->fds.list = 0;
-    UNLOCK(&old->system->fds.lock);
     // releasing the execve() lock must come after unlocking fds
     memcpy(&oldmask, &old->system->exec_sigmask, sizeof(oldmask));
     UNLOCK(&old->system->exec_lock);
@@ -167,6 +170,8 @@ _Noreturn static void PrintUsage(int argc, char *argv[], int rc, int fd) {
 static void GetOpts(int argc, char *argv[]) {
   int opt;
   FLAG_nolinear = !CanHaveLinearMemory();
+  FLAG_overlays = getenv("BLINK_OVERLAYS");
+  if (!FLAG_overlays) FLAG_overlays = DEFAULT_OVERLAYS;
 #if LOG_ENABLED
   FLAG_logpath = getenv("BLINK_LOG_FILENAME");
 #endif
@@ -198,6 +203,9 @@ static void GetOpts(int argc, char *argv[]) {
         break;
       case 'L':
         FLAG_logpath = optarg_;
+        break;
+      case 'C':
+        FLAG_overlays = optarg_;
         break;
       case 'h':
         PrintUsage(argc, argv, 0, 1);
@@ -243,11 +251,20 @@ void exit(int status) {
 
 int main(int argc, char *argv[]) {
   SetupWeb();
+  // Ensure utf-8 is printed correctly on windows, this method
+  // has issues(http://stackoverflow.com/a/10884364/4279) but
+  // should work for at least windows 7 and newer.
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  SetConsoleOutputCP(CP_UTF8);
+#endif
   g_blink_path = argc > 0 ? argv[0] : 0;
   GetOpts(argc, argv);
   if (optind_ == argc) PrintUsage(argc, argv, 48, 2);
-  SetOverlays(getenv("BLINK_OVERLAYS"));
   WriteErrorInit();
+  if (SetOverlays(FLAG_overlays)) {
+    WriteErrorString("bad blink overlays spec; see log for details\n");
+    exit(1);
+  }
   HandleSigs();
   InitBus();
   if (!Commandv(argv[optind_], g_pathbuf, sizeof(g_pathbuf))) {
