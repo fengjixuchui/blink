@@ -33,6 +33,7 @@
 void AssertFailed(const char *file, int line, const char *msg) {
   _Thread_local static bool noreentry;
   char b[512];
+  FLAG_nologstderr = false;
   snprintf(b, sizeof(b), "%s:%d: assertion failed: %s (%s)\n", file, line, msg,
            DescribeHostErrno(errno));
   b[sizeof(b) - 1] = 0;

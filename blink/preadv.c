@@ -16,24 +16,24 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
-#if defined(__CYGWIN__) || defined(__HAIKU__) || defined(__APPLE__)
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "blink/errno.h"
+#include "blink/iovs.h"
 #include "blink/limits.h"
 #include "blink/macros.h"
 #include "blink/preadv.h"
 
 // preadv() and pwritev() need MacOS 11+ c. 2020
 
-ssize_t preadv(int fd, const struct iovec *iov, int iovcnt, off_t offset) {
+ssize_t preadv_(int fd, const struct iovec *iov, int iovcnt, off_t offset) {
   int i;
   char *p;
   ssize_t rc;
   size_t j, n, m, t;
-  if (offset < 0 || iovcnt <= 0 || iovcnt > IOV_MAX) {
+  if (offset < 0 || iovcnt <= 0 || iovcnt > GetIovMax()) {
     return einval();
   }
   for (n = 0, i = 0; i < iovcnt; ++i) {
@@ -43,7 +43,7 @@ ssize_t preadv(int fd, const struct iovec *iov, int iovcnt, off_t offset) {
     }
     n = t;
   }
-  if (!(p = malloc(n))) {
+  if (!(p = (char *)malloc(n))) {
     return enomem();
   }
   if ((rc = pread(fd, p, n, offset)) != -1) {
@@ -56,12 +56,12 @@ ssize_t preadv(int fd, const struct iovec *iov, int iovcnt, off_t offset) {
   return rc;
 }
 
-ssize_t pwritev(int fd, const struct iovec *iov, int iovcnt, off_t offset) {
+ssize_t pwritev_(int fd, const struct iovec *iov, int iovcnt, off_t offset) {
   int i;
   char *p;
   ssize_t rc;
   size_t j, n, m, t;
-  if (offset < 0 || iovcnt <= 0 || iovcnt > IOV_MAX) {
+  if (offset < 0 || iovcnt <= 0 || iovcnt > GetIovMax()) {
     return einval();
   }
   for (n = 0, i = 0; i < iovcnt; ++i) {
@@ -71,7 +71,7 @@ ssize_t pwritev(int fd, const struct iovec *iov, int iovcnt, off_t offset) {
     }
     n = t;
   }
-  if (!(p = malloc(n))) {
+  if (!(p = (char *)malloc(n))) {
     return enomem();
   }
   for (j = 0, i = 0; i < iovcnt && j < n; ++i, j += m) {
@@ -82,5 +82,3 @@ ssize_t pwritev(int fd, const struct iovec *iov, int iovcnt, off_t offset) {
   free(p);
   return rc;
 }
-
-#endif /* __CYGWIN__ */

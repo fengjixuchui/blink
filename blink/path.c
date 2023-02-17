@@ -31,11 +31,18 @@
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
+#include "blink/modrm.h"
 #include "blink/overlays.h"
 #include "blink/rde.h"
 #include "blink/stats.h"
 
+#ifdef DISABLE_OVERLAYS
+#define OverlaysOpen openat
+#endif
+
 #define APPEND(...) o += snprintf(b + o, n - o, __VA_ARGS__)
+
+#ifdef HAVE_JIT
 
 void (*AddPath_StartOp_Hook)(P);
 
@@ -145,7 +152,7 @@ long GetPrologueSize(void) {
 #endif
 }
 
-void SetupCod(struct Machine *m) {
+void(SetupCod)(struct Machine *m) {
 #if LOG_COD
   LoadDebugSymbols(&m->system->elf);
   DisLoadElf(&g_dis, &m->system->elf);
@@ -743,3 +750,5 @@ bool AddPath(P) {
          uimm0, disp, rde, GetOp(Mopcode(rde)));
   return true;
 }
+
+#endif /* HAVE_JIT */

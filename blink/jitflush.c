@@ -20,8 +20,8 @@
 
 #include "blink/dll.h"
 #include "blink/jit.h"
-#include "blink/lock.h"
 #include "blink/macros.h"
+#include "blink/thread.h"
 
 /**
  * Forces activation of committed JIT chunks.

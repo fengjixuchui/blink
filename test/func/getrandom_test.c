@@ -16,42 +16,46 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
-#include <fcntl.h>
-#include <stdbool.h>
-#include <string.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
-#include "blink/assert.h"
-#include "blink/elf.h"
-#include "blink/endian.h"
-#include "blink/util.h"
+/*
+ * assuming the system is working correctly there's a 1 in
+ * 235716896562095165800448 chance this check should flake
+ */
+#define BYTES 9
+#define TRIES 16
 
-#define READ32(p) Read32((const u8 *)(p))
-
-// Returns true if file is almost certainly a Haiku executable.
-bool IsHaikuExecutable(int fd) {
-  int i, n;
-  struct stat fi;
-  bool res = false;
-  const char *stab;
-  Elf64_Ehdr_ *ehdr;
-  const Elf64_Sym_ *st;
-  if (fstat(fd, &fi) == -1) return false;
-  ehdr = (Elf64_Ehdr_ *)mmap(0, fi.st_size, PROT_READ, MAP_SHARED, fd, 0);
-  if ((void *)ehdr == MAP_FAILED) return false;
-  if (READ32(ehdr) == READ32("\177ELF") &&
-      (stab = GetElfStringTable(ehdr, fi.st_size)) &&
-      (st = GetElfSymbolTable(ehdr, fi.st_size, &n))) {
-    for (i = 0; i < n; ++i) {
-      if (ELF64_ST_TYPE_(st[i].info) == STT_OBJECT_ &&
-          !strcmp(stab + Read32(st[i].name), "_gSharedObjectHaikuVersion")) {
-        res = true;
-        break;
-      }
+void TestDataSeemsRandom(void) {
+  ssize_t rc;
+  size_t i, j;
+  int haszero, fails = 0;
+  for (i = 0; i < TRIES; ++i) {
+    unsigned char x[BYTES] = {0};
+    rc = syscall(SYS_getrandom, x, BYTES, 0);
+    if (rc == -1) exit(1);
+    if (rc != BYTES) exit(2);
+    for (haszero = j = 0; j < BYTES; ++j) {
+      if (!x[j]) haszero = 1;
     }
+    if (haszero) ++fails;
   }
-  unassert(!munmap(ehdr, fi.st_size));
-  return res;
+  if (fails >= TRIES) exit(3);
+}
+
+void TestApi(void) {
+  long x;
+  if (syscall(SYS_getrandom, 0, 0, 0) != 0) exit(4);
+  if (syscall(SYS_getrandom, (void *)-1, 1, 0) != -1) exit(5);
+  if (errno != EFAULT) exit(6);
+  if (syscall(SYS_getrandom, &x, sizeof(x), -1) != -1) exit(7);
+  if (errno != EINVAL) exit(8);
+}
+
+int main(int argc, char *argv[]) {
+  TestDataSeemsRandom();
+  TestApi();
+  return 0;
 }

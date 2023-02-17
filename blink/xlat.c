@@ -37,7 +37,6 @@
 
 #include "blink/builtin.h"
 #include "blink/case.h"
-#include "blink/debug.h"
 #include "blink/endian.h"
 #include "blink/errno.h"
 #include "blink/linux.h"
@@ -45,12 +44,23 @@
 #include "blink/macros.h"
 #include "blink/map.h"
 #include "blink/sigwinch.h"
+#include "blink/util.h"
 #include "blink/xlat.h"
 
 #if defined(__APPLE__) || defined(__NetBSD__)
 #define st_atim st_atimespec
 #define st_ctim st_ctimespec
 #define st_mtim st_mtimespec
+#endif
+
+// NSIG isn't POSIX but it's more common than SIGRTMAX which is.
+// Note: OpenBSD defines NSIG as 33, even though it only has 32.
+#ifdef NSIG
+#define TOPSIG NSIG
+#elif defined(SIGRTMAX)
+#define TOPSIG SIGRTMAX
+#else
+#define TOPSIG 32
 #endif
 
 int XlatErrno(int x) {
@@ -378,6 +388,7 @@ int XlatSocketType(int x) {
 int XlatSocketProtocol(int x) {
   switch (x) {
     XLAT(0, 0);
+    XLAT(IPPROTO_RAW_LINUX, IPPROTO_RAW);
     XLAT(IPPROTO_TCP_LINUX, IPPROTO_TCP);
     XLAT(IPPROTO_UDP_LINUX, IPPROTO_UDP);
     XLAT(IPPROTO_ICMP_LINUX, IPPROTO_ICMP);
@@ -396,6 +407,7 @@ int XlatSocketLevel(int x, int *level) {
   switch (x) {
     CASE(SOL_SOCKET_LINUX, res = SOL_SOCKET);
     CASE(SOL_IP_LINUX, res = IPPROTO_IP);
+    CASE(SOL_IPV6_LINUX, res = IPPROTO_IPV6);
     CASE(SOL_TCP_LINUX, res = IPPROTO_TCP);
     CASE(SOL_UDP_LINUX, res = IPPROTO_UDP);
     default:
@@ -441,8 +453,20 @@ int XlatSocketOptname(int level, int optname) {
         XLAT(IP_HDRINCL_LINUX, IP_HDRINCL);
         XLAT(IP_OPTIONS_LINUX, IP_OPTIONS);
         XLAT(IP_RECVTTL_LINUX, IP_RECVTTL);
+#ifdef IP_RECVERR
+        XLAT(IP_RECVERR_LINUX, IP_RECVERR);
+#endif
 #ifdef IP_RETOPTS
         XLAT(IP_RETOPTS_LINUX, IP_RETOPTS);
+#endif
+        default:
+          break;
+      }
+      break;
+    case SOL_IPV6_LINUX:
+      switch (optname) {
+#ifdef IPV6_RECVERR
+        XLAT(IPV6_RECVERR_LINUX, IPV6_RECVERR);
 #endif
         default:
           break;
@@ -536,7 +560,10 @@ int XlatWait(int x) {
     x &= ~WCONTINUED_LINUX;
   }
 #endif
-  if (x) LOGF("%s %d not supported yet", "wait", x);
+  if (x) {
+    LOGF("%s %d not supported yet", "wait", x);
+    return einval();
+  }
   return r;
 }
 
@@ -1031,7 +1058,7 @@ void XlatWinsizeToHost(struct winsize *dst, const struct winsize_linux *src) {
 void XlatSigsetToLinux(u8 dst[8], const sigset_t *src) {
   u64 set = 0;
   int syssig, linuxsig;
-  for (syssig = 1; syssig <= MIN(64, NSIG); ++syssig) {
+  for (syssig = 1; syssig <= MIN(64, TOPSIG); ++syssig) {
     if (sigismember(src, syssig) == 1 &&
         (linuxsig = UnXlatSignal(syssig)) != -1) {
       set |= 1ull << (linuxsig - 1);
@@ -1040,12 +1067,10 @@ void XlatSigsetToLinux(u8 dst[8], const sigset_t *src) {
   Write64(dst, set);
 }
 
-void XlatLinuxToSigset(sigset_t *dst, const u8 src[8]) {
-  u64 set;
+void XlatLinuxToSigset(sigset_t *dst, u64 set) {
   int syssig, linuxsig;
-  set = Read64(src);
   sigemptyset(dst);
-  for (linuxsig = 1; linuxsig <= MIN(64, NSIG); ++linuxsig) {
+  for (linuxsig = 1; linuxsig <= MIN(64, TOPSIG); ++linuxsig) {
     if (((1ull << (linuxsig - 1)) & set) &&
         (syssig = XlatSignal(linuxsig)) != -1) {
       sigaddset(dst, syssig);

@@ -16,7 +16,7 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
-#include <pthread.h>
+#include <locale.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,7 +33,6 @@
 #include "blink/flag.h"
 #include "blink/jit.h"
 #include "blink/loader.h"
-#include "blink/lock.h"
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
@@ -43,25 +42,58 @@
 #include "blink/sigwinch.h"
 #include "blink/stats.h"
 #include "blink/syscall.h"
+#include "blink/thread.h"
+#include "blink/tunables.h"
 #include "blink/util.h"
 #include "blink/web.h"
 #include "blink/x86.h"
 #include "blink/xlat.h"
 
-#define OPTS "hjemsS0L:C:"
-#define USAGE \
-  " [-" OPTS "] PROG [ARGS...]\n\
-  -h                   help\n\
-  -j                   disable jit\n\
-  -e                   also log to stderr\n\
-  -0                   to specify argv[0]\n\
-  -m                   enable memory safety\n\
-  -s                   print statistics on exit\n\
-  -S                   enable system call logging\n\
-  -L PATH              log filename (default ${TMPDIR:-/tmp}/blink.log)\n\
-  -C PATH              sets chroot dir or overlay spec [default \":o\"]\n\
-  $BLINK_OVERLAYS      file system roots [default \":o\"]\n\
-  $BLINK_LOG_FILENAME  log filename (same as -L flag)\n"
+#define VERSION \
+  "Blink Virtual Machine " BLINK_VERSION " (" BUILD_TIMESTAMP ")\n\
+Copyright (c) 2023 Justine Alexandra Roberts Tunney\n\
+Blink comes with absolutely NO WARRANTY of any kind.\n\
+You may redistribute copies of Blink under the ISC License.\n\
+For more information, see the file named LICENSE.\n\
+Toolchain: " BUILD_TOOLCHAIN "\n\
+Revision: #" BLINK_COMMITS " " BLINK_GITSHA "\n\
+Config: ./configure MODE=" BUILD_MODE " " CONFIG_ARGUMENTS "\n"
+
+#define OPTS "hvjemZs0L:C:"
+
+static const char USAGE[] =
+    " [-" OPTS "] PROG [ARGS...]\n"
+    "Options:\n"
+    "  -h                   help\n"
+#ifndef DISABLE_JIT
+    "  -j                   disable jit\n"
+#endif
+    "  -v                   show version\n"
+#ifndef NDEBUG
+    "  -e                   also log to stderr\n"
+#endif
+    "  -0                   to specify argv[0]\n"
+    "  -m                   enable memory safety\n"
+#if !defined(DISABLE_STRACE) && !defined(TINY)
+    "  -s                   enable system call logging\n"
+#endif
+#ifndef NDEBUG
+    "  -Z                   print internal statistics on exit\n"
+    "  -L PATH              log filename (default is blink.log)\n"
+#endif
+#ifndef DISABLE_OVERLAYS
+    "  -C PATH              sets chroot dir or overlay spec [default \":o\"]\n"
+#endif
+#if !defined(DISABLE_OVERLAYS) || !defined(NDEBUG)
+    "Environment:\n"
+#endif
+#ifndef DISABLE_OVERLAYS
+    "  $BLINK_OVERLAYS      file system roots [default \":o\"]\n"
+#endif
+#ifndef NDEBUG
+    "  $BLINK_LOG_FILENAME  log filename (same as -L flag)\n"
+#endif
+    ;
 
 extern char **environ;
 static bool FLAG_zero;
@@ -80,7 +112,9 @@ void TerminateSignal(struct Machine *m, int sig) {
   if ((syssig = XlatSignal(sig)) == -1) syssig = SIGTERM;
   KillOtherThreads(m->system);
   FreeMachine(m);
+#ifdef HAVE_JIT
   ShutdownJit();
+#endif
   sa.sa_flags = 0;
   sa.sa_handler = SIG_DFL;
   sigemptyset(&sa.sa_mask);
@@ -97,8 +131,9 @@ static void OnSigSegv(int sig, siginfo_t *si, void *ptr) {
   // TODO: Fix memory leak with FormatPml4t()
   // TODO(jart): Fix address translation in non-linear mode.
   g_machine->faultaddr = ToGuest(si->si_addr);
-  ERRF("SEGMENTATION FAULT (%s) AT ADDRESS %" PRIx64 "\n\t%s\n%s",
-       strsignal(sig), g_machine->faultaddr, GetBacktrace(g_machine),
+  ERRF("SEGMENTATION FAULT (%s) AT ADDRESS %" PRIx64 " at RIP=%" PRIx64,
+       strsignal(sig), g_machine->faultaddr, g_machine->ip);
+  ERRF("ADDITIONAL INFORMATION\n\t%s\n%s", GetBacktrace(g_machine),
        FormatPml4t(g_machine));
 #ifdef DEBUG
   PrintBacktrace();
@@ -109,17 +144,19 @@ static void OnSigSegv(int sig, siginfo_t *si, void *ptr) {
   siglongjmp(g_machine->onhalt, kMachineSegmentationFault);
 }
 
-static int Exec(char *prog, char **argv, char **envp) {
+static int Exec(char *execfn, char *prog, char **argv, char **envp) {
   int i;
   sigset_t oldmask;
   struct Machine *old;
   if ((old = g_machine)) KillOtherThreads(old->system);
   unassert((g_machine = NewMachine(NewSystem(XED_MODE_LONG), 0)));
+#ifdef HAVE_JIT
   if (FLAG_nojit) DisableJit(&g_machine->system->jit);
+#endif
   g_machine->system->exec = Exec;
   if (!old) {
     // this is the first time a program is being loaded
-    LoadProgram(g_machine, prog, argv, envp);
+    LoadProgram(g_machine, execfn, prog, argv, envp);
     SetupCod(g_machine);
     for (i = 0; i < 10; ++i) {
       AddStdFd(&g_machine->system->fds, i);
@@ -133,7 +170,7 @@ static int Exec(char *prog, char **argv, char **envp) {
     }
     memcpy(g_machine->system->rlim, old->system->rlim,
            sizeof(old->system->rlim));
-    LoadProgram(g_machine, prog, argv, envp);
+    LoadProgram(g_machine, execfn, prog, argv, envp);
     g_machine->system->fds.list = old->system->fds.list;
     old->system->fds.list = 0;
     // releasing the execve() lock must come after unlocking fds
@@ -142,7 +179,7 @@ static int Exec(char *prog, char **argv, char **envp) {
     // freeing the last machine in a system will free its system too
     FreeMachine(old);
     // restore the signal mask we had before execve() was called
-    pthread_sigmask(SIG_SETMASK, &oldmask, 0);
+    unassert(!pthread_sigmask(SIG_SETMASK, &oldmask, 0));
   }
   // meta interpreter loop
   for (;;) {
@@ -167,11 +204,18 @@ _Noreturn static void PrintUsage(int argc, char *argv[], int rc, int fd) {
   exit(rc);
 }
 
+_Noreturn static void PrintVersion(void) {
+  Print(1, VERSION);
+  exit(0);
+}
+
 static void GetOpts(int argc, char *argv[]) {
   int opt;
   FLAG_nolinear = !CanHaveLinearMemory();
+#ifndef DISABLE_OVERLAYS
   FLAG_overlays = getenv("BLINK_OVERLAYS");
   if (!FLAG_overlays) FLAG_overlays = DEFAULT_OVERLAYS;
+#endif
 #if LOG_ENABLED
   FLAG_logpath = getenv("BLINK_LOG_FILENAME");
 #endif
@@ -189,13 +233,13 @@ static void GetOpts(int argc, char *argv[]) {
       case 'j':
         FLAG_nojit = true;
         break;
-      case 'S':
-        FLAG_strace = true;
+      case 's':
+        ++FLAG_strace;
         break;
       case 'm':
         FLAG_nolinear = true;
         break;
-      case 's':
+      case 'Z':
         FLAG_statistics = true;
         break;
       case 'e':
@@ -205,8 +249,14 @@ static void GetOpts(int argc, char *argv[]) {
         FLAG_logpath = optarg_;
         break;
       case 'C':
+#ifndef DISABLE_OVERLAYS
         FLAG_overlays = optarg_;
+#else
+        WriteErrorString("error: overlays support was disabled\n");
+#endif
         break;
+      case 'v':
+        PrintVersion();
       case 'h':
         PrintUsage(argc, argv, 0, 1);
       default:
@@ -222,12 +272,14 @@ static void HandleSigs(void) {
   struct sigaction sa;
   sigfillset(&sa.sa_mask);
   sa.sa_flags = 0;
+#ifdef HAVE_THREADS
   sa.sa_handler = OnSigSys;
   unassert(!sigaction(SIGSYS, &sa, 0));
+#endif
   sa.sa_sigaction = OnSignal;
-  unassert(!sigaction(SIGHUP, &sa, 0));
   unassert(!sigaction(SIGINT, &sa, 0));
   unassert(!sigaction(SIGQUIT, &sa, 0));
+  unassert(!sigaction(SIGHUP, &sa, 0));
   unassert(!sigaction(SIGPIPE, &sa, 0));
   unassert(!sigaction(SIGTERM, &sa, 0));
   unassert(!sigaction(SIGXCPU, &sa, 0));
@@ -251,6 +303,7 @@ void exit(int status) {
 
 int main(int argc, char *argv[]) {
   SetupWeb();
+  setlocale(LC_ALL, "");
   // Ensure utf-8 is printed correctly on windows, this method
   // has issues(http://stackoverflow.com/a/10884364/4279) but
   // should work for at least windows 7 and newer.
@@ -258,13 +311,15 @@ int main(int argc, char *argv[]) {
   SetConsoleOutputCP(CP_UTF8);
 #endif
   g_blink_path = argc > 0 ? argv[0] : 0;
+  WriteErrorInit();
   GetOpts(argc, argv);
   if (optind_ == argc) PrintUsage(argc, argv, 48, 2);
-  WriteErrorInit();
-  if (SetOverlays(FLAG_overlays)) {
+#ifndef DISABLE_OVERLAYS
+  if (SetOverlays(FLAG_overlays, true)) {
     WriteErrorString("bad blink overlays spec; see log for details\n");
     exit(1);
   }
+#endif
   HandleSigs();
   InitBus();
   if (!Commandv(argv[optind_], g_pathbuf, sizeof(g_pathbuf))) {
@@ -274,5 +329,6 @@ int main(int argc, char *argv[]) {
     WriteErrorString("\n");
     exit(127);
   }
-  return Exec(g_pathbuf, argv + optind_ + FLAG_zero, environ);
+  argv[optind_] = g_pathbuf;
+  return Exec(g_pathbuf, g_pathbuf, argv + optind_ + FLAG_zero, environ);
 }

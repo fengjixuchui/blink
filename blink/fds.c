@@ -18,23 +18,25 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <fcntl.h>
 #include <limits.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include "blink/assert.h"
+#include "blink/atomic.h"
+#include "blink/builtin.h"
 #include "blink/errno.h"
 #include "blink/fds.h"
-#include "blink/lock.h"
 #include "blink/log.h"
 #include "blink/macros.h"
+#include "blink/thread.h"
 
 void InitFds(struct Fds *fds) {
   fds->list = 0;
-  pthread_mutex_init(&fds->lock, 0);
+  unassert(!pthread_mutex_init(&fds->lock, 0));
 }
 
 struct Fd *AddFd(struct Fds *fds, int fildes, int oflags) {
@@ -45,7 +47,7 @@ struct Fd *AddFd(struct Fds *fds, int fildes, int oflags) {
       fd->cb = &kFdCbHost;
       fd->fildes = fildes;
       fd->oflags = oflags;
-      pthread_mutex_init(&fd->lock, 0);
+      unassert(!pthread_mutex_init(&fd->lock, 0));
       dll_make_first(&fds->list, &fd->elem);
     }
     return fd;
@@ -59,6 +61,7 @@ struct Fd *ForkFd(struct Fds *fds, struct Fd *fd, int fildes, int oflags) {
   struct Fd *fd2;
   if ((fd2 = AddFd(fds, fildes, oflags))) {
     if (fd) {
+      fd2->path = fd->path ? strdup(fd->path) : 0;
       fd2->socktype = fd->socktype;
       fd2->norestart = fd->norestart;
       memcpy(&fd2->saddr, &fd->saddr, sizeof(fd->saddr));
@@ -107,6 +110,7 @@ int CountFds(struct Fds *fds) {
 void FreeFd(struct Fd *fd) {
   if (fd) {
     unassert(!pthread_mutex_destroy(&fd->lock));
+    free(fd->path);
     free(fd);
   }
 }
@@ -135,6 +139,7 @@ static bool IsNoRestartSocket(int fildes) {
 }
 
 void InheritFd(struct Fd *fd) {
+#ifndef DISABLE_SOCKETS
   socklen_t addrlen;
   if (!fd) return;
   if (!GetFdSocketType(fd->fildes, &fd->socktype)) {
@@ -142,6 +147,7 @@ void InheritFd(struct Fd *fd) {
     addrlen = sizeof(fd->saddr);
     getsockname(fd->fildes, (struct sockaddr *)&fd->saddr, &addrlen);
   }
+#endif
 }
 
 void AddStdFd(struct Fds *fds, int fildes) {

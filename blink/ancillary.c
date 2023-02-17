@@ -24,6 +24,7 @@
 
 #include "blink/ancillary.h"
 #include "blink/assert.h"
+#include "blink/builtin.h"
 #include "blink/endian.h"
 #include "blink/errno.h"
 #include "blink/fds.h"
@@ -31,6 +32,9 @@
 #include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/util.h"
+
+#ifndef DISABLE_SOCKETS
+#ifndef DISABLE_ANCILLARY
 
 /**
  * @fileoverview Ancillary Socket Data Marshalling
@@ -60,7 +64,7 @@ static int AppendCmsg(struct Machine *m, struct msghdr *msg, int level,
   return 0;
 }
 
-#ifdef SCM_CREDENTIALS
+#ifdef HAVE_SCM_CREDENTIALS
 static int SendScmCredentials(struct Machine *m, struct msghdr *msg,
                               const struct ucred_linux *payload,
                               size_t elements) {
@@ -100,9 +104,11 @@ static ssize_t GetAncillaryElementLength(const struct cmsghdr_linux *gcmsg) {
         case SCM_RIGHTS_LINUX:
           return 4;
 #endif
-#ifdef SCM_CREDENTIALS
+#ifdef HAVE_SCM_CREDENTIALS
+#ifndef DISABLE_NONPOSIX
         case SCM_CREDENTIALS_LINUX:
           return sizeof(struct ucred_linux);
+#endif
 #endif
         default:
           break;
@@ -176,12 +182,14 @@ int SendAncillary(struct Machine *m, struct msghdr *msg,
               return -1;
             break;
 #endif
-#ifdef SCM_CREDENTIALS
+#ifdef HAVE_SCM_CREDENTIALS
+#ifndef DISABLE_NONPOSIX
           case SCM_CREDENTIALS_LINUX:
             if (SendScmCredentials(m, msg, (const struct ucred_linux *)payload,
                                    elements) == -1)
               return -1;
             break;
+#endif
 #endif
           default:
             unassert(!"inconsistent ancillary type");
@@ -268,7 +276,7 @@ static i64 ReceiveScmRights(struct Machine *m, struct msghdr_linux *gm,
 }
 #endif
 
-#ifdef SCM_CREDENTIALS
+#ifdef HAVE_SCM_CREDENTIALS
 static i64 ReceiveScmCredentials(struct Machine *m, struct msghdr_linux *gm,
                                  struct cmsghdr *cmsg, u64 offset) {
   struct ucred_linux gucred;
@@ -298,10 +306,12 @@ static i64 ReceiveControlMessage(struct Machine *m, struct msghdr_linux *gm,
       return ReceiveScmRights(m, gm, cmsg, offset, flags);
     }
 #endif
-#ifdef SCM_CREDENTIALS
+#ifdef HAVE_SCM_CREDENTIALS
+#ifndef DISABLE_NONPOSIX
     if (cmsg->cmsg_type == SCM_CREDENTIALS) {
       return ReceiveScmCredentials(m, gm, cmsg, offset);
     }
+#endif
 #endif
   }
   LOGF("%s ancillary level=%d type=%d", "unsupported", cmsg->cmsg_level,
@@ -334,3 +344,6 @@ int ReceiveAncillary(struct Machine *m, struct msghdr_linux *gm,
   Write64(gm->controllen, offset);
   return 0;
 }
+
+#endif /* DISABLE_ANCILLARY */
+#endif /* DISABLE_SOCKETS */

@@ -2,6 +2,8 @@
 #define BLINK_BUILTIN_H_
 #include <limits.h>
 
+#include "config.h"
+
 #if __GNUC__ + 0 < 2
 #undef __GNUC__
 #elif defined(__GNUC__) && defined(SWIG) /* lool */
@@ -16,6 +18,10 @@
 #define __GNUC__            2
 #define __GNUC_MINOR__      0
 #define __GNUC_PATCHLEVEL__ 0
+#endif
+
+#ifdef __STRICT_ANSI__
+#define asm __asm__
 #endif
 
 #if __GNUC__ + 0 < 2
@@ -64,12 +70,12 @@
 #define __builtin___clear_cache(x, y) (void)0
 #endif
 
-#ifndef pureconst
-#ifndef __STRICT_ANSI__
-#define pureconst __attribute__((__const__))
-#else
-#define pureconst
+#ifndef thatispacked
+#define thatispacked __attribute__((__packed__))
 #endif
+
+#ifndef pureconst
+#define pureconst __attribute__((__const__))
 #endif
 
 #ifndef dontinline
@@ -200,14 +206,23 @@
 #endif
 #endif
 
-#ifndef smashmystack
+#ifndef dontdiscard
+#if ((__GNUC__ + 0) * 100 + (__GNUC_MINOR__ + 0) >= 304 || \
+     __has_attribute(__warn_unused_result__))
+#define dontdiscard __attribute__((__warn_unused_result__))
+#else
+#define dontdiscard
+#endif
+#endif
+
+#ifndef nostackprotector
 #if __has_attribute(__no_stack_protector__)
-#define smashmystack __attribute__((__no_stack_protector__))
+#define nostackprotector __attribute__((__no_stack_protector__))
 #elif (__GNUC__ + 0) * 100 + (__GNUC_MINOR__ + 0) >= 407 || \
     __has_attribute(__optimize__)
-#define smashmystack __attribute__((__optimize__("-fno-stack-protector")))
+#define nostackprotector __attribute__((__optimize__("-fno-stack-protector")))
 #else
-#define smashmystack
+#define nostackprotector
 #endif
 #endif
 
@@ -225,26 +240,21 @@
 #define CAN_64BIT 0
 #endif
 
-// Whether or not POSIX threads synchronization primitives can be shared
-// across multiple processes.
-#if defined(__CYGWIN__) || defined(__OpenBSD__)
-#define CAN_PSHARE 0
-#else
-#define CAN_PSHARE 1
-#endif
-
-#if CAN_64BIT
-#if (__GNUC__ + 0) * 100 + (__GNUC_MINOR__ + 0) >= 406 || defined(__llvm__)
+#if CAN_64BIT && \
+    ((__GNUC__ + 0) * 100 + (__GNUC_MINOR__ + 0) >= 406 || defined(__llvm__))
 #define HAVE_INT128
 #endif
+
+#if !defined(__SANITIZE_THREAD__) && defined(TSAN)
+#define __SANITIZE_THREAD__
 #endif
 
 #if !defined(__SANITIZE_UNDEFINED__) && defined(UBSAN)
 #define __SANITIZE_UNDEFINED__
 #endif
 
-#if (defined(__x86_64__) || defined(__aarch64__)) &&                     \
-    !defined(__SANITIZE_MEMORY__) && !defined(__SANITIZE_UNDEFINED__) && \
+#if !defined(DISABLE_JIT) && (defined(__x86_64__) || defined(__aarch64__)) && \
+    !defined(__SANITIZE_MEMORY__) && !defined(__SANITIZE_UNDEFINED__) &&      \
     !defined(__SANITIZE_THREAD__) && !defined(NOJIT)
 #define HAVE_JIT
 #endif
@@ -253,9 +263,9 @@
     !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_UNDEFINED__)
 #ifndef __OPTIMIZE__
 #define TRIVIALLY_RELOCATABLE \
-  noinstrument dontclone noubsan smashmystack optimizesize
+  noinstrument dontclone noubsan nostackprotector optimizesize
 #else
-#define TRIVIALLY_RELOCATABLE noinstrument dontclone noubsan smashmystack
+#define TRIVIALLY_RELOCATABLE noinstrument dontclone noubsan nostackprotector
 #endif
 #define MICRO_OP_SAFE TRIVIALLY_RELOCATABLE forceinline
 #define MICRO_OP      TRIVIALLY_RELOCATABLE

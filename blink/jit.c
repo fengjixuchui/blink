@@ -18,13 +18,13 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <errno.h>
 #include <limits.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
 #include "blink/assert.h"
+#include "blink/atomic.h"
 #include "blink/bitscan.h"
 #include "blink/builtin.h"
 #include "blink/debug.h"
@@ -32,12 +32,12 @@
 #include "blink/end.h"
 #include "blink/endian.h"
 #include "blink/jit.h"
-#include "blink/lock.h"
 #include "blink/log.h"
 #include "blink/macros.h"
 #include "blink/map.h"
 #include "blink/memcpy.h"
 #include "blink/stats.h"
+#include "blink/thread.h"
 #include "blink/tsan.h"
 #include "blink/util.h"
 
@@ -124,8 +124,8 @@ static u8 g_code[kJitMemorySize];
 
 static struct JitGlobals {
   pthread_mutex_t lock;
-  atomic_long prot;
-  atomic_long brk;
+  _Atomic(long) prot;
+  _Atomic(long) brk;
   struct Dll *freeblocks GUARDED_BY(lock);
 } g_jit = {
     PTHREAD_MUTEX_INITIALIZER,
@@ -334,10 +334,12 @@ int InitJit(struct Jit *jit) {
   memset(jit, 0, sizeof(*jit));
   jit->pagesize = GetSystemPageSize();
   jit->blocksize = blocksize = ROUNDUP(kJitMinBlockSize, jit->pagesize);
-  pthread_mutex_init(&jit->lock, 0);
+  unassert(!pthread_mutex_init(&jit->lock, 0));
   jit->hooks.n = RoundupTwoPow(kJitMemorySize / kJitAveragePath * 2);
-  unassert(jit->hooks.virt = calloc(jit->hooks.n, sizeof(*jit->hooks.virt)));
-  unassert(jit->hooks.func = calloc(jit->hooks.n, sizeof(*jit->hooks.func)));
+  unassert(jit->hooks.virt = (_Atomic(intptr_t) *)calloc(
+               jit->hooks.n, sizeof(*jit->hooks.virt)));
+  unassert(jit->hooks.func =
+               (_Atomic(int) *)calloc(jit->hooks.n, sizeof(*jit->hooks.func)));
   return 0;
 }
 
@@ -390,9 +392,9 @@ int DisableJit(struct Jit *jit) {
  * Fixes the memory protection for existing Just-In-Time code blocks.
  */
 int FixJitProtection(struct Jit *jit) {
+  int prot;
   struct Dll *e;
   LOCK(&jit->lock);
-  int prot;
   prot = atomic_load_explicit(&g_jit.prot, memory_order_relaxed);
   for (e = dll_first(jit->blocks); e; e = dll_next(jit->blocks, e)) {
     unassert(
@@ -503,7 +505,7 @@ static bool PrepareJitMemory(void *addr, size_t size) {
   }
   return CheckMmapResult(
       addr, Mmap(addr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
-                 MAP_JIT | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, "jit"));
+                 MAP_JIT | MAP_PRIVATE | MAP_ANONYMOUS_, -1, 0, "jit"));
 #else
   int prot;
   prot = atomic_load_explicit(&g_jit.prot, memory_order_relaxed);
@@ -521,7 +523,7 @@ static bool PrepareJitMemory(void *addr, size_t size) {
   prot &= ~PROT_EXEC;
   atomic_store_explicit(&g_jit.prot, prot, memory_order_relaxed);
   return CheckMmapResult(
-      addr, Mmap(addr, size, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1,
+      addr, Mmap(addr, size, prot, MAP_PRIVATE | MAP_ANONYMOUS_ | MAP_FIXED, -1,
                  0, "jit"));
 #endif
 }
@@ -1125,30 +1127,4 @@ bool AppendJitTrap(struct JitBlock *jb) {
   return AppendJit(jb, buf, sizeof(buf));
 }
 
-#else
-// clang-format off
-#define STUB(RETURN, NAME, PARAMS, RESULT) RETURN NAME PARAMS { return RESULT; }
-STUB(int, InitJit, (struct Jit *jit), 0)
-STUB(int, DestroyJit, (struct Jit *jit), 0)
-STUB(int, ShutdownJit, (void), 0)
-STUB(int, DisableJit, (struct Jit *jit), 0)
-STUB(int, FixJitProtection, (struct Jit *jit), 0)
-STUB(bool, AppendJit, (struct JitBlock *jb, const void *data, long size), 0)
-STUB(bool, AppendJitMovReg, (struct JitBlock *jb, int dst, int src), 0)
-STUB(int, AbandonJit, (struct Jit *jit, struct JitBlock *jb), 0)
-STUB(int, FlushJit, (struct Jit *jit), 0)
-STUB(struct JitBlock *, StartJit, (struct Jit *jit), 0)
-STUB(bool, AlignJit, (struct JitBlock *jb, int align, int misalign), 0)
-STUB(bool, FinishJit, (struct Jit *jit, struct JitBlock *jb, u64 virt), 0)
-STUB(bool, RecordJitJump, (struct JitBlock *jb, u64 virt, int addend), 0)
-STUB(bool, AppendJitJump, (struct JitBlock *jb, void *code), 0)
-STUB(bool, AppendJitCall, (struct JitBlock *jb, void *func), 0)
-STUB(bool, AppendJitSetReg, (struct JitBlock *jb, int reg, u64 value), 0)
-STUB(bool, AppendJitRet, (struct JitBlock *jb), 0)
-STUB(bool, AppendJitNop, (struct JitBlock *jb), 0)
-STUB(bool, AppendJitTrap, (struct JitBlock *jb), 0)
-STUB(bool, CanJitForImmediateEffect, (void), 0)
-STUB(bool, SetJitHook, (struct Jit *jit, u64 virt, intptr_t func), 0)
-STUB(intptr_t, GetJitHook, (struct Jit *jit, u64 virt, intptr_t dflt), dflt)
-STUB(int, ClearJitHooks, (struct Jit *jit), 0)
-#endif
+#endif /* HAVE_JIT */

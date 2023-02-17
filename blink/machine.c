@@ -18,13 +18,13 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <errno.h>
 #include <limits.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "blink/alu.h"
 #include "blink/assert.h"
+#include "blink/atomic.h"
 #include "blink/bitscan.h"
 #include "blink/builtin.h"
 #include "blink/bus.h"
@@ -36,7 +36,6 @@
 #include "blink/fpu.h"
 #include "blink/jit.h"
 #include "blink/likely.h"
-#include "blink/lock.h"
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
@@ -47,6 +46,7 @@
 #include "blink/string.h"
 #include "blink/swap.h"
 #include "blink/syscall.h"
+#include "blink/thread.h"
 #include "blink/time.h"
 #include "blink/util.h"
 #include "blink/x86.h"
@@ -112,16 +112,14 @@ static void OpLeaGvqpM(P) {
   }
 }
 
-static relegated const struct DescriptorCache *GetSegment(P, unsigned s) {
-  if (s < 6) {
-    return m->seg + s;
-  } else {
-    OpUdImpl(m);
-  }
+static relegated u64 GetDescriptorLimit(u64 d) {
+  u64 lim = (d & 0x000f000000000000) >> 32 | (d & 0xffff);
+  if ((d & 0x0080000000000000) != 0) lim = (lim << 12) | 0xfff;
+  return lim;
 }
 
-static relegated int GetDescriptor(struct Machine *m, int selector,
-                                   u64 *out_descriptor) {
+relegated int GetDescriptor(struct Machine *m, int selector,
+                            u64 *out_descriptor) {
   u64 base = m->system->gdt_base, daddr;
   selector &= -8;
   if (8 <= selector && selector + 7 <= m->system->gdt_limit) {
@@ -133,65 +131,6 @@ static relegated int GetDescriptor(struct Machine *m, int selector,
   } else {
     return -1;
   }
-}
-
-static relegated u64 GetDescriptorBase(u64 d) {
-  return (d & 0xff00000000000000) >> 32 | (d & 0x000000ffffff0000) >> 16;
-}
-
-static relegated u64 GetDescriptorLimit(u64 d) {
-  u64 lim = (d & 0x000f000000000000) >> 32 | (d & 0xffff);
-  if ((d & 0x0080000000000000) != 0) lim = (lim << 12) | 0xfff;
-  return lim;
-}
-
-static relegated int GetDescriptorMode(u64 d) {
-  u8 kMode[] = {XED_MODE_REAL, XED_MODE_LONG, XED_MODE_LEGACY, XED_MODE_LONG};
-  return kMode[(d & 0x0060000000000000) >> 53];
-}
-
-static relegated bool IsProtectedMode(struct Machine *m) {
-  return m->system->cr0 & CR0_PE;
-}
-
-static relegated void SetSegment(P, unsigned sr, u16 sel, bool jumping) {
-  u64 descriptor;
-  if (sr == 1 && !jumping) OpUdImpl(m);
-  if (!IsProtectedMode(m)) {
-    m->seg[sr].sel = sel;
-    m->seg[sr].base = sel << 4;
-  } else if (GetDescriptor(m, sel, &descriptor) != -1) {
-    m->seg[sr].sel = sel;
-    m->seg[sr].base = GetDescriptorBase(descriptor);
-    if (sr == 1) ChangeMachineMode(m, GetDescriptorMode(descriptor));
-  } else {
-    ThrowProtectionFault(m);
-  }
-}
-
-relegated void SetCs(P, u16 sel) {
-  SetSegment(A, 1, sel, true);
-}
-
-static relegated void OpPushSeg(P) {
-  u8 seg = (Opcode(rde) & 070) >> 3;
-  Push(A, GetSegment(A, seg)->sel);
-}
-
-static relegated void OpPopSeg(P) {
-  u8 seg = (Opcode(rde) & 070) >> 3;
-  SetSegment(A, seg, Pop(A, 0), false);
-}
-
-static relegated void OpMovEvqpSw(P) {
-  WriteRegisterOrMemory(rde, GetModrmRegisterWordPointerWriteOszRexw(A),
-                        GetSegment(A, ModrmReg(rde))->sel);
-}
-
-static relegated void OpMovSwEvqp(P) {
-  u64 x;
-  x = ReadMemory(rde, GetModrmRegisterWordPointerReadOszRexw(A));
-  SetSegment(A, ModrmReg(rde), x, false);
 }
 
 static relegated void OpLsl(P) {
@@ -216,68 +155,12 @@ void ChangeMachineMode(struct Machine *m, int mode) {
   SetMachineMode(m, mode);
 }
 
-static relegated void OpJmpf(P) {
-  SetCs(A, uimm0);
-  m->ip = disp;
-  if (m->system->onlongbranch) {
-    m->system->onlongbranch(m);
-  }
-}
-
 static relegated void OpXlatAlBbb(P) {
   i64 v;
   v = MaskAddress(Eamode(rde), Get64(m->bx) + Get8(m->ax));
   v = DataSegment(A, v);
   SetReadAddr(m, v, 1);
   m->al = Load8(ResolveAddress(m, v));
-}
-
-static void PutEaxAx(P, u32 x) {
-  if (!Osz(rde)) {
-    Put64(m->ax, x);
-  } else {
-    Put16(m->ax, x);
-  }
-}
-
-static u32 GetEaxAx(P) {
-  if (!Osz(rde)) {
-    return Get32(m->ax);
-  } else {
-    return Get16(m->ax);
-  }
-}
-
-static relegated void OpInAlImm(P) {
-  Put8(m->ax, OpIn(m, uimm0));
-}
-
-static relegated void OpInAxImm(P) {
-  PutEaxAx(A, OpIn(m, uimm0));
-}
-
-static relegated void OpInAlDx(P) {
-  Put8(m->ax, OpIn(m, Get16(m->dx)));
-}
-
-static relegated void OpInAxDx(P) {
-  PutEaxAx(A, OpIn(m, Get16(m->dx)));
-}
-
-static relegated void OpOutImmAl(P) {
-  OpOut(m, uimm0, Get8(m->ax));
-}
-
-static relegated void OpOutImmAx(P) {
-  OpOut(m, uimm0, GetEaxAx(A));
-}
-
-static relegated void OpOutDxAl(P) {
-  OpOut(m, Get16(m->dx), Get8(m->ax));
-}
-
-static relegated void OpOutDxAx(P) {
-  OpOut(m, Get16(m->dx), GetEaxAx(A));
 }
 
 static void OpXchgZvqp(P) {
@@ -488,22 +371,6 @@ static void OpMovZvqpIvqp(P) {
   }
 }
 
-static relegated void OpIncZv(P) {
-  if (!Osz(rde)) {
-    Put32(RegSrm(m, rde), Inc32(m, Get32(RegSrm(m, rde)), 0));
-  } else {
-    Put16(RegSrm(m, rde), Inc16(m, Get16(RegSrm(m, rde)), 0));
-  }
-}
-
-static relegated void OpDecZv(P) {
-  if (!Osz(rde)) {
-    Put32(RegSrm(m, rde), Dec32(m, Get32(RegSrm(m, rde)), 0));
-  } else {
-    Put16(RegSrm(m, rde), Dec16(m, Get16(RegSrm(m, rde)), 0));
-  }
-}
-
 static void OpMovImm(P) {
   WriteRegisterOrMemoryBW(rde, GetModrmReadBW(A), uimm0);
   if (IsMakingPath(m)) {
@@ -583,6 +450,7 @@ static void OpMovslGdqpEd(P) {
 }
 
 void Connect(P, u64 pc, bool avoid_obvious_cycles) {
+#ifdef HAVE_JIT
   void *jump;
   nexgen32e_f f;
   if (!(avoid_obvious_cycles && pc == m->path.start)) {
@@ -599,6 +467,7 @@ void Connect(P, u64 pc, bool avoid_obvious_cycles) {
     jump = (void *)m->system->ender;
   }
   AppendJitJump(m->path.jb, jump);
+#endif
 }
 
 static void AluRo(P, const aluop_f ops[4], const aluop_f fops[4]) {
@@ -900,27 +769,35 @@ static aluop_f Bsubi(P, u64 y) {
 }
 
 static void OpBsubiCl(P) {
-  Jitter(A,
-         "B"      // res0 = GetRegOrMem(RexbRm)
-         "r0s1="  // sav1 = res0
-         "%cl"    //
-         "r0a2="  // arg2 = res0
-         "s1a1="  // arg1 = sav1
-         "q"      // arg0 = sav0 (machine)
-         "c"      // call function
-         "r0D",
-         Bsubi(A, m->cl));
+  aluop_f op;
+  op = Bsubi(A, m->cl);
+  if (IsMakingPath(m)) {
+    Jitter(A,
+           "B"      // res0 = GetRegOrMem(RexbRm)
+           "r0s1="  // sav1 = res0
+           "%cl"    //
+           "r0a2="  // arg2 = res0
+           "s1a1="  // arg1 = sav1
+           "q"      // arg0 = sav0 (machine)
+           "c"      // call function
+           "r0D",
+           op);
+  }
 }
 
 static void BsubiConstant(P, u64 y) {
-  Jitter(A,
-         "B"      // res0 = GetRegOrMem(RexbRm)
-         "r0a1="  // arg1 = res0
-         "q"      // arg0 = sav0 (machine)
-         "a2i"    //
-         "c"      // call function
-         "r0D",   //
-         y, Bsubi(A, y));
+  aluop_f op;
+  op = Bsubi(A, y);
+  if (IsMakingPath(m)) {
+    Jitter(A,
+           "B"      // res0 = GetRegOrMem(RexbRm)
+           "r0a1="  // arg1 = res0
+           "q"      // arg0 = sav0 (machine)
+           "a2i"    //
+           "c"      // call function
+           "r0D",   //
+           y, op);
+  }
 }
 
 static void OpBsubi1(P) {
@@ -1196,42 +1073,6 @@ static void Op1b8(P) {
   }
 }
 
-static relegated void LoadFarPointer(P, unsigned sr) {
-  unsigned n;
-  u8 *p;
-  u64 fp;
-  switch (Eamode(rde)) {
-    case XED_MODE_LONG:
-    case XED_MODE_LEGACY:
-      OpUdImpl(m);
-      break;
-    case XED_MODE_REAL:
-      n = 1 << WordLog2(rde);
-      p = ComputeReserveAddressRead(A, n + 2);
-      LockBus(p);
-      fp = Load32(p);
-      if (n >= 4) {
-        fp |= (u64)Load16(p + 4) << 32;
-        SetSegment(A, sr, fp >> 32 & 0x0000ffff, false);
-      } else {
-        SetSegment(A, sr, fp >> 16 & 0x0000ffff, false);
-      }
-      UnlockBus(p);
-      WriteRegister(rde, RegRexrReg(m, rde), fp);  // offset portion
-      break;
-    default:
-      __builtin_unreachable();
-  }
-}
-
-static relegated void OpLes(P) {
-  LoadFarPointer(A, 0);
-}
-
-static relegated void OpLds(P) {
-  LoadFarPointer(A, 3);
-}
-
 static relegated void Loop(P, bool cond) {
   u64 cx;
   cx = Get64(m->cx) - 1;
@@ -1322,14 +1163,18 @@ static void OpFxsave(P) {
   u8 buf[32];
   memset(buf, 0, 32);
   Write16(buf + 0, m->fpu.cw);
+#ifndef DISABLE_X87
   Write16(buf + 2, m->fpu.sw);
   Write8(buf + 4, m->fpu.tw);
   Write16(buf + 6, m->fpu.op);
   Write32(buf + 8, m->fpu.ip);
+#endif
   Write32(buf + 24, m->mxcsr);
   v = ComputeAddress(A);
   CopyToUser(m, v + 0, buf, 32);
+#ifndef DISABLE_X87
   CopyToUser(m, v + 32, m->fpu.st, 128);
+#endif
   CopyToUser(m, v + 160, m->xmm, 256);
   SetWriteAddr(m, v, 416);
 }
@@ -1340,13 +1185,17 @@ static void OpFxrstor(P) {
   v = ComputeAddress(A);
   SetReadAddr(m, v, 416);
   CopyFromUser(m, buf, v + 0, 32);
+#ifndef DISABLE_X87
   CopyFromUser(m, m->fpu.st, v + 32, 128);
+#endif
   CopyFromUser(m, m->xmm, v + 160, 256);
   m->fpu.cw = Load16(buf + 0);
+#ifndef DISABLE_X87
   m->fpu.sw = Load16(buf + 2);
   m->fpu.tw = Load8(buf + 4);
   m->fpu.op = Load16(buf + 6);
   m->fpu.ip = Load32(buf + 8);
+#endif
   m->mxcsr = Load32(buf + 24);
 }
 
@@ -1556,7 +1405,9 @@ static relegated void OpRdmsr(P) {
 }
 
 static void OpEmms(P) {
+#ifndef DISABLE_X87
   m->fpu.tw = -1;
+#endif
 }
 
 int ClassifyOp(u64 rde) {
@@ -1630,6 +1481,43 @@ int ClassifyOp(u64 rde) {
       return kOpPrecious;
   }
 }
+
+#ifdef DISABLE_METAL
+#define OpIncZv     OpUd
+#define OpDecZv     OpUd
+#define OpLes       OpUd
+#define OpLds       OpUd
+#define OpJmpf      OpUd
+#define OpInAlImm   OpUd
+#define OpInAxImm   OpUd
+#define OpInAlDx    OpUd
+#define OpInAxDx    OpUd
+#define OpOutImmAl  OpUd
+#define OpOutImmAx  OpUd
+#define OpOutDxAl   OpUd
+#define OpOutDxAx   OpUd
+#define OpMovSwEvqp OpUd
+#define OpMovEvqpSw OpUd
+#define OpPushSeg   OpUd
+#define OpPopSeg    OpUd
+#define OpCallf     OpUd
+#define OpRetf      OpUd
+#define OpPopa      OpUd
+#define OpPusha     OpUd
+#endif
+
+#ifdef DISABLE_BCD
+#define OpDas OpUd
+#define OpAaa OpUd
+#define OpAas OpUd
+#define OpAam OpUd
+#define OpAad OpUd
+#define OpDaa OpUd
+#endif
+
+#ifdef DISABLE_X87
+#define OpFwait OpUd
+#endif
 
 static const nexgen32e_f kNexgen32e[] = {
     /*000*/ OpAlub,                  //
@@ -2258,6 +2146,7 @@ void GeneralDispatch(P) {
 }
 
 static void ExploreInstruction(struct Machine *m, nexgen32e_f func) {
+#ifdef HAVE_JIT
   if (func == JitlessDispatch) {
     JIT_LOGF("abandoning path starting at %" PRIx64
              " due to running into staged path",
@@ -2281,6 +2170,7 @@ static void ExploreInstruction(struct Machine *m, nexgen32e_f func) {
   } else {
     GeneralDispatch(DISPATCH_NOTHING);
   }
+#endif
 }
 
 void ExecuteInstruction(struct Machine *m) {

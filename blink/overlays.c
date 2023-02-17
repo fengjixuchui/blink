@@ -24,13 +24,19 @@
 #include <unistd.h>
 
 #include "blink/assert.h"
+#include "blink/builtin.h"
 #include "blink/debug.h"
 #include "blink/errno.h"
 #include "blink/likely.h"
 #include "blink/log.h"
 #include "blink/overlays.h"
+#include "blink/syscall.h"
 #include "blink/thompike.h"
 #include "blink/util.h"
+
+#ifndef DISABLE_OVERLAYS
+
+#define UNREACHABLE "(unreachable)"
 
 static char **g_overlays;
 
@@ -77,7 +83,7 @@ static bool IsRestrictedRoot(char **paths) {
   return !paths[1] && paths[0][0];
 }
 
-int SetOverlays(const char *config) {
+int SetOverlays(const char *config, bool cd_into_chroot) {
   size_t i, j;
   static int once;
   bool has_real_root;
@@ -122,7 +128,7 @@ int SetOverlays(const char *config) {
     FreeStrings(paths);
     return einval();
   }
-  if (IsRestrictedRoot(paths)) {
+  if (cd_into_chroot && IsRestrictedRoot(paths)) {
     if (chdir(paths[0])) {
       LOGF("failed to cd into blink overlay: %s", DescribeHostErrno(errno));
       FreeStrings(paths);
@@ -147,18 +153,21 @@ static bool IsUnrecoverableErrno(void) {
 
 char *OverlaysGetcwd(char *output, size_t size) {
   size_t n, m;
-  const char *cwd;
-  char buf[PATH_MAX];
+  char *cwd, buf[PATH_MAX];
   if (!(cwd = (getcwd)(buf, sizeof(buf)))) return 0;
   n = strlen(cwd);
   if (IsRestrictedRoot(g_overlays)) {
     m = strlen(g_overlays[0]);
     if (n == m && !memcmp(cwd, g_overlays[0], n)) {
-      cwd = "/";
+      cwd[0] = '/';
+      cwd[1] = 0;
     } else if (n > m && !memcmp(cwd, g_overlays[0], m) && cwd[m] == '/') {
       cwd += m;
+    } else if (strlen(UNREACHABLE) + n + 1 < sizeof(buf)) {
+      memmove(cwd + strlen(UNREACHABLE), cwd, n + 1);
+      memcpy(cwd, UNREACHABLE, strlen(UNREACHABLE));
     } else {
-      cwd = "(unreachable)/";
+      return 0;
     }
     n = strlen(cwd);
   }
@@ -317,7 +326,7 @@ int OverlaysStat(int dirfd, const char *path, struct stat *st, int flags) {
 ////////////////////////////////////////////////////////////////////////////////
 
 struct Access {
-  int mode;
+  mode_t mode;
   int flags;
 };
 
@@ -326,7 +335,7 @@ static ssize_t Access(int dirfd, const char *path, void *vargs) {
   return faccessat(dirfd, path, args->mode, args->flags);
 }
 
-int OverlaysAccess(int dirfd, const char *path, int mode, int flags) {
+int OverlaysAccess(int dirfd, const char *path, mode_t mode, int flags) {
   struct Access args = {mode, flags};
   return OverlaysGeneric(dirfd, path, &args, Access);
 }
@@ -350,7 +359,7 @@ int OverlaysUnlink(int dirfd, const char *path, int flags) {
 ////////////////////////////////////////////////////////////////////////////////
 
 struct Mkdir {
-  int mode;
+  mode_t mode;
 };
 
 static ssize_t Mkdir(int dirfd, const char *path, void *vargs) {
@@ -358,7 +367,7 @@ static ssize_t Mkdir(int dirfd, const char *path, void *vargs) {
   return mkdirat(dirfd, path, args->mode);
 }
 
-int OverlaysMkdir(int dirfd, const char *path, int mode) {
+int OverlaysMkdir(int dirfd, const char *path, mode_t mode) {
   struct Mkdir args = {mode};
   return OverlaysGeneric(dirfd, path, &args, Mkdir);
 }
@@ -366,24 +375,15 @@ int OverlaysMkdir(int dirfd, const char *path, int mode) {
 ////////////////////////////////////////////////////////////////////////////////
 
 struct Mkfifo {
-  int mode;
+  mode_t mode;
 };
 
 static ssize_t Mkfifo(int dirfd, const char *path, void *vargs) {
   struct Mkfifo *args = (struct Mkfifo *)vargs;
-#ifdef __APPLE__  // Needs MacOS 13+ c. 2022
-  if (dirfd == AT_FDCWD) {
-    return mkfifo(path, args->mode);
-  } else {
-    LOGF("mkfifoat() needs MacOS 13+ (TODO: how do we detect it?)");
-    return enosys();
-  }
-#else
   return mkfifoat(dirfd, path, args->mode);
-#endif
 }
 
-int OverlaysMkfifo(int dirfd, const char *path, int mode) {
+int OverlaysMkfifo(int dirfd, const char *path, mode_t mode) {
   struct Mkfifo args = {mode};
   return OverlaysGeneric(dirfd, path, &args, Mkfifo);
 }
@@ -391,7 +391,7 @@ int OverlaysMkfifo(int dirfd, const char *path, int mode) {
 ////////////////////////////////////////////////////////////////////////////////
 
 struct Chmod {
-  int mode;
+  mode_t mode;
   int flags;
 };
 
@@ -400,7 +400,7 @@ static ssize_t Chmod(int dirfd, const char *path, void *vargs) {
   return fchmodat(dirfd, path, args->mode, args->flags);
 }
 
-int OverlaysChmod(int dirfd, const char *path, int mode, int flags) {
+int OverlaysChmod(int dirfd, const char *path, mode_t mode, int flags) {
   struct Chmod args = {mode, flags};
   return OverlaysGeneric(dirfd, path, &args, Chmod);
 }
@@ -583,3 +583,5 @@ int OverlaysLink(int srcdirfd, const char *srcpath, int dstdirfd,
   struct Link args = {flags};
   return OverlaysGeneric2(srcdirfd, srcpath, dstdirfd, dstpath, &args, Link);
 }
+
+#endif /* DISABLE_OVERLAYS */

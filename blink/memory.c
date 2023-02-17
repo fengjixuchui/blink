@@ -27,12 +27,13 @@
 #include "blink/endian.h"
 #include "blink/errno.h"
 #include "blink/likely.h"
-#include "blink/lock.h"
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/pml4t.h"
 #include "blink/stats.h"
+#include "blink/thread.h"
+#include "blink/util.h"
 #include "blink/x86.h"
 
 void SetReadAddr(struct Machine *m, i64 addr, u32 size) {
@@ -64,6 +65,7 @@ u8 *GetPageAddress(struct System *s, u64 entry) {
 
 u64 HandlePageFault(struct Machine *m, u64 entry, u64 table, unsigned index) {
   u64 x, res, page;
+  if (m->nofault) return 0;
   unassert(entry & PAGE_RSRV);
   LOCK(&m->system->mmap_lock);
   // page faults should only happen in non-linear mode
@@ -83,15 +85,17 @@ u64 HandlePageFault(struct Machine *m, u64 entry, u64 table, unsigned index) {
     unassert((entry & (PAGE_HOST | PAGE_MAP)) == (PAGE_HOST | PAGE_MAP));
     --m->system->memstat.reserved;
     ++m->system->memstat.committed;
+    ++m->system->rss;
     x = entry & ~PAGE_RSRV;
     Store64(GetPageAddress(m->system, table) + index * 8, x);
     res = x;
   }
+  unassert(CheckMemoryInvariants(m->system));
   UNLOCK(&m->system->mmap_lock);
   return res;
 }
 
-static u64 FindPageTableEntry(struct Machine *m, u64 page) {
+u64 FindPageTableEntry(struct Machine *m, u64 page) {
   long i;
   i64 table;
   u64 entry, res;
@@ -114,7 +118,7 @@ static u64 FindPageTableEntry(struct Machine *m, u64 page) {
   do {
     table = entry;
     index = (page >> level) & 511;
-    entry = Load64(GetPageAddress(m->system, table) + index * 8);
+    entry = Get64(GetPageAddress(m->system, table) + index * 8);
     if (!(entry & PAGE_V)) return 0;
   } while ((level -= 9) >= 12);
   if ((entry & PAGE_RSRV) &&
@@ -131,7 +135,7 @@ u8 *LookupAddress2(struct Machine *m, i64 virt, u64 mask, u64 need) {
   u64 entry, page;
   if (m->mode == XED_MODE_LONG ||
       (m->mode != XED_MODE_REAL && (m->system->cr0 & CR0_PG))) {
-    if (atomic_load_explicit(&m->invalidated, memory_order_relaxed)) {
+    if (atomic_load_explicit(&m->invalidated, memory_order_acquire)) {
       ResetTlb(m);
       atomic_store_explicit(&m->invalidated, false, memory_order_relaxed);
     }
@@ -354,8 +358,7 @@ void *AddToFreeList(struct Machine *m, void *mem) {
 // Returns pointer to memory in guest memory. If the memory overlaps a
 // page boundary, then it's copied, and the temporary memory is pushed
 // to the free list. Returns NULL w/ EFAULT or ENOMEM on error.
-static void *Schlep(struct Machine *m, i64 addr, size_t size, u64 mask,
-                    u64 need) {
+void *Schlep(struct Machine *m, i64 addr, size_t size, u64 mask, u64 need) {
   char *copy;
   size_t have;
   void *res, *page;
@@ -395,7 +398,10 @@ void *SchlepRW(struct Machine *m, i64 addr, size_t size) {
   return Schlep(m, addr, size, PAGE_U | PAGE_RW, PAGE_U | PAGE_RW);
 }
 
-static char *LoadStrImpl(struct Machine *m, i64 addr) {
+// Returns pointer to string in guest memory. If the string overlaps a
+// page boundary, then it's copied, and the temporary memory is pushed
+// to the free list. Returns NULL w/ EFAULT or ENOMEM on error.
+char *LoadStr(struct Machine *m, i64 addr) {
   size_t have;
   char *copy, *page, *p;
   have = 4096 - (addr & 4095);
@@ -419,17 +425,6 @@ static char *LoadStrImpl(struct Machine *m, i64 addr) {
   }
   free(copy);
   return 0;
-}
-
-// Returns pointer to string in guest memory. If the string overlaps a
-// page boundary, then it's copied, and the temporary memory is pushed
-// to the free list. Returns NULL w/ EFAULT or ENOMEM on error.
-char *LoadStr(struct Machine *m, i64 addr) {
-  char *res;
-  if ((res = LoadStrImpl(m, addr))) {
-    SYS_LOGF("LoadStr(%#" PRIx64 ") -> \"%s\"", addr, res);
-  }
-  return res;
 }
 
 // Copies string from guest memory. The returned memory is pushed to the

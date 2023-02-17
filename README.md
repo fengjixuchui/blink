@@ -2,7 +2,6 @@
 
 [![Test Status](https://github.com/jart/blink/actions/workflows/build.yml/badge.svg)](https://github.com/jart/blink/actions/workflows/build.yml)
 [![Cygwin Test Status](https://github.com/jart/blink/actions/workflows/cygwin.yml/badge.svg)](https://github.com/jart/blink/actions/workflows/cygwin.yml)
-[![Emscripten Test Status](https://github.com/jart/blink/actions/workflows/emscripten.yml/badge.svg)](https://github.com/jart/blink/actions/workflows/emscripten.yml)
 # Blinkenlights
 
 This project contains two programs:
@@ -11,14 +10,15 @@ This project contains two programs:
 different operating systems and hardware architectures. It's designed to
 do the same thing as the `qemu-x86_64` command, except that
 
-1. blink is 190kb in size, whereas the qemu-x86_64 executable is 4mb
+1. Blink is 200kb in size (126kb with optional features disabled),
+   whereas qemu-x86_64 is a 4mb binary.
 
-2. blink will run your Linux binaries on any POSIX platform, whereas
-   qemu-x86_64 only supports Linux
+2. Blink will run your Linux binaries on any POSIX system, whereas
+   qemu-x86_64 only supports Linux.
 
-3. blink goes 2x faster than qemu-x86_64 on some benchmarks, such as SSE
-   integer / floating point math. Blink is also faster at running
-   ephemeral programs such as compilers
+3. Blink goes 2x faster than qemu-x86_64 on some benchmarks, such as SSE
+   integer / floating point math. Blink is also much faster at running
+   ephemeral programs such as compilers.
 
 [`blinkenlights`](https://justine.lol/blinkenlights) is a TUI interface
 that may be used for debugging x86_64-linux programs across platforms.
@@ -43,18 +43,19 @@ following platforms:
 
 Blink depends on the following libraries:
 
-- libc (POSIX.1-2017)
+- libc (POSIX.1-2017 baseline, XSI not required)
 
 Blink can be compiled on UNIX systems that have:
 
-- A C11 compiler (e.g. GCC 4.9.4+)
+- A C11 compiler with atomics (e.g. GCC 4.9.4+)
 - Modern GNU Make (i.e. not the one that comes with XCode)
 
 The instructions for compiling Blink are as follows:
 
 ```sh
-$ make -j4
-$ o//blink/blink -h
+./configure
+make -j4
+o//blink/blink -h
 Usage: o//blink/blink [-hjms] PROG [ARGS...]
 ```
 
@@ -75,7 +76,8 @@ o//blink/blinkenlights third_party/cosmo/tinyhello.elf
 ### Alternative Builds
 
 For maximum tinyness, use `MODE=tiny`, since it makes Blink's binary
-footprint 50% smaller. Performance isn't impacted. Please note that all
+footprint 50% smaller. The Blink executable should be on the order of
+200kb in size. Performance isn't impacted. Please note that all
 assertions will be removed, as well as all logging. Use this mode if
 you're confident that Blink is bug-free for your use case.
 
@@ -83,6 +85,28 @@ you're confident that Blink is bug-free for your use case.
 make MODE=tiny
 strip o/tiny/blink/blink
 ls -hal o/tiny/blink/blink
+```
+
+Some distros configure their compilers to add a lot of security bloat,
+which might add 60kb or more to the above binary size. You can work
+around that by using one of Blink's toolchains. This should produce
+consistently the smallest possible executable size.
+
+```sh
+make MODE=tiny o/tiny/x86_64/blink/blink
+o/third_party/gcc/x86_64/bin/x86_64-linux-musl-strip o/tiny/x86_64/blink/blink
+ls -hal o/tiny/x86_64/blink/blink
+```
+
+If you want to make Blink *even tinier* (more on the order of 120kb
+rather than 200kb) than you can tune the `./configure` script to disable
+optional features such as jit, threads, sockets, x87, bcd, xsi, etc.
+
+```sh
+./configure --disable-all --posix
+make MODE=tiny o/tiny/x86_64/blink/blink
+o/third_party/gcc/x86_64/bin/x86_64-linux-musl-strip o/tiny/x86_64/blink/blink
+ls -hal o/tiny/x86_64/blink/blink
 ```
 
 The traditional `MODE=rel` or `MODE=opt` modes are available. Use this
@@ -103,6 +127,14 @@ You can hunt down bugs in Blink using the following build modes:
 - `MODE=tsan` helps find threading related bugs
 - `MODE=ubsan` to find violations of the C standard
 - `MODE=msan` helps find uninitialized memory errors
+
+You can check Blink's compliance with the POSIX standard using the
+following configuration flags:
+
+```sh
+./configure --posix  # only use c11 with baseline posix standard
+./configure --xopen  # same but also allow use of xsi extensions
+```
 
 ### Testing
 
@@ -204,27 +236,9 @@ The following `FLAG` arguments are provided:
 
 ### `blinkenlights` Flags
 
-The Blinkenlights TUI interface command (named `blinkenlights` by
-convention) requires a UTF-8 VT100 / XTERM style terminal to use. We
-recommend the following terminals, ordered by preference:
-
-- [KiTTY](https://sw.kovidgoyal.net/kitty/) (Linux)
-- [PuTTY](https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html) (Windows)
-- Gnome Terminal (Linux)
-- Terminal.app (macOS)
-- CMD.EXE (Windows 10+)
-- PowerShell (Windows 10+)
-- Xterm (Linux)
-
-The following fonts are recommended, ordered by preference:
-
-- [PragmataPro Regular Mono](https://fsd.it/shop/fonts/pragmatapro/) (€59)
-- Bitstream Vera Sans Mono (a.k.a. DejaVu Sans Mono)
-- Consolas
-- Menlo
-
-The `blinkenlights` command accepts its command line arguments in
-accordance with the following specification:
+The Blinkenlights ANSI TUI interface command (named `blinkenlights` by
+convention) accepts its command line arguments in accordance with the
+following specification:
 
 ```
 blinkenlights [FLAG...] PROGRAM [ARG...]
@@ -323,6 +337,26 @@ The following `FLAG` arguments are provided:
 - `-H` disables syntax highlighting
 
 - `-N` enables natural scrolling
+
+### Recommended Environments
+
+Blinkenlights' TUI requires a UTF-8 VT100 / XTERM style terminal to use.
+We recommend the following terminals, ordered by preference:
+
+- [KiTTY](https://sw.kovidgoyal.net/kitty/) (Linux)
+- [PuTTY](https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html) (Windows)
+- Gnome Terminal (Linux)
+- Terminal.app (macOS)
+- CMD.EXE (Windows 10+)
+- PowerShell (Windows 10+)
+- Xterm (Linux)
+
+The following fonts are recommended, ordered by preference:
+
+- [PragmataPro Regular Mono](https://fsd.it/shop/fonts/pragmatapro/) (€59)
+- Bitstream Vera Sans Mono (a.k.a. DejaVu Sans Mono)
+- Consolas
+- Menlo
 
 #### JIT Path Glyphs
 
@@ -454,9 +488,9 @@ export CC="gcc -Wl,-z,common-page-size=65536,-z,max-page-size=65536"
 make menuconfig
 make
 cp -R output/target ~/blinkroot
-sudo mount -t devtmpfs none ~/blinkroot/dev
-sudo mount -t sysfs none ~/blinkroot/sys
-sudo mount -t proc none ~/blinkroot/proc
+doas mount -t devtmpfs none ~/blinkroot/dev
+doas mount -t sysfs none ~/blinkroot/sys
+doas mount -t proc none ~/blinkroot/proc
 cd ~/blink
 make -j8
 export BLINK_OVERLAYS=$HOME/blinkroot
@@ -523,19 +557,16 @@ like the following:
 
 ```sh
 #!/bin/sh
-exec cc \
-  -g \
-  -Os \
-  -no-pie \
-  -fno-pie \
-  -static \
-  "$@" \
-  -U_FORTIFY_SOURCE \
-  -fno-stack-protector \
-  -fno-omit-frame-pointer \
-  -mno-omit-leaf-frame-pointer \
-  -Wl,-z,common-page-size=65536 \
-  -Wl,-z,max-page-size=65536
+set /usr/bin/gcc "$@" -g \
+    -fno-omit-frame-pointer \
+    -fno-optimize-sibling-calls \
+    -mno-omit-leaf-frame-pointer \
+    -Wl,-z,norelro \
+    -Wl,-z,noseparate-code \
+    -Wl,-z,max-page-size=65536 \
+    -Wl,-z,common-page-size=65536
+printf '%s\n' "$*" >>/tmp/gcc.log
+exec "$@"
 ```
 
 Those flags will go a long way towards helping your Linux binaries be
@@ -796,7 +827,10 @@ reasons of performance is defined to include pushing and popping.
 
 ### Threads
 
-Blink currently doesn't unlock robust mutexes on process death.
+System calls do not explicitly lock the memory pages they're accessing;
+we haven't determined yet if that makes calling munmap() unsafe. Blink
+also lacks support right now for unlocking robust mutexes when a guest
+program crashes; this too is something we'd like to fix.
 
 ### Coherency
 

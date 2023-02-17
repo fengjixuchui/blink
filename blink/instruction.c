@@ -75,7 +75,7 @@ static int LoadInstructionSlow(struct Machine *m, u64 ip) {
 int LoadInstruction2(struct Machine *m, u64 pc) {
   unsigned key;
   u8 *addr, *page;
-  if (atomic_load_explicit(&m->opcache->invalidated, memory_order_relaxed)) {
+  if (atomic_load_explicit(&m->opcache->invalidated, memory_order_acquire)) {
     ResetInstructionCache(m);
     atomic_store_explicit(&m->opcache->invalidated, false,
                           memory_order_relaxed);

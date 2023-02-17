@@ -24,26 +24,27 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "blink/debug.h"
-#include "blink/lock.h"
-#include "blink/macros.h"
-#include "blink/overlays.h"
-
-#ifdef UNWIND
-#define UNW_LOCAL_ONLY
-#include <libunwind.h>
-#endif
-
 #include "blink/assert.h"
+#include "blink/builtin.h"
+#include "blink/debug.h"
 #include "blink/dis.h"
 #include "blink/endian.h"
 #include "blink/flags.h"
 #include "blink/loader.h"
 #include "blink/log.h"
+#include "blink/machine.h"
+#include "blink/macros.h"
 #include "blink/map.h"
+#include "blink/overlays.h"
 #include "blink/stats.h"
+#include "blink/thread.h"
 #include "blink/tsan.h"
 #include "blink/util.h"
+
+#ifdef UNWIND
+#define UNW_LOCAL_ONLY
+#include <libunwind.h>
+#endif
 
 #define MAX_BACKTRACE_LINES 64
 
@@ -56,23 +57,26 @@ char *ubsan_backtrace_pointer = ((char *)ubsan_backtrace_memory) + 1;
 
 void PrintBacktrace(void) {
 #ifdef UNWIND
+  int o = 0;
+  char b[2048];
   char sym[256];
+  int n = sizeof(b);
   unw_cursor_t cursor;
   unw_context_t context;
   unw_word_t offset, pc;
-  LOGF("blink backtrace:");
   unw_getcontext(&context);
   unw_init_local(&cursor, &context);
   while (unw_step(&cursor) > 0) {
     unw_get_reg(&cursor, UNW_REG_IP, &pc);
     if (!pc) break;
-    fprintf(stderr, "%lx ", pc);
+    APPEND("\n\t%lx ", pc);
     if (unw_get_proc_name(&cursor, sym, sizeof(sym), &offset) == 0) {
-      fprintf(stderr, "%s+%ld\n", sym, offset);
+      APPEND("%s+%ld", sym, offset);
     } else {
-      fprintf(stderr, "<unknown>\n");
+      APPEND("<unknown>");
     }
   }
+  ERRF("blink backtrace%s", b);
 #elif defined(__SANITIZE_ADDRESS__)
   volatile int x;
   x = asan_backtrace_buffer[asan_backtrace_index + 1];
@@ -95,297 +99,40 @@ static i64 ReadWord(struct Machine *m, u8 *p) {
 }
 
 int GetInstruction(struct Machine *m, i64 pc, struct XedDecodedInst *x) {
-  int i, err;
+  int i, rc, err;
   u8 copy[15], *toil, *addr;
+  BEGIN_NO_PAGE_FAULTS;
   if ((addr = LookupAddress(m, pc))) {
     if ((i = 4096 - (pc & 4095)) >= 15) {
       if (!DecodeInstruction(x, addr, 15, m->mode)) {
-        return 0;
+        rc = 0;
       } else {
-        return kMachineDecodeError;
+        rc = kMachineDecodeError;
       }
     } else if ((toil = LookupAddress(m, pc + i))) {
       memcpy(copy, addr, i);
       memcpy(copy + i, toil, 15 - i);
       if (!DecodeInstruction(x, copy, 15, m->mode)) {
-        return 0;
+        rc = 0;
       } else {
-        return kMachineDecodeError;
+        rc = kMachineDecodeError;
       }
     } else if (!(err = DecodeInstruction(x, addr, i, m->mode))) {
-      return 0;
+      rc = 0;
     } else if (err == XED_ERROR_BUFFER_TOO_SHORT) {
-      return kMachineSegmentationFault;
+      rc = kMachineSegmentationFault;
     } else {
-      return kMachineDecodeError;
+      rc = kMachineDecodeError;
     }
   } else {
     memset(x, 0, sizeof(*x));
-    return kMachineSegmentationFault;
+    rc = kMachineSegmentationFault;
   }
+  END_NO_PAGE_FAULTS;
+  return rc;
 }
 
-const char *DescribeProt(int prot) {
-  char *p;
-  bool gotsome;
-  _Thread_local static char buf[64];
-  if (!prot) return "PROT_NONE";
-  p = buf;
-  gotsome = false;
-  if (prot & PROT_READ) {
-    if (gotsome) *p++ = '|';
-    p = stpcpy(p, "PROT_READ");
-    prot &= ~PROT_READ;
-    gotsome = true;
-  }
-  if (prot & PROT_WRITE) {
-    if (gotsome) *p++ = '|';
-    p = stpcpy(p, "PROT_WRITE");
-    prot &= ~PROT_WRITE;
-    gotsome = true;
-  }
-  if (prot & PROT_EXEC) {
-    if (gotsome) *p++ = '|';
-    p = stpcpy(p, "PROT_EXEC");
-    prot &= ~PROT_EXEC;
-    gotsome = true;
-  }
-  if (prot) {
-    if (gotsome) *p++ = '|';
-    p = FormatInt64(p, prot);
-  }
-  return buf;
-}
-
-const char *DescribeSignal(int sig) {
-  char *p;
-  _Thread_local static char buf[30];
-  switch (sig) {
-    case SIGHUP_LINUX:
-      return "SIGHUP";
-    case SIGINT_LINUX:
-      return "SIGINT";
-    case SIGQUIT_LINUX:
-      return "SIGQUIT";
-    case SIGILL_LINUX:
-      return "SIGILL";
-    case SIGTRAP_LINUX:
-      return "SIGTRAP";
-    case SIGABRT_LINUX:
-      return "SIGABRT";
-    case SIGBUS_LINUX:
-      return "SIGBUS";
-    case SIGFPE_LINUX:
-      return "SIGFPE";
-    case SIGKILL_LINUX:
-      return "SIGKILL";
-    case SIGUSR1_LINUX:
-      return "SIGUSR1";
-    case SIGSEGV_LINUX:
-      return "SIGSEGV";
-    case SIGUSR2_LINUX:
-      return "SIGUSR2";
-    case SIGPIPE_LINUX:
-      return "SIGPIPE";
-    case SIGALRM_LINUX:
-      return "SIGALRM";
-    case SIGTERM_LINUX:
-      return "SIGTERM";
-    case SIGSTKFLT_LINUX:
-      return "SIGSTKFLT";
-    case SIGCHLD_LINUX:
-      return "SIGCHLD";
-    case SIGCONT_LINUX:
-      return "SIGCONT";
-    case SIGSTOP_LINUX:
-      return "SIGSTOP";
-    case SIGTSTP_LINUX:
-      return "SIGTSTP";
-    case SIGTTIN_LINUX:
-      return "SIGTTIN";
-    case SIGTTOU_LINUX:
-      return "SIGTTOU";
-    case SIGURG_LINUX:
-      return "SIGURG";
-    case SIGXCPU_LINUX:
-      return "SIGXCPU";
-    case SIGXFSZ_LINUX:
-      return "SIGXFSZ";
-    case SIGVTALRM_LINUX:
-      return "SIGVTALRM";
-    case SIGPROF_LINUX:
-      return "SIGPROF";
-    case SIGWINCH_LINUX:
-      return "SIGWINCH";
-    case SIGIO_LINUX:
-      return "SIGIO";
-    case SIGSYS_LINUX:
-      return "SIGSYS";
-    case SIGINFO_LINUX:
-      return "SIGINFO";
-    case SIGPWR_LINUX:
-      return "SIGPWR";
-    default:
-      break;
-  }
-  p = buf;
-  if (SIGRTMIN_LINUX <= sig && sig <= SIGRTMAX_LINUX) {
-    p = stpcpy(p, "SIGRTMIN+");
-  }
-  p = FormatInt64(p, sig);
-  return buf;
-}
-
-const char *DescribeSyscallResult(i64 ax) {
-  _Thread_local static char buf[22];
-  if (ax != -1) {
-    snprintf(buf, sizeof(buf), "%#" PRIx64, ax);
-  } else {
-    snprintf(buf, sizeof(buf), "-%s", DescribeHostErrno(errno));
-  }
-  return buf;
-}
-
-const char *DescribeHostErrno(int x) {
-  _Thread_local static char buf[21];
-  if (x == EPERM) return "EPERM";
-  if (x == ENOENT) return "ENOENT";
-  if (x == ESRCH) return "ESRCH";
-  if (x == EINTR) return "EINTR";
-  if (x == EIO) return "EIO";
-  if (x == ENXIO) return "ENXIO";
-  if (x == E2BIG) return "E2BIG";
-  if (x == ENOEXEC) return "ENOEXEC";
-  if (x == EBADF) return "EBADF";
-  if (x == ECHILD) return "ECHILD";
-  if (x == EAGAIN) return "EAGAIN";
-#if EWOULDBLOCK != EAGAIN
-  if (x == EWOULDBLOCK) return "EWOULDBLOCK";
-#endif
-  if (x == ENOMEM) return "ENOMEM";
-  if (x == EACCES) return "EACCES";
-  if (x == EFAULT) return "EFAULT";
-#ifdef ENOTBLK
-  if (x == ENOTBLK) return "ENOTBLK";
-#endif
-  if (x == EBUSY) return "EBUSY";
-  if (x == EEXIST) return "EEXIST";
-  if (x == EXDEV) return "EXDEV";
-  if (x == ENODEV) return "ENODEV";
-  if (x == ENOTDIR) return "ENOTDIR";
-  if (x == EISDIR) return "EISDIR";
-  if (x == EINVAL) return "EINVAL";
-  if (x == ENFILE) return "ENFILE";
-  if (x == EMFILE) return "EMFILE";
-  if (x == ENOTTY) return "ENOTTY";
-  if (x == ETXTBSY) return "ETXTBSY";
-  if (x == EFBIG) return "EFBIG";
-  if (x == ENOSPC) return "ENOSPC";
-  if (x == ESPIPE) return "ESPIPE";
-  if (x == EROFS) return "EROFS";
-  if (x == EMLINK) return "EMLINK";
-  if (x == EPIPE) return "EPIPE";
-  if (x == EDOM) return "EDOM";
-  if (x == ERANGE) return "ERANGE";
-  if (x == EDEADLK) return "EDEADLK";
-  if (x == ENAMETOOLONG) return "ENAMETOOLONG";
-  if (x == ENOLCK) return "ENOLCK";
-  if (x == ENOSYS) return "ENOSYS";
-  if (x == ENOTEMPTY) return "ENOTEMPTY";
-  if (x == ELOOP) return "ELOOP";
-  if (x == ENOMSG) return "ENOMSG";
-  if (x == EIDRM) return "EIDRM";
-#ifdef EREMOTE
-  if (x == EREMOTE) return "EREMOTE";
-#endif
-  if (x == EPROTO) return "EPROTO";
-  if (x == EBADMSG) return "EBADMSG";
-  if (x == EOVERFLOW) return "EOVERFLOW";
-  if (x == EILSEQ) return "EILSEQ";
-#ifdef EUSERS
-  if (x == EUSERS) return "EUSERS";
-#endif
-  if (x == ENOTSOCK) return "ENOTSOCK";
-  if (x == EDESTADDRREQ) return "EDESTADDRREQ";
-  if (x == EMSGSIZE) return "EMSGSIZE";
-  if (x == EPROTOTYPE) return "EPROTOTYPE";
-  if (x == ENOPROTOOPT) return "ENOPROTOOPT";
-  if (x == EPROTONOSUPPORT) return "EPROTONOSUPPORT";
-#ifdef ESOCKTNOSUPPORT
-  if (x == ESOCKTNOSUPPORT) return "ESOCKTNOSUPPORT";
-#endif
-  if (x == ENOTSUP) return "ENOTSUP";
-#if EOPNOTSUPP != ENOTSUP
-  if (x == EOPNOTSUPP) return "EOPNOTSUPP";
-#endif
-#ifdef EPFNOSUPPORT
-  if (x == EPFNOSUPPORT) return "EPFNOSUPPORT";
-#endif
-  if (x == EAFNOSUPPORT) return "EAFNOSUPPORT";
-  if (x == EADDRINUSE) return "EADDRINUSE";
-  if (x == EADDRNOTAVAIL) return "EADDRNOTAVAIL";
-  if (x == ENETDOWN) return "ENETDOWN";
-  if (x == ENETUNREACH) return "ENETUNREACH";
-  if (x == ENETRESET) return "ENETRESET";
-  if (x == ECONNABORTED) return "ECONNABORTED";
-  if (x == ECONNRESET) return "ECONNRESET";
-  if (x == ENOBUFS) return "ENOBUFS";
-  if (x == EISCONN) return "EISCONN";
-  if (x == ENOTCONN) return "ENOTCONN";
-#ifdef ESHUTDOWN
-  if (x == ESHUTDOWN) return "ESHUTDOWN";
-#endif
-#ifdef ETOOMANYREFS
-  if (x == ETOOMANYREFS) return "ETOOMANYREFS";
-#endif
-  if (x == ETIMEDOUT) return "ETIMEDOUT";
-  if (x == ECONNREFUSED) return "ECONNREFUSED";
-#ifdef EHOSTDOWN
-  if (x == EHOSTDOWN) return "EHOSTDOWN";
-#endif
-  if (x == EHOSTUNREACH) return "EHOSTUNREACH";
-  if (x == EALREADY) return "EALREADY";
-  if (x == EINPROGRESS) return "EINPROGRESS";
-  if (x == ESTALE) return "ESTALE";
-  if (x == EDQUOT) return "EDQUOT";
-  if (x == ECANCELED) return "ECANCELED";
-  if (x == EOWNERDEAD) return "EOWNERDEAD";
-  if (x == ENOTRECOVERABLE) return "ENOTRECOVERABLE";
-#ifdef ETIME
-  if (x == ETIME) return "ETIME";
-#endif
-#ifdef ENONET
-  if (x == ENONET) return "ENONET";
-#endif
-#ifdef ERESTART
-  if (x == ERESTART) return "ERESTART";
-#endif
-#ifdef ENOSR
-  if (x == ENOSR) return "ENOSR";
-#endif
-#ifdef ENOSTR
-  if (x == ENOSTR) return "ENOSTR";
-#endif
-#ifdef ENODATA
-  if (x == ENODATA) return "ENODATA";
-#endif
-#ifdef EMULTIHOP
-  if (x == EMULTIHOP) return "EMULTIHOP";
-#endif
-#ifdef ENOLINK
-  if (x == ENOLINK) return "ENOLINK";
-#endif
-#ifdef ENOMEDIUM
-  if (x == ENOMEDIUM) return "ENOMEDIUM";
-#endif
-#ifdef EMEDIUMTYPE
-  if (x == EMEDIUMTYPE) return "EMEDIUMTYPE";
-#endif
-  FormatInt64(buf, x);
-  return buf;
-}
-
-const char *DescribeFlags(int flags) {
+const char *DescribeCpuFlags(int flags) {
   _Thread_local static char b[7];
   b[0] = (flags & OF) ? 'O' : '.';
   b[1] = (flags & SF) ? 'S' : '.';
@@ -400,9 +147,13 @@ const char *DescribeOp(struct Machine *m, i64 pc) {
   _Thread_local static char b[256];
   int e, i, k, o = 0, n = sizeof(b);
   struct Dis d = {true};
-  char spec[64];
   if (!(e = GetInstruction(m, pc, d.xedd))) {
+#ifndef DISABLE_DISASSEMBLER
+    char spec[64];
     o = DisInst(&d, b, DisSpec(d.xedd, spec)) - b;
+#else
+    APPEND(".byte");
+#endif
   }
   if (e != kMachineSegmentationFault) {
     k = MAX(8, d.xedd->length);
@@ -412,27 +163,10 @@ const char *DescribeOp(struct Machine *m, i64 pc) {
   } else {
     APPEND("segfault");
   }
+#ifndef DISABLE_DISASSEMBLER
   DisFree(&d);
+#endif
   return b;
-}
-
-void LoadDebugSymbols(struct Elf *elf) {
-  int fd, n;
-  void *elfmap;
-  char buf[1024];
-  struct stat st;
-  if (elf->ehdr && GetElfSymbolTable(elf->ehdr, elf->size, &n) && n) return;
-  unassert(elf->prog);
-  snprintf(buf, sizeof(buf), "%s.dbg", elf->prog);
-  if ((fd = OverlaysOpen(AT_FDCWD, buf, O_RDONLY, 0)) != -1) {
-    if (fstat(fd, &st) != -1 &&
-        (elfmap = Mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0,
-                       "debug")) != MAP_FAILED) {
-      elf->ehdr = (Elf64_Ehdr_ *)elfmap;
-      elf->size = st.st_size;
-    }
-    close(fd);
-  }
 }
 
 void PrintFds(struct Fds *fds) {
@@ -445,15 +179,22 @@ void PrintFds(struct Fds *fds) {
 
 const char *GetBacktrace(struct Machine *m) {
   _Thread_local static char b[4096];
-  u8 *r;
-  int i;
   int o = 0;
   int n = sizeof(b);
-  i64 sym, sp, bp, rp;
+#ifndef DISABLE_BACKTRACE
   struct Dis dis = {true};
+  u8 *r;
+  int i;
+  i64 sym, sp, bp, rp;
   char kAlignmentMask[] = {3, 3, 15};
+#endif
+
+  BEGIN_NO_PAGE_FAULTS;
+
+#ifndef DISABLE_BACKTRACE
   LoadDebugSymbols(&m->system->elf);
   DisLoadElf(&dis, &m->system->elf);
+#endif
 
   APPEND(" PC %" PRIx64 " %s\n\t"
          " AX %016" PRIx64 " "
@@ -485,6 +226,7 @@ const char *GetBacktrace(struct Machine *m) {
          GET_COUNTER(instructions_decoded), GET_COUNTER(instructions_jitted),
          g_progname);
 
+#ifndef DISABLE_BACKTRACE
   rp = m->ip;
   bp = Get64(m->bp);
   sp = Get64(m->sp);
@@ -515,39 +257,25 @@ const char *GetBacktrace(struct Machine *m) {
     bp = ReadWord(m, r + 0);
     rp = ReadWord(m, r + 8);
   }
-
   DisFree(&dis);
+#endif
+
+  END_NO_PAGE_FAULTS;
   return b;
 }
 
-// use cosmopolitan/tool/build/fastdiff.c
-void LogCpu(struct Machine *m) {
-  static FILE *f;
-  if (!f) f = fopen("/tmp/cpu.log", "w");
-  fprintf(f,
-          "\n"
-          "IP %" PRIx64 "\n"
-          "AX %#" PRIx64 "\n"
-          "CX %#" PRIx64 "\n"
-          "DX %#" PRIx64 "\n"
-          "BX %#" PRIx64 "\n"
-          "SP %#" PRIx64 "\n"
-          "BP %#" PRIx64 "\n"
-          "SI %#" PRIx64 "\n"
-          "DI %#" PRIx64 "\n"
-          "R8 %#" PRIx64 "\n"
-          "R9 %#" PRIx64 "\n"
-          "R10 %#" PRIx64 "\n"
-          "R11 %#" PRIx64 "\n"
-          "R12 %#" PRIx64 "\n"
-          "R13 %#" PRIx64 "\n"
-          "R14 %#" PRIx64 "\n"
-          "R15 %#" PRIx64 "\n"
-          "FLAGS %s\n"
-          "%s\n",
-          m->ip, Read64(m->ax), Read64(m->cx), Read64(m->dx), Read64(m->bx),
-          Read64(m->sp), Read64(m->bp), Read64(m->si), Read64(m->di),
-          Read64(m->r8), Read64(m->r9), Read64(m->r10), Read64(m->r11),
-          Read64(m->r12), Read64(m->r13), Read64(m->r14), Read64(m->r15),
-          DescribeFlags(m->flags), DescribeOp(m, GetPc(m)));
+bool CheckMemoryInvariants(struct System *s) {
+  if (s->rss == s->memstat.tables + s->memstat.committed &&
+      s->vss == s->memstat.committed + s->memstat.reserved) {
+    return true;
+  } else {
+    ERRF("%-10s = %ld vs. %ld", "rss", s->rss,
+         s->memstat.tables + s->memstat.committed);
+    ERRF("%-10s = %ld vs. %ld", "vss", s->vss,
+         s->memstat.committed + s->memstat.reserved);
+    ERRF("%-10s = %ld", "tables", s->memstat.tables);
+    ERRF("%-10s = %ld", "reserved", s->memstat.reserved);
+    ERRF("%-10s = %ld", "committed", s->memstat.committed);
+    return false;
+  }
 }

@@ -18,12 +18,13 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <errno.h>
 #include <fcntl.h>
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "blink/assert.h"
 #include "blink/log.h"
+#include "blink/thread.h"
 #include "blink/tunables.h"
 
 static int g_errfd;
@@ -34,10 +35,10 @@ int WriteErrorString(const char *buf) {
 
 int WriteError(int fd, const char *buf, int len) {
   int rc, cs;
-  pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
+  unassert(!pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs));
   do rc = write(fd > 0 ? fd : g_errfd, buf, len);
   while (rc == -1 && errno == EINTR);
-  pthread_setcancelstate(cs, 0);
+  unassert(!pthread_setcancelstate(cs, 0));
   return rc;
 }
 

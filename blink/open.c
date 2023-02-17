@@ -18,8 +18,6 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <errno.h>
 #include <fcntl.h>
-#include <pthread.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -27,15 +25,21 @@
 #include <unistd.h>
 
 #include "blink/assert.h"
+#include "blink/atomic.h"
 #include "blink/debug.h"
 #include "blink/errno.h"
 #include "blink/fds.h"
-#include "blink/lock.h"
+#include "blink/fspath.h"
 #include "blink/log.h"
 #include "blink/overlays.h"
 #include "blink/random.h"
 #include "blink/syscall.h"
+#include "blink/thread.h"
 #include "blink/xlat.h"
+
+#ifdef DISABLE_OVERLAYS
+#define OverlaysOpen openat
+#endif
 
 static int SysTmpfile(struct Machine *m, i32 dirfildes, i64 pathaddr,
                       i32 oflags, i32 mode) {
@@ -70,10 +74,7 @@ static int SysTmpfile(struct Machine *m, i32 dirfildes, i64 pathaddr,
   unassert(!pthread_sigmask(SIG_BLOCK, &ss, &oldss));
   if ((tmpdir = OverlaysOpen(GetDirFildes(dirfildes), LoadStr(m, pathaddr),
                              O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0)) != -1) {
-    if (GetRandom(&rng, 8) != 8) {
-      LOGF("GetRandom() for O_TMPFILE failed");
-      abort();
-    }
+    unassert(GetRandom(&rng, 8, 0) == 8);
     for (i = 0; i < 12; ++i) {
       name[i] = "0123456789abcdefghijklmnopqrstuvwxyz"[rng % 36];
       rng /= 36;
@@ -103,11 +104,14 @@ int SysOpenat(struct Machine *m, i32 dirfildes, i64 pathaddr, i32 oflags,
               i32 mode) {
   int fildes;
   int sysflags;
+  struct Fd *fd;
   const char *path;
 #ifndef O_TMPFILE
+#ifndef DISABLE_NONPOSIX
   if ((oflags & O_TMPFILE_LINUX) == O_TMPFILE_LINUX) {
     return SysTmpfile(m, dirfildes, pathaddr, oflags & ~O_TMPFILE_LINUX, mode);
   }
+#endif
 #endif
   if ((sysflags = XlatOpenFlags(oflags)) == -1) return -1;
   if (!(path = LoadStr(m, pathaddr))) return efault();
@@ -115,7 +119,8 @@ int SysOpenat(struct Machine *m, i32 dirfildes, i64 pathaddr, i32 oflags,
                   OverlaysOpen(GetDirFildes(dirfildes), path, sysflags, mode));
   if (fildes != -1) {
     LOCK(&m->system->fds.lock);
-    unassert(AddFd(&m->system->fds, fildes, sysflags));
+    unassert(fd = AddFd(&m->system->fds, fildes, sysflags));
+    fd->path = JoinPath(GetDirFildesPath(m->system, dirfildes), path);
     UNLOCK(&m->system->fds.lock);
   } else {
 #ifdef __FreeBSD__

@@ -188,12 +188,24 @@
 #define MAP_SHARED_LINUX          0x00000001
 #define MAP_PRIVATE_LINUX         0x00000002
 #define MAP_FIXED_LINUX           0x00000010
-#define MAP_FIXED_NOREPLACE_LINUX 0x08000000
 #define MAP_ANONYMOUS_LINUX       0x00000020
 #define MAP_GROWSDOWN_LINUX       0x00000100
-#define MAP_STACK_LINUX           0x00020000
 #define MAP_NORESERVE_LINUX       0x00004000
 #define MAP_POPULATE_LINUX        0x00008000
+#define MAP_NONBLOCK_LINUX        0x00010000
+#define MAP_STACK_LINUX           0x00020000
+#define MAP_HUGETLB_LINUX         0x00040000
+#define MAP_SYNC_LINUX            0x00080000
+#define MAP_FIXED_NOREPLACE_LINUX 0x00100000
+#define MAP_UNINITIALIZED_LINUX   0x04000000
+
+#define PROT_NONE_LINUX      0
+#define PROT_READ_LINUX      1
+#define PROT_WRITE_LINUX     2
+#define PROT_EXEC_LINUX      4
+#define PROT_SEM_LINUX       8
+#define PROT_GROWSDOWN_LINUX 0x01000000
+#define PROT_GROWSUP_LINUX   0x02000000
 
 #define CLONE_VM_LINUX             0x00000100
 #define CLONE_THREAD_LINUX         0x00010000
@@ -207,6 +219,13 @@
 #define CLONE_CHILD_CLEARTID_LINUX 0x00200000
 #define CLONE_DETACHED_LINUX       0x00400000
 #define CLONE_CHILD_SETTID_LINUX   0x01000000
+#define CLONE_NEWCGROUP_LINUX      0x02000000
+#define CLONE_NEWUTS_LINUX         0x04000000
+#define CLONE_NEWIPC_LINUX         0x08000000
+#define CLONE_NEWUSER_LINUX        0x10000000
+#define CLONE_NEWPID_LINUX         0x20000000
+#define CLONE_NEWNET_LINUX         0x40000000
+#define CLONE_IO_LINUX             0x80000000
 
 #define FUTEX_WAIT_LINUX           0
 #define FUTEX_WAKE_LINUX           1
@@ -321,30 +340,37 @@
 #define SIOCGSTAMP_LINUX   0x8906  // struct timeval_linux *
 #define SIOCGSTAMPNS_LINUX 0x8907  // struct timespec_linux *
 
-#define AF_UNSPEC_LINUX 0
-#define AF_UNIX_LINUX   1
-#define AF_INET_LINUX   2
-#define AF_INET6_LINUX  10
+#define AF_UNSPEC_LINUX  0
+#define AF_UNIX_LINUX    1
+#define AF_INET_LINUX    2
+#define AF_INET6_LINUX   10
+#define AF_NETLINK_LINUX 16
+#define AF_PACKET_LINUX  17
+#define AF_VSOCK_LINUX   40
 
 #define SOL_IP_LINUX     0
 #define SOL_SOCKET_LINUX 1
 #define SOL_TCP_LINUX    6
 #define SOL_UDP_LINUX    17
+#define SOL_IPV6_LINUX   41
 
 #define IPPROTO_IP_LINUX     0
 #define IPPROTO_ICMP_LINUX   1
 #define IPPROTO_TCP_LINUX    6
 #define IPPROTO_UDP_LINUX    17
 #define IPPROTO_ICMPV6_LINUX 58
+#define IPPROTO_RAW_LINUX    255
 
-#define SA_NOCLDSTOP_LINUX 1
-#define SA_NOCLDWAIT_LINUX 2
-#define SA_SIGINFO_LINUX   4
-#define SA_RESTORER_LINUX  0x04000000
-#define SA_ONSTACK_LINUX   0x08000000
-#define SA_RESTART_LINUX   0x10000000
-#define SA_NODEFER_LINUX   0x40000000
-#define SA_RESETHAND_LINUX 0x80000000
+#define SA_NOCLDSTOP_LINUX      1
+#define SA_NOCLDWAIT_LINUX      2
+#define SA_SIGINFO_LINUX        4
+#define SA_UNSUPPORTED_LINUX    0x00000400
+#define SA_EXPOSE_TAGBITS_LINUX 0x00000800
+#define SA_RESTORER_LINUX       0x04000000
+#define SA_ONSTACK_LINUX        0x08000000
+#define SA_RESTART_LINUX        0x10000000
+#define SA_NODEFER_LINUX        0x40000000
+#define SA_RESETHAND_LINUX      0x80000000
 
 #define SCHED_OTHER_LINUX    0
 #define SCHED_FIFO_LINUX     1
@@ -666,8 +692,10 @@
 #define IP_HDRINCL_LINUX           3
 #define IP_OPTIONS_LINUX           4
 #define IP_RETOPTS_LINUX           7
+#define IP_RECVERR_LINUX           11
 #define IP_RECVTTL_LINUX           12
 #define IP_MTU_LINUX               14
+#define IPV6_RECVERR_LINUX         25
 #define TCP_NODELAY_LINUX          1
 #define TCP_MAXSEG_LINUX           2
 #define TCP_CORK_LINUX             3
@@ -693,9 +721,14 @@
 
 #define IOV_MAX_LINUX 1024
 
-#define WNOHANG_LINUX    1
-#define WUNTRACED_LINUX  2
-#define WCONTINUED_LINUX 8
+#define WNOHANG_LINUX     0x00000001
+#define WUNTRACED_LINUX   0x00000002
+#define WEXITED_LINUX     0x00000004
+#define WCONTINUED_LINUX  0x00000008
+#define WNOWAIT_LINUX     0x01000000
+#define __WNOTHREAD_LINUX 0x20000000
+#define __WALL_LINUX      0x40000000
+#define __WCLONE_LINUX    0x80000000
 
 #define MS_SYNC_LINUX       4
 #define MS_ASYNC_LINUX      1
@@ -773,6 +806,10 @@
 #define POLL_ERR_LINUX      4
 #define POLL_PRI_LINUX      5
 #define POLL_HUP_LINUX      6
+
+#define RENAME_NOREPLACE_LINUX 1
+#define RENAME_EXCHANGE_LINUX  2
+#define RENAME_WHITEOUT_LINUX  4
 
 struct iovec_linux {
   u8 base[8];
@@ -978,7 +1015,8 @@ struct dirent_linux {
 };
 
 struct ifconf_linux {
-  u8 len[8];
+  u8 len[4];
+  u8 pad[4];
   u8 buf[8];
 };
 
@@ -1089,6 +1127,12 @@ struct msghdr_linux {
   u8 controllen[8];  // u64 ancillary data buffer len
   u8 flags[4];       // u32 MSG_XXX (only applies to recvmsg)
   u8 pad2_[4];       //
+};
+
+struct mmsghdr_linux {
+  struct msghdr_linux hdr;
+  u8 len[4];
+  u8 pad_[4];
 };
 
 struct cmsghdr_linux {

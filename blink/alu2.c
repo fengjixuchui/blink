@@ -17,47 +17,51 @@
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <limits.h>
-#include <stdatomic.h>
 
 #include "blink/alu.h"
 #include "blink/assert.h"
+#include "blink/atomic.h"
 #include "blink/builtin.h"
 #include "blink/bus.h"
 #include "blink/endian.h"
 #include "blink/flags.h"
-#include "blink/lock.h"
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/modrm.h"
 #include "blink/rde.h"
 #include "blink/stats.h"
 #include "blink/swap.h"
+#include "blink/thread.h"
 
 void LoadAluArgs(P) {
-  if (IsModrmRegister(rde) && RexrReg(rde) == RexbRm(rde)) {
-    Jitter(A, "A"        // res0 = GetReg(RexrReg)
-              "r0a2="    // arg2 = res0
-              "r0a1=");  // arg1 = res0
-  } else {
-    Jitter(A, "B"        // res0 = GetRegOrMem(RexbRm)
-              "r0s1="    // sav1 = res0
-              "A"        // res0 = GetReg(RexrReg)
-              "r0a2="    // arg2 = res0
-              "s1a1=");  // arg1 = sav1
+  if (IsMakingPath(m)) {
+    if (IsModrmRegister(rde) && RexrReg(rde) == RexbRm(rde)) {
+      Jitter(A, "A"        // res0 = GetReg(RexrReg)
+                "r0a2="    // arg2 = res0
+                "r0a1=");  // arg1 = res0
+    } else {
+      Jitter(A, "B"        // res0 = GetRegOrMem(RexbRm)
+                "r0s1="    // sav1 = res0
+                "A"        // res0 = GetReg(RexrReg)
+                "r0a2="    // arg2 = res0
+                "s1a1=");  // arg1 = sav1
+    }
   }
 }
 
 void LoadAluFlipArgs(P) {
-  if (IsModrmRegister(rde) && RexrReg(rde) == RexbRm(rde)) {
-    Jitter(A, "A"        // res0 = GetReg(RexrReg)
-              "r0a2="    // arg2 = res0
-              "r0a1=");  // arg1 = res0
-  } else {
-    Jitter(A, "B"        // res0 = GetRegOrMem(RexbRm)
-              "r0s1="    // sav1 = res0
-              "A"        // res0 = GetReg(RexrReg)
-              "s1a2="    // arg2 = sav1
-              "r0a1=");  // arg1 = res0
+  if (IsMakingPath(m)) {
+    if (IsModrmRegister(rde) && RexrReg(rde) == RexbRm(rde)) {
+      Jitter(A, "A"        // res0 = GetReg(RexrReg)
+                "r0a2="    // arg2 = res0
+                "r0a1=");  // arg1 = res0
+    } else {
+      Jitter(A, "B"        // res0 = GetRegOrMem(RexbRm)
+                "r0s1="    // sav1 = res0
+                "A"        // res0 = GetReg(RexrReg)
+                "s1a2="    // arg2 = sav1
+                "r0a1=");  // arg1 = res0
+    }
   }
 }
 

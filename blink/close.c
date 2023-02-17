@@ -19,19 +19,18 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <pthread.h>
-#include <stdatomic.h>
 #include <unistd.h>
 
 #include "blink/assert.h"
+#include "blink/atomic.h"
 #include "blink/debug.h"
 #include "blink/dll.h"
 #include "blink/errno.h"
 #include "blink/fds.h"
-#include "blink/lock.h"
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/syscall.h"
+#include "blink/thread.h"
 
 static int CloseFd(struct Fd *fd) {
   int rc;
@@ -71,6 +70,24 @@ int SysClose(struct Machine *m, i32 fildes) {
   if (!fd) return -1;
   return FinishClose(m, CloseFd(fd));
 }
+
+void SysCloseExec(struct System *s) {
+  struct Fd *fd;
+  struct Dll *e, *e2, *fds;
+  LOCK(&s->fds.lock);
+  for (fds = 0, e = dll_first(s->fds.list); e; e = e2) {
+    fd = FD_CONTAINER(e);
+    e2 = dll_next(s->fds.list, e);
+    if (fd->oflags & O_CLOEXEC) {
+      dll_remove(&s->fds.list, e);
+      dll_make_last(&fds, e);
+    }
+  }
+  UNLOCK(&s->fds.lock);
+  CloseFds(fds);
+}
+
+#ifndef DISABLE_NONPOSIX
 
 static int SysCloseRangeCloexec(struct Machine *m, u32 first, u32 last) {
   struct Fd *fd;
@@ -119,18 +136,4 @@ int SysCloseRange(struct Machine *m, u32 first, u32 last, u32 flags) {
   return rc;
 }
 
-void SysCloseExec(struct System *s) {
-  struct Fd *fd;
-  struct Dll *e, *e2, *fds;
-  LOCK(&s->fds.lock);
-  for (fds = 0, e = dll_first(s->fds.list); e; e = e2) {
-    fd = FD_CONTAINER(e);
-    e2 = dll_next(s->fds.list, e);
-    if (fd->oflags & O_CLOEXEC) {
-      dll_remove(&s->fds.list, e);
-      dll_make_last(&fds, e);
-    }
-  }
-  UNLOCK(&s->fds.lock);
-  CloseFds(fds);
-}
+#endif /* DISABLE_NONPOSIX */

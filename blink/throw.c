@@ -67,6 +67,9 @@ void HaltMachine(struct Machine *m, int code) {
     case 3:
       DeliverSignalToUser(m, SIGTRAP_LINUX);
       break;
+    case kMachineExitTrap:
+      RestoreIp(m);
+      break;
     default:
       if (code > 0) {
         break;

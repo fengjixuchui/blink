@@ -42,20 +42,20 @@
 #define APPEND(F, ...) n += F(b + n, PIPE_BUF - n, __VA_ARGS__)
 
 static struct Log {
-  pthread_once_t once;
+  pthread_once_t_ once;
   int level;
   int fd;
   char *path;
 } g_log = {
-    PTHREAD_ONCE_INIT,
+    PTHREAD_ONCE_INIT_,
     LOG_ERR,
 };
 
 static char *GetTimestamp(void) {
   int x;
   struct timespec ts;
-  static _Thread_local char s[27];
   static _Thread_local i64 last;
+  static _Thread_local char s[27];
   static _Thread_local struct tm tm;
   IGNORE_RACES_START();
   clock_gettime(CLOCK_REALTIME, &ts);
@@ -125,7 +125,7 @@ static void Log(const char *file, int line, const char *fmt, va_list va,
   int err, n = 0;
   char b[PIPE_BUF];
   err = errno;
-  unassert(!pthread_once(&g_log.once, OpenLog));
+  unassert(!pthread_once_(&g_log.once, OpenLog));
   APPEND(snprintf, "%c%s:%s:%d:%d ", "EI"[level], GetTimestamp(), file, line,
          g_machine ? g_machine->tid : 0);
   APPEND(vsnprintf, fmt, va);

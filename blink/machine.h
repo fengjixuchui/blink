@@ -1,12 +1,11 @@
 #ifndef BLINK_MACHINE_H_
 #define BLINK_MACHINE_H_
 #include <limits.h>
-#include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <stdbool.h>
 
+#include "blink/atomic.h"
 #include "blink/builtin.h"
 #include "blink/dll.h"
 #include "blink/elf.h"
@@ -14,6 +13,7 @@
 #include "blink/jit.h"
 #include "blink/linux.h"
 #include "blink/log.h"
+#include "blink/thread.h"
 #include "blink/tsan.h"
 #include "blink/tunables.h"
 
@@ -41,6 +41,7 @@
 #define kMachineFpuException         -7
 #define kMachineProtectionFault      -8
 #define kMachineSimdException        -9
+#define kMachineExitTrap             -10
 
 #define CR0_PE 0x01        // protected mode enabled
 #define CR0_MP 0x02        // monitor coprocessor
@@ -65,14 +66,16 @@
 #define PAGE_MAP  0x0800  // PAGE_TA bits were mmmap()'d
 #define PAGE_EOF  0x0010000000000000
 #define PAGE_MUG  0x0020000000000000  // each 4096 byte page is a system page
+#define PAGE_FILE 0x0040000000000000
 #define PAGE_XD   0x8000000000000000
-#define PAGE_TA   0x00007ffffffff000
+#define PAGE_TA   0x0000fffffffff000  // extended by one bit for raspberry pi
 
 #define P                struct Machine *m, u64 rde, i64 disp, u64 uimm0
 #define A                m, rde, disp, uimm0
 #define DISPATCH_NOTHING m, 0, 0, 0
 
 #define MACHINE_CONTAINER(e)  DLL_CONTAINER(struct Machine, elem, e)
+#define FILEMAP_CONTAINER(e)  DLL_CONTAINER(struct FileMap, elem, e)
 #define HOSTPAGE_CONTAINER(e) DLL_CONTAINER(struct HostPage, elem, e)
 
 #if defined(NOLINEAR) || defined(__SANITIZE_THREAD__) || defined(__CYGWIN__)
@@ -93,12 +96,6 @@
 #define _Atomicish(t) _Atomic(t)
 #else
 #define _Atomicish(t) t
-#endif
-
-#if !defined(__m68k__) && !defined(__mips__)
-typedef atomic_uint memstat_t;
-#else
-typedef unsigned memstat_t;
 #endif
 
 MICRO_OP_SAFE u8 *ToHost(i64 v) {
@@ -123,23 +120,32 @@ struct HostPage {
   struct HostPage *next;
 };
 
+struct FileMap {
+  i64 virt;         // start address of map
+  i64 size;         // bytes originally mapped
+  u64 pages;        // population count of present
+  i64 offset;       // file offset (-1 if descriptive)
+  char *path;       // duplicated (owned) pointer to filename
+  u64 *present;     // bitset of present pages in [virt,virt+size)
+  struct Dll elem;  // see System::filemaps
+};
+
 struct MachineFpu {
+#ifndef DISABLE_X87
   double st[8];
-  u32 cw;
   u32 sw;
   int tw;
   int op;
   i64 ip;
+#endif
+  u32 cw;
   i64 dp;
 };
 
 struct MachineMemstat {
-  memstat_t freed;
-  memstat_t reserved;
-  memstat_t committed;
-  memstat_t allocated;
-  memstat_t reclaimed;
-  memstat_t pagetables;
+  long tables;
+  long reserved;
+  long committed;
 };
 
 // Segment descriptor cache
@@ -167,7 +173,9 @@ struct MachineState {
 };
 
 struct Elf {
-  const char *prog;
+  char *prog;
+  char *execfn;
+  char *interpreter;
   Elf64_Ehdr_ *ehdr;
   long size;
   i64 base;
@@ -196,6 +204,8 @@ struct System {
   u8 mode;
   bool dlab;
   bool isfork;
+  bool exited;
+  bool trapexit;
   u16 gdt_limit;
   u16 idt_limit;
   int pid;
@@ -207,15 +217,15 @@ struct System {
   u64 cr3;
   u64 cr4;
   i64 brk;
-  i64 rss;
-  i64 vss;
+  long rss;
+  long vss;
   i64 automap;
   i64 memchurn;
   i64 codestart;
+  struct Dll *filemaps;
+  _Atomic(bool) killer;
   unsigned long codesize;
   struct MachineMemstat memstat;
-  pthread_cond_t machines_cond;
-  pthread_mutex_t machines_lock;
   struct Dll *machines GUARDED_BY(machines_lock);
   unsigned next_tid GUARDED_BY(machines_lock);
   intptr_t ender;
@@ -223,15 +233,19 @@ struct System {
   struct Fds fds;
   struct Elf elf;
   sigset_t exec_sigmask;
-  pthread_mutex_t exec_lock;
-  pthread_mutex_t sig_lock;
   struct sigaction_linux hands[64] GUARDED_BY(sig_lock);
   u64 blinksigs;  // signals blink itself handles
-  pthread_mutex_t mmap_lock;
   struct rlimit_linux rlim[RLIM_NLIMITS_LINUX];
+#ifdef HAVE_THREADS
+  pthread_cond_t machines_cond;
+  pthread_mutex_t machines_lock;
+  pthread_mutex_t exec_lock;
+  pthread_mutex_t sig_lock;
+  pthread_mutex_t mmap_lock;
+#endif
   void (*onbinbase)(struct Machine *);
   void (*onlongbranch)(struct Machine *);
-  int (*exec)(char *, char **, char **);
+  int (*exec)(char *, char *, char **, char **);
   void (*redraw)(bool);
 };
 
@@ -310,8 +324,8 @@ struct Machine {                           //
   struct XedDecodedInst *xedd;             // ->opcache->icache if non-jit
   i64 readaddr;                            // so tui can show memory reads
   i64 writeaddr;                           // so tui can show memory write
-  u32 readsize;                            // bytes length of last read op
-  u32 writesize;                           // byte length of last write op
+  i64 readsize;                            // bytes length of last read op
+  i64 writesize;                           // byte length of last write op
   union {                                  //
     struct DescriptorCache seg[8];         //
     struct {                               //
@@ -334,6 +348,7 @@ struct Machine {                           //
   u32 tlbindex;                            //
   struct System *system;                   //
   int sigdepth;                            //
+  bool nofault;                            //
   bool canhalt;                            //
   bool metal;                              //
   bool restored;                           //
@@ -376,12 +391,14 @@ int LoadInstruction2(struct Machine *, u64);
 void ExecuteInstruction(struct Machine *);
 u64 AllocatePage(struct System *);
 u64 AllocatePageTable(struct System *);
+u64 FindPageTableEntry(struct Machine *, u64);
+bool CheckMemoryInvariants(struct System *) nosideeffect dontdiscard;
 int ReserveVirtual(struct System *, i64, i64, u64, int, i64, bool);
 char *FormatPml4t(struct Machine *);
 i64 FindVirtual(struct System *, i64, i64);
 int FreeVirtual(struct System *, i64, i64);
 void CleanseMemory(struct System *, size_t);
-void LoadArgv(struct Machine *, char *, char **, char **);
+void LoadArgv(struct Machine *, char *, char *, char **, char **);
 _Noreturn void HaltMachine(struct Machine *, int);
 _Noreturn void RaiseDivideError(struct Machine *);
 _Noreturn void ThrowSegmentationFault(struct Machine *, i64);
@@ -400,6 +417,7 @@ bool OverlapsPrecious(i64, i64) pureconst;
 char **CopyStrList(struct Machine *, i64);
 char *CopyStr(struct Machine *, i64);
 char *LoadStr(struct Machine *, i64);
+void *Schlep(struct Machine *, i64, size_t, u64, u64);
 void *SchlepR(struct Machine *, i64, size_t);
 void *SchlepW(struct Machine *, i64, size_t);
 void *SchlepRW(struct Machine *, i64, size_t);
@@ -426,6 +444,7 @@ int CopyToUser(struct Machine *, i64, void *, u64);
 int CopyToUserWrite(struct Machine *, i64, void *, u64);
 void EndStore(struct Machine *, i64, size_t, void *[2], u8 *);
 void EndStoreNp(struct Machine *, i64, size_t, void *[2], u8 *);
+int GetDescriptor(struct Machine *, int, u64 *);
 void ResetRam(struct Machine *);
 void SetReadAddr(struct Machine *, i64, u32);
 void SetWriteAddr(struct Machine *, i64, u32);
@@ -437,8 +456,8 @@ int GetProtection(u64);
 u64 SetProtection(int);
 int ClassifyOp(u64) pureconst;
 void Terminate(P, void (*)(struct Machine *, u64));
-i64 GetMaxRss(struct System *);
-i64 GetMaxVss(struct System *);
+long GetMaxRss(struct System *);
+long GetMaxVss(struct System *);
 
 void CountOp(long *);
 void FastPush(struct Machine *, long);
@@ -590,6 +609,24 @@ void OpHsubpsd(P);
 void OpAddsubpsd(P);
 void OpMovmskpsd(P);
 
+void OpIncZv(P);
+void OpDecZv(P);
+void OpLes(P);
+void OpLds(P);
+void OpJmpf(P);
+void OpInAlImm(P);
+void OpInAxImm(P);
+void OpInAlDx(P);
+void OpInAxDx(P);
+void OpOutImmAl(P);
+void OpOutImmAx(P);
+void OpOutDxAl(P);
+void OpOutDxAx(P);
+void OpMovSwEvqp(P);
+void OpMovEvqpSw(P);
+void OpPushSeg(P);
+void OpPopSeg(P);
+
 extern void (*AddPath_StartOp_Hook)(P);
 
 bool AddPath(P);
@@ -644,14 +681,29 @@ const char *GetBacktrace(struct Machine *);
 const char *DescribeOp(struct Machine *, i64);
 int GetInstruction(struct Machine *, i64, struct XedDecodedInst *);
 
-void SetupCod(struct Machine *);
+struct FileMap *GetFileMap(struct System *, i64);
+const char *GetDirFildesPath(struct System *, int);
+bool AddFileMap(struct System *, i64, i64, const char *, u64);
+
 void FlushCod(struct JitBlock *);
 #if LOG_COD
+void SetupCod(struct Machine *);
 void WriteCod(const char *, ...) printf_attr(1);
 void LogCodOp(struct Machine *, const char *);
 #else
+#define SetupCod(m)    (void)0
 #define LogCodOp(m, s) (void)0
 #define WriteCod(...)  (void)0
 #endif
+
+#define BEGIN_NO_PAGE_FAULTS \
+  {                          \
+    bool nofault;            \
+    nofault = m->nofault;    \
+    m->nofault = true
+
+#define END_NO_PAGE_FAULTS \
+  m->nofault = nofault;    \
+  }
 
 #endif /* BLINK_MACHINE_H_ */

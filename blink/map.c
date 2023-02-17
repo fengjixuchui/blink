@@ -18,6 +18,7 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <errno.h>
 #include <inttypes.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -34,11 +35,12 @@ long GetSystemPageSize(void) {
   // "pages" in Emscripten only refer to the granularity the memory
   // buffer can be grown at but does not affect functions like mmap
   return 4096;
-#endif
+#else
   long z;
   unassert((z = sysconf(_SC_PAGESIZE)) > 0);
   unassert(IS2POW(z));
   return MAX(4096, z);
+#endif
 }
 
 static const char *DescribeSync(int prot) {
@@ -79,9 +81,35 @@ void *Mmap(void *addr,     //
            int fd,         //
            off_t offset,   //
            const char *owner) {
-  void *res = mmap(addr, length, prot, flags, fd, offset);
+  void *res;
 #if LOG_MEM
   char szbuf[16];
+#endif
+#ifdef HAVE_MAP_ANONYMOUS
+  res = mmap(addr, length, prot, flags, fd, offset);
+#else
+  // MAP_ANONYMOUS isn't defined by POSIX.1
+  // they do however define the unlink hack
+  _Static_assert(!(MAP_ANONYMOUS_ & MAP_FIXED), "");
+  _Static_assert(!(MAP_ANONYMOUS_ & MAP_SHARED), "");
+  _Static_assert(!(MAP_ANONYMOUS_ & MAP_PRIVATE), "");
+  int tfd;
+  char path[] = "/tmp/blink.dat.XXXXXX";
+  if (~flags & MAP_ANONYMOUS_) {
+    res = mmap(addr, length, prot, flags, fd, offset);
+  } else if ((tfd = mkstemp(path)) != -1) {
+    unlink(path);
+    if (!ftruncate(tfd, length)) {
+      res = mmap(addr, length, prot, flags & ~MAP_ANONYMOUS_, tfd, 0);
+    } else {
+      res = MAP_FAILED;
+    }
+    close(tfd);
+  } else {
+    res = MAP_FAILED;
+  }
+#endif
+#if LOG_MEM
   FormatSize(szbuf, length, 1024);
   if (res != MAP_FAILED) {
     MEM_LOGF("%s created %s byte %smap [%p,%p) as %s flags=%#x fd=%d "

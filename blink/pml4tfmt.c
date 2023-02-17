@@ -25,8 +25,11 @@
 #include "blink/buffer.h"
 #include "blink/endian.h"
 #include "blink/flag.h"
+#include "blink/high.h"
+#include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/pml4t.h"
+#include "blink/rde.h"
 #include "blink/util.h"
 #include "blink/x86.h"
 
@@ -61,23 +64,54 @@ static void FormatStartPage(struct Pml4tFormater *pp, i64 start) {
   pp->start = start;
   pp->count = 0;
   pp->committed = 0;
-  if (pp->lines++) AppendStr(&pp->b, "\n");
-  AppendFmt(&pp->b, "%012" PRIx64 "-", start);
 }
 
 static void FormatEndPage(struct Machine *m, struct Pml4tFormater *pp,
                           i64 end) {
+  int i;
   char size[16];
+  struct FileMap *fm;
+  bool isreading, iswriting, isexecuting;
   pp->t = false;
+  if (pp->lines++) AppendStr(&pp->b, "\n");
+  isexecuting =
+      MAX(pp->start, m->ip) < MIN(m->ip + Oplength(m->xedd->op.rde), end);
+  isreading = MAX(pp->start, m->readaddr) < MIN(m->readaddr + m->readsize, end);
+  iswriting =
+      MAX(pp->start, m->writeaddr) < MIN(m->writeaddr + m->writesize, end);
+  if (g_high.enabled) {
+    if (isexecuting) AppendStr(&pp->b, "\033[7m");
+    if (isreading || iswriting) AppendStr(&pp->b, "\033[1m");
+  }
+  AppendFmt(&pp->b, "%012" PRIx64 "-%012" PRIx64, pp->start, end - 1);
+  if (g_high.enabled && (isreading || iswriting || isexecuting)) {
+    AppendStr(&pp->b, "\033[0m");
+  }
   FormatSize(size, end - pp->start, 1024);
-  AppendFmt(&pp->b, "%012" PRIx64 " %5s ", end - 1, size);
+  AppendFmt(&pp->b, " %5s ", size);
   if (FLAG_nolinear) {
     AppendFmt(&pp->b, "%3d%% ",
               (int)ceil((double)pp->committed / pp->count * 100));
   }
-  if (pp->flags & PAGE_U) AppendFmt(&pp->b, "r");
-  if (pp->flags & PAGE_RW) AppendFmt(&pp->b, "w");
-  if (~pp->flags & PAGE_XD) AppendFmt(&pp->b, "x");
+  i = 0;
+  if (pp->flags & PAGE_U) {
+    AppendStr(&pp->b, "r");
+    ++i;
+  }
+  if (pp->flags & PAGE_RW) {
+    AppendStr(&pp->b, "w");
+    ++i;
+  }
+  if (~pp->flags & PAGE_XD) {
+    AppendStr(&pp->b, "x");
+    ++i;
+  }
+  while (i++ < 4) {
+    AppendFmt(&pp->b, " ");
+  }
+  if ((fm = GetFileMap(m->system, pp->start))) {
+    AppendStr(&pp->b, fm->path);
+  }
 }
 
 static u8 *GetPt(struct Machine *m, u64 entry) {

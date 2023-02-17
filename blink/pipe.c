@@ -18,19 +18,20 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <errno.h>
 #include <fcntl.h>
-#include <stdatomic.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include "blink/assert.h"
+#include "blink/atomic.h"
 #include "blink/endian.h"
 #include "blink/errno.h"
 #include "blink/fds.h"
-#include "blink/lock.h"
 #include "blink/log.h"
 #include "blink/syscall.h"
+#include "blink/thread.h"
+#include "blink/xlat.h"
 
 int SysPipe2(struct Machine *m, i64 pipefds_addr, i32 flags) {
   int rc;
@@ -46,6 +47,9 @@ int SysPipe2(struct Machine *m, i64 pipefds_addr, i32 flags) {
   if (!IsValidMemory(m, pipefds_addr, sizeof(fds_linux), PROT_WRITE)) {
     return efault();
   }
+#ifdef HAVE_PIPE2
+  if ((rc = pipe2(fds, (oflags = XlatOpenFlags(flags)))) != -1) {
+#else
   if (flags) LOCK(&m->system->exec_lock);
   if (pipe(fds) != -1) {
     oflags = 0;
@@ -59,6 +63,7 @@ int SysPipe2(struct Machine *m, i64 pipefds_addr, i32 flags) {
       unassert(!fcntl(fds[0], F_SETFL, O_NDELAY));
       unassert(!fcntl(fds[1], F_SETFL, O_NDELAY));
     }
+#endif
     LOCK(&m->system->fds.lock);
     unassert(AddFd(&m->system->fds, fds[0], O_RDONLY | oflags));
     unassert(AddFd(&m->system->fds, fds[1], O_WRONLY | oflags));
@@ -70,6 +75,8 @@ int SysPipe2(struct Machine *m, i64 pipefds_addr, i32 flags) {
   } else {
     rc = -1;
   }
+#ifndef HAVE_PIPE2
   if (flags) UNLOCK(&m->system->exec_lock);
+#endif
   return rc;
 }
