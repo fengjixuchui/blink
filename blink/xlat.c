@@ -165,8 +165,12 @@ int XlatErrno(int x) {
   if (x == ESTALE) return ESTALE_LINUX;
   if (x == EDQUOT) return EDQUOT_LINUX;
   if (x == ECANCELED) return ECANCELED_LINUX;
+#ifdef EOWNERDEAD
   if (x == EOWNERDEAD) return EOWNERDEAD_LINUX;
+#endif
+#ifdef ENOTRECOVERABLE
   if (x == ENOTRECOVERABLE) return ENOTRECOVERABLE_LINUX;
+#endif
 #ifdef ETIME
   if (x == ETIME) return ETIME_LINUX;
 #endif
@@ -258,6 +262,10 @@ int XlatResource(int x) {
     XLAT(RLIMIT_DATA_LINUX, RLIMIT_DATA);
     XLAT(RLIMIT_STACK_LINUX, RLIMIT_STACK);
     XLAT(RLIMIT_CORE_LINUX, RLIMIT_CORE);
+#ifdef RLIMIT_AS
+    XLAT(RLIMIT_AS_LINUX, RLIMIT_AS);
+#endif
+#ifndef DISABLE_NONPOSIX
 #ifdef RLIMIT_RSS
     XLAT(RLIMIT_RSS_LINUX, RLIMIT_RSS);
 #endif
@@ -267,9 +275,6 @@ int XlatResource(int x) {
     XLAT(RLIMIT_NOFILE_LINUX, RLIMIT_NOFILE);
 #ifdef RLIMIT_MEMLOCK
     XLAT(RLIMIT_MEMLOCK_LINUX, RLIMIT_MEMLOCK);
-#endif
-#ifdef RLIMIT_AS
-    XLAT(RLIMIT_AS_LINUX, RLIMIT_AS);
 #endif
 #ifdef RLIMIT_LOCKS
     XLAT(RLIMIT_LOCKS_LINUX, RLIMIT_LOCKS);
@@ -289,6 +294,7 @@ int XlatResource(int x) {
 #ifdef RLIMIT_RTTIME
     XLAT(RLIMIT_RTTIME_LINUX, RLIMIT_RTTIME);
 #endif
+#endif /* DISABLE_NONPOSIX */
     default:
       LOGF("rlimit %d not supported yet", x);
       return einval();
@@ -340,6 +346,172 @@ int UnXlatSignal(int x) {
   }
 #endif
   return einval();
+}
+
+int UnXlatSiCode(int sig, int code) {
+#ifdef SI_USER
+  if (code == SI_USER) return SI_USER_LINUX;
+#endif
+#ifdef SI_QUEUE
+  if (code == SI_QUEUE) return SI_QUEUE_LINUX;
+#endif
+#ifdef SI_TIMER
+  if (code == SI_TIMER) return SI_TIMER_LINUX;
+#endif
+#ifdef SI_TKILL
+  if (code == SI_TKILL) return SI_TKILL_LINUX;
+#endif
+#ifdef SI_MESGQ
+  if (code == SI_MESGQ) return SI_MESGQ_LINUX;
+#endif
+#ifdef SI_ASYNCIO
+  if (code == SI_ASYNCIO) return SI_ASYNCIO_LINUX;
+#endif
+#ifdef SI_ASYNCNL
+  if (code == SI_ASYNCNL) return SI_ASYNCNL_LINUX;
+#endif
+#ifdef SI_KERNEL
+  if (code == SI_KERNEL) return SI_KERNEL_LINUX;
+#endif
+#ifdef SI_NOINFO
+  if (code == SI_NOINFO) return SI_NOINFO_LINUX;
+#endif
+  switch (sig) {
+    case SIGCHLD_LINUX:
+#ifdef CLD_EXITED
+      if (code == CLD_EXITED) return CLD_EXITED_LINUX;
+#endif
+#ifdef CLD_KILLED
+      if (code == CLD_KILLED) return CLD_KILLED_LINUX;
+#endif
+#ifdef CLD_DUMPED
+      if (code == CLD_DUMPED) return CLD_DUMPED_LINUX;
+#endif
+#ifdef CLD_TRAPPED
+      if (code == CLD_TRAPPED) return CLD_TRAPPED_LINUX;
+#endif
+#ifdef CLD_STOPPED
+      if (code == CLD_STOPPED) return CLD_STOPPED_LINUX;
+#endif
+#ifdef CLD_CONTINUED
+      if (code == CLD_CONTINUED) return CLD_CONTINUED_LINUX;
+#endif
+      break;
+    case SIGTRAP_LINUX:
+#ifdef TRAP_BRKPT
+      if (code == TRAP_BRKPT) return TRAP_BRKPT_LINUX;
+#endif
+#ifdef TRAP_TRACE
+      if (code == TRAP_TRACE) return TRAP_TRACE_LINUX;
+#endif
+      break;
+    case SIGSEGV_LINUX:
+#ifdef SEGV_MAPERR
+      if (code == SEGV_MAPERR) return SEGV_MAPERR_LINUX;
+#endif
+#ifdef SEGV_ACCERR
+      if (code == SEGV_ACCERR) return SEGV_ACCERR_LINUX;
+#endif
+#ifdef SEGV_PKUERR
+      if (code == SEGV_PKUERR) return SEGV_PKUERR_LINUX;
+#endif
+      break;
+    case SIGFPE_LINUX:
+#ifdef FPE_INTDIV
+      if (code == FPE_INTDIV) return FPE_INTDIV_LINUX;
+#endif
+#ifdef FPE_INTOVF
+      if (code == FPE_INTOVF) return FPE_INTOVF_LINUX;
+#endif
+#ifdef FPE_FLTDIV
+      if (code == FPE_FLTDIV) return FPE_FLTDIV_LINUX;
+#endif
+#ifdef FPE_FLTOVF
+      if (code == FPE_FLTOVF) return FPE_FLTOVF_LINUX;
+#endif
+#ifdef FPE_FLTUND
+      if (code == FPE_FLTUND) return FPE_FLTUND_LINUX;
+#endif
+#ifdef FPE_FLTRES
+      if (code == FPE_FLTRES) return FPE_FLTRES_LINUX;
+#endif
+#ifdef FPE_FLTINV
+      if (code == FPE_FLTINV) return FPE_FLTINV_LINUX;
+#endif
+#ifdef FPE_FLTSUB
+      if (code == FPE_FLTSUB) return FPE_FLTSUB_LINUX;
+#endif
+      break;
+    case SIGILL_LINUX:
+#ifdef ILL_ILLOPC
+      if (code == ILL_ILLOPC) return ILL_ILLOPC_LINUX;
+#endif
+#ifdef ILL_ILLOPN
+      if (code == ILL_ILLOPN) return ILL_ILLOPN_LINUX;
+#endif
+#ifdef ILL_ILLADR
+      if (code == ILL_ILLADR) return ILL_ILLADR_LINUX;
+#endif
+#ifdef ILL_ILLTRP
+      if (code == ILL_ILLTRP) return ILL_ILLTRP_LINUX;
+#endif
+#ifdef ILL_PRVOPC
+      if (code == ILL_PRVOPC) return ILL_PRVOPC_LINUX;
+#endif
+#ifdef ILL_PRVREG
+      if (code == ILL_PRVREG) return ILL_PRVREG_LINUX;
+#endif
+#ifdef ILL_COPROC
+      if (code == ILL_COPROC) return ILL_COPROC_LINUX;
+#endif
+#ifdef ILL_BADSTK
+      if (code == ILL_BADSTK) return ILL_BADSTK_LINUX;
+#endif
+      break;
+    case SIGBUS_LINUX:
+#ifdef BUS_ADRALN
+      if (code == BUS_ADRALN) return BUS_ADRALN_LINUX;
+#endif
+#ifdef BUS_ADRERR
+      if (code == BUS_ADRERR) return BUS_ADRERR_LINUX;
+#endif
+#ifdef BUS_OBJERR
+      if (code == BUS_OBJERR) return BUS_OBJERR_LINUX;
+#endif
+#ifdef BUS_OOMERR
+      if (code == BUS_OOMERR) return BUS_OOMERR_LINUX;
+#endif
+#ifdef BUS_MCEERR_AR
+      if (code == BUS_MCEERR_AR) return BUS_MCEERR_AR_LINUX;
+#endif
+#ifdef BUS_MCEERR_AO
+      if (code == BUS_MCEERR_AO) return BUS_MCEERR_AO_LINUX;
+#endif
+      break;
+    case SIGIO_LINUX:
+#ifdef POLL_IN
+      if (code == POLL_IN) return POLL_IN_LINUX;
+#endif
+#ifdef POLL_OUT
+      if (code == POLL_OUT) return POLL_OUT_LINUX;
+#endif
+#ifdef POLL_MSG
+      if (code == POLL_MSG) return POLL_MSG_LINUX;
+#endif
+#ifdef POLL_ERR
+      if (code == POLL_ERR) return POLL_ERR_LINUX;
+#endif
+#ifdef POLL_PRI
+      if (code == POLL_PRI) return POLL_PRI_LINUX;
+#endif
+#ifdef POLL_HUP
+      if (code == POLL_HUP) return POLL_HUP_LINUX;
+#endif
+      break;
+    default:
+      break;
+  }
+  return code;
 }
 
 int XlatRusage(int x) {
@@ -431,21 +603,20 @@ int XlatSocketOptname(int level, int optname) {
         XLAT(SO_RCVBUF_LINUX, SO_RCVBUF);
         XLAT(SO_BROADCAST_LINUX, SO_BROADCAST);
         XLAT(SO_KEEPALIVE_LINUX, SO_KEEPALIVE);
+        XLAT(SO_RCVTIMEO_LINUX, SO_RCVTIMEO);
+        XLAT(SO_SNDTIMEO_LINUX, SO_SNDTIMEO);
+        XLAT(SO_RCVLOWAT_LINUX, SO_RCVLOWAT);
+        XLAT(SO_SNDLOWAT_LINUX, SO_SNDLOWAT);
+#ifndef DISABLE_NONPOSIX
 #ifdef SO_REUSEPORT
         XLAT(SO_REUSEPORT_LINUX, SO_REUSEPORT);
 #endif
-        XLAT(SO_RCVTIMEO_LINUX, SO_RCVTIMEO);
-        XLAT(SO_SNDTIMEO_LINUX, SO_SNDTIMEO);
-#ifdef SO_RCVLOWAT
-        XLAT(SO_RCVLOWAT_LINUX, SO_RCVLOWAT);
-#endif
-#ifdef SO_SNDLOWAT
-        XLAT(SO_SNDLOWAT_LINUX, SO_SNDLOWAT);
 #endif
         default:
           break;
       }
       break;
+#ifndef DISABLE_NONPOSIX
     case SOL_IP_LINUX:
       switch (optname) {
         XLAT(IP_TOS_LINUX, IP_TOS);
@@ -472,9 +643,11 @@ int XlatSocketOptname(int level, int optname) {
           break;
       }
       break;
+#endif /* DISABLE_NONPOSIX */
     case SOL_TCP_LINUX:
       switch (optname) {
         XLAT(TCP_NODELAY_LINUX, TCP_NODELAY);
+#ifndef DISABLE_NONPOSIX
 #ifdef TCP_MAXSEG
         XLAT(TCP_MAXSEG_LINUX, TCP_MAXSEG);
 #endif
@@ -516,6 +689,7 @@ int XlatSocketOptname(int level, int optname) {
 #ifdef TCP_SAVE_SYN
         XLAT(TCP_SAVE_SYN_LINUX, TCP_SAVE_SYN);
 #endif
+#endif /* DISABLE_NONPOSIX */
         default:
           break;
       }
@@ -571,31 +745,31 @@ int XlatClock(int x, clock_t *clock) {
   // Haiku defines CLOCK_REALTIME as -1
   clock_t res;
   switch (x) {
-    CASE(0, res = CLOCK_REALTIME);
-    CASE(1, res = CLOCK_MONOTONIC);
-    CASE(2, res = CLOCK_PROCESS_CPUTIME_ID);
-    CASE(3, res = CLOCK_THREAD_CPUTIME_ID);
+    CASE(CLOCK_REALTIME_LINUX, res = CLOCK_REALTIME);
+    CASE(CLOCK_MONOTONIC_LINUX, res = CLOCK_MONOTONIC);
+    CASE(CLOCK_PROCESS_CPUTIME_ID_LINUX, res = CLOCK_PROCESS_CPUTIME_ID);
+    CASE(CLOCK_THREAD_CPUTIME_ID_LINUX, res = CLOCK_THREAD_CPUTIME_ID);
+#ifndef DISABLE_NONPOSIX
 #ifdef CLOCK_REALTIME_COARSE
-    CASE(5, res = CLOCK_REALTIME_COARSE);
+    CASE(CLOCK_REALTIME_COARSE_LINUX, res = CLOCK_REALTIME_COARSE);
 #elif defined(CLOCK_REALTIME_FAST)
-    CASE(5, res = CLOCK_REALTIME_FAST);
+    CASE(CLOCK_REALTIME_FAST_LINUX, res = CLOCK_REALTIME_FAST);
 #endif
 #ifdef CLOCK_MONOTONIC_COARSE
-    CASE(6, res = CLOCK_MONOTONIC_COARSE);
+    CASE(CLOCK_MONOTONIC_COARSE_LINUX, res = CLOCK_MONOTONIC_COARSE);
 #elif defined(CLOCK_REALTIME_FAST)
-    CASE(6, res = CLOCK_MONOTONIC_FAST);
+    CASE(CLOCK_MONOTONIC_FAST_LINUX, res = CLOCK_MONOTONIC_FAST);
 #endif
 #ifdef CLOCK_MONOTONIC_RAW
-    CASE(4, res = CLOCK_MONOTONIC_RAW);
-#else
-    CASE(4, res = CLOCK_MONOTONIC);
+    CASE(CLOCK_MONOTONIC_RAW_LINUX, res = CLOCK_MONOTONIC_RAW);
 #endif
 #ifdef CLOCK_BOOTTIME
-    CASE(7, res = CLOCK_BOOTTIME);
+    CASE(CLOCK_BOOTTIME_LINUX, res = CLOCK_BOOTTIME);
 #endif
 #ifdef CLOCK_TAI
-    CASE(11, res = CLOCK_TAI);
+    CASE(CLOCK_TAI_LINUX, res = CLOCK_TAI);
 #endif
+#endif /* DISABLE_NONPOSIX */
     default:
       LOGF("%s %d not supported yet", "clock", x);
       return einval();
@@ -669,12 +843,14 @@ int XlatOpenFlags(int x) {
     x &= ~O_DSYNC_LINUX;
   }
 #endif
+#ifndef DISABLE_NONPOSIX
 #ifdef O_TMPFILE
   if ((x & O_TMPFILE_LINUX) == O_TMPFILE_LINUX) {
     res |= O_TMPFILE;
     x &= ~O_TMPFILE_LINUX;
   }
   // order matters: O_DIRECTORY ⊂ O_TMPFILE
+#endif
 #endif
   if (x & O_DIRECTORY_LINUX) {
     res |= O_DIRECTORY;
@@ -685,14 +861,15 @@ int XlatOpenFlags(int x) {
 #endif
   if (x & O_CLOEXEC_LINUX) res |= O_CLOEXEC, x &= ~O_CLOEXEC_LINUX;
   if (x & O_NOCTTY_LINUX) res |= O_NOCTTY, x &= ~O_NOCTTY_LINUX;
+#ifndef DISABLE_NONPOSIX
 #ifdef O_ASYNC
   if (x & O_ASYNC_LINUX) res |= O_ASYNC, x &= ~O_ASYNC_LINUX;
 #endif
+#endif
+#ifndef DISABLE_NONPOSIX
 #ifdef O_NOATIME
   if (x & O_NOATIME_LINUX) res |= O_NOATIME, x &= ~O_NOATIME_LINUX;
 #endif
-#ifdef O_DSYNC
-  if (x & O_DSYNC_LINUX) res |= O_DSYNC, x &= ~O_DSYNC_LINUX;
 #endif
   if (x) {
     LOGF("%s %#x not supported", "open flags", x);
@@ -749,11 +926,13 @@ int UnXlatOpenFlags(int x) {
     x &= ~O_DIRECT;
   }
 #endif
+#ifndef DISABLE_NONPOSIX
 #ifdef O_TMPFILE
   if ((x & O_TMPFILE) == O_TMPFILE) {
     res |= O_TMPFILE_LINUX;
     x &= ~O_TMPFILE;
   }
+#endif
 #endif
   if ((x & O_DIRECTORY) == O_DIRECTORY) {
     res |= O_DIRECTORY_LINUX;
@@ -779,17 +958,21 @@ int UnXlatOpenFlags(int x) {
     res |= O_NOCTTY_LINUX;
     x &= ~O_NOCTTY;
   }
+#ifndef DISABLE_NONPOSIX
 #ifdef O_ASYNC
   if ((x & O_ASYNC) == O_ASYNC) {
     res |= O_ASYNC_LINUX;
     x &= ~O_ASYNC;
   }
 #endif
+#endif
+#ifndef DISABLE_NONPOSIX
 #ifdef O_NOATIME
   if ((x & O_NOATIME) == O_NOATIME) {
     res |= O_NOATIME_LINUX;
     x &= ~O_NOATIME;
   }
+#endif
 #endif
 #ifdef O_DSYNC
   if ((x & O_DSYNC) == O_DSYNC) {

@@ -72,12 +72,15 @@
 #include "blink/stats.h"
 #include "blink/strace.h"
 #include "blink/swap.h"
-#include "blink/syscall-macro.h"
 #include "blink/syscall.h"
 #include "blink/thread.h"
 #include "blink/timespec.h"
 #include "blink/util.h"
 #include "blink/xlat.h"
+
+#ifdef __linux
+#include <sys/prctl.h>
+#endif
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -116,6 +119,26 @@
 #define SO_LINGER_ SO_LINGER
 #endif
 
+#define SYSARGS0
+#define SYSARGS1 , di
+#define SYSARGS2 , di, si
+#define SYSARGS3 , di, si, dx
+#define SYSARGS4 , di, si, dx, r0
+#define SYSARGS5 , di, si, dx, r0, r8
+#define SYSARGS6 , di, si, dx, r0, r8, r9
+
+#define SYSCALL(arity, ordinal, name, func, signature)            \
+  case ordinal:                                                   \
+    if (STRACE && (signature)[0] != NORMAL[0] &&                  \
+        FLAG_strace >= (signature)[0]) {                          \
+      Strace(m, name, true, &(signature)[1] SYSARGS##arity);      \
+    }                                                             \
+    ax = func(m SYSARGS##arity);                                  \
+    if (STRACE && FLAG_strace) {                                  \
+      Strace(m, name, false, &(signature)[1], ax SYSARGS##arity); \
+    }                                                             \
+    break
+
 char *g_blink_path;
 bool FLAG_statistics;
 
@@ -123,9 +146,9 @@ bool FLAG_statistics;
 // old musl toolchains using `int ioctl(int, int, ...)`
 static int SystemIoctl(int fd, unsigned long request, ...) {
   va_list va;
-  intptr_t arg;
+  uintptr_t arg;
   va_start(va, request);
-  arg = va_arg(va, intptr_t);
+  arg = va_arg(va, uintptr_t);
   va_end(va);
   return ioctl(fd, request, (void *)arg);
 }
@@ -215,53 +238,65 @@ void SignalActor(struct Machine *mm) {
     STATISTIC(++interps);
 #endif
     ExecuteInstruction(m);
-    if (m->restored) break;
-    CheckForSignals(m);
+    if (atomic_load_explicit(&m->attention, memory_order_acquire)) {
+      if (m->restored) break;
+      CheckForSignals(m);
+    }
   }
 }
 
-bool CheckInterrupt(struct Machine *m, bool restartable) {
-  int sig, delivered;
+bool DeliverSignalRecursively(struct Machine *m, int sig) {
+  bool issigsuspend;
   sigset_t unblock, oldmask;
-  bool res, restart, issigsuspend;
+  SYS_LOGF("recursing %s", DescribeSignal(sig));
+  if (m->sigdepth >= kMaxSigDepth) {
+    LOGF("exceeded max signal depth");
+    return false;
+  }
+  // we're officially calling a signal handler
+  // run the signal handler code inside the i/o routine
+  // it's very important that no locks are currently held
+  // garbage may exist on the freelist for calls like sendmsg
+  ++m->sigdepth;
+  if ((issigsuspend = m->issigsuspend)) {
+    m->issigsuspend = false;
+    unassert(!sigemptyset(&unblock));
+    unassert(!pthread_sigmask(SIG_BLOCK, &unblock, &oldmask));
+  }
+  m->restored = false;
+  m->insyscall = false;
+  SignalActor(m);
+  m->insyscall = true;
+  m->restored = false;
+  if (issigsuspend) {
+    unassert(!pthread_sigmask(SIG_SETMASK, &oldmask, 0));
+    m->issigsuspend = true;
+  }
+  --m->sigdepth;
+  return true;
+}
+
+bool CheckInterrupt(struct Machine *m, bool restartable) {
+  bool res, restart;
+  int sig, delivered;
   // an actual i/o call just received EINTR from the kernel
-GetSome:
+HandleSomeMoreInterrupts:
   // determine if there's any signals pending for our guest
   Put64(m->ax, -EINTR_LINUX);
   if ((sig = ConsumeSignal(m, &delivered, &restart))) {
     TerminateSignal(m, sig);
   }
   if (delivered) {
-    if (m->sigdepth < kMaxSigDepth) {
-      // we're officially calling a signal handler
-      // run the signal handler code inside the i/o routine
-      // it's very important that no locks are currently held
-      // garbage may exist on the freelist for calls like sendmsg
-      ++m->sigdepth;
-      if ((issigsuspend = m->issigsuspend)) {
-        m->issigsuspend = false;
-        unassert(!sigemptyset(&unblock));
-        unassert(!pthread_sigmask(SIG_BLOCK, &unblock, &oldmask));
-      }
-      m->restored = false;
-      SignalActor(m);
-      unassert(Read64(m->ax) == -EINTR_LINUX);
-      m->restored = false;
-      if (issigsuspend) {
-        unassert(!pthread_sigmask(SIG_SETMASK, &oldmask, 0));
-        m->issigsuspend = true;
-      }
-      --m->sigdepth;
+    if (DeliverSignalRecursively(m, delivered)) {
       if (restart && restartable) {
         // try to consume some more signals while we're here
-        goto GetSome;
+        goto HandleSomeMoreInterrupts;
       } else {
         // let the i/o routine return eintr
         errno = EINTR;
         res = true;
       }
     } else {
-      LOGF("exceeded max signal depth");
       errno = EINTR;
       res = true;
     }
@@ -344,6 +379,7 @@ _Noreturn void SysExitGroup(struct Machine *m, int rc) {
     KillOtherThreads(m->system);
     if (m->system->trapexit && !m->system->exited) {
       m->system->exited = true;
+      m->system->exitcode = rc;
       HaltMachine(m, kMachineExitTrap);
     }
     FreeMachine(m);
@@ -373,20 +409,16 @@ static int Fork(struct Machine *m, u64 flags, u64 stack, u64 ctid) {
   int pid, newpid = 0;
   _Atomic(int) *ctid_ptr;
   unassert(!m->path.jb);
-  if ((flags & CLONE_CHILD_SETTID_LINUX) &&
-      ((ctid & (sizeof(int) - 1)) ||
-       !(ctid_ptr = (_Atomic(int) *)LookupAddress(m, ctid)))) {
-    LOGF("bad clone() ptid / ctid pointers: %#" PRIx64, flags);
-    return efault();
-  }
-  // NOTES ON LOCKING HIERARCHY
+  // NOTES ON THE LOCKING TOPOLOGY
   // exec_lock must come before sig_lock (see dup3)
   // exec_lock must come before fds.lock (see dup3)
   // exec_lock must come before fds.lock (see execve)
   // mmap_lock must come before fds.lock (see GetOflags)
+  // mmap_lock must come before pagelocks_lock (see FreePage)
   LOCK(&m->system->exec_lock);
   LOCK(&m->system->sig_lock);
   LOCK(&m->system->mmap_lock);
+  LOCK(&m->system->pagelocks_lock);
   LOCK(&m->system->fds.lock);
   LOCK(&m->system->machines_lock);
 #ifndef HAVE_PTHREAD_PROCESS_SHARED
@@ -403,17 +435,12 @@ static int Fork(struct Machine *m, u64 flags, u64 stack, u64 ctid) {
 #endif
   UNLOCK(&m->system->machines_lock);
   UNLOCK(&m->system->fds.lock);
+  UNLOCK(&m->system->pagelocks_lock);
   UNLOCK(&m->system->mmap_lock);
   UNLOCK(&m->system->sig_lock);
   UNLOCK(&m->system->exec_lock);
   if (!pid) {
     newpid = getpid();
-    if (flags & CLONE_CHILD_SETTID_LINUX) {
-      atomic_store_explicit(ctid_ptr, Little32(newpid), memory_order_release);
-    }
-    if (flags & CLONE_CHILD_CLEARTID_LINUX) {
-      m->ctid = ctid;
-    }
     if (stack) {
       Put64(m->sp, stack);
     }
@@ -430,6 +457,16 @@ static int Fork(struct Machine *m, u64 flags, u64 stack, u64 ctid) {
     // protection for JIT blocks after forking.
     FixJitProtection(&m->system->jit);
 #endif
+    if ((flags & (CLONE_CHILD_SETTID_LINUX | CLONE_CHILD_CLEARTID_LINUX)) &&
+        !(ctid & (sizeof(i32) - 1)) &&
+        (ctid_ptr = (_Atomic(i32) *)LookupAddress(m, ctid))) {
+      if (flags & CLONE_CHILD_SETTID_LINUX) {
+        atomic_store_explicit(ctid_ptr, Little32(newpid), memory_order_release);
+      }
+      if (flags & CLONE_CHILD_CLEARTID_LINUX) {
+        m->ctid = ctid;
+      }
+    }
   }
   return pid;
 }
@@ -448,14 +485,13 @@ static void *OnSpawn(void *arg) {
   struct Machine *m = (struct Machine *)arg;
   THR_LOGF("pid=%d tid=%d OnSpawn", m->system->pid, m->tid);
   m->thread = pthread_self();
-  g_machine = m;
   if (!(rc = sigsetjmp(m->onhalt, 1))) {
+    m->canhalt = true;
     unassert(!pthread_sigmask(SIG_SETMASK, &m->spawn_sigmask, 0));
-    Actor(m);
-  } else {
-    LOGF("halting machine from thread: %d", rc);
-    SysExitGroup(m, rc);
+  } else if (rc == kMachineFatalSystemSignal) {
+    HandleFatalSystemSignal(m);
   }
+  Blink(m);
 }
 
 #ifdef HAVE_THREADS
@@ -634,7 +670,7 @@ static int SysFutexWait(struct Machine *m,  //
   } else {
     deadline = GetMaxTime();
   }
-  if (!(mem = GetAddress(m, uaddr))) return efault();
+  if (!(mem = LookupAddress(m, uaddr))) return -1;
   LOCK(&g_bus->futexes.lock);
   if (Load32(mem) != expect) {
     UNLOCK(&g_bus->futexes.lock);
@@ -665,8 +701,8 @@ static int SysFutexWait(struct Machine *m,  //
       rc = EINTR;
       break;
     }
-    if (!(mem = GetAddress(m, uaddr))) {
-      rc = EFAULT;
+    if (!(mem = LookupAddress(m, uaddr))) {
+      rc = errno;
       break;
     }
     LOCK(&f->lock);
@@ -720,9 +756,11 @@ static int SysFutex(struct Machine *m,  //
     case FUTEX_WAIT_BITSET_LINUX | FUTEX_CLOCK_REALTIME_LINUX:
       // will be supported soon
       // avoid logging when cosmo feature checks this
+      if (!m->system->iscosmo) goto DefaultCase;
       return einval();
     default:
-      LOGF("unsupported futex op %#x", op);
+    DefaultCase:
+      LOGF("unsupported %s op %#x", "futex", op);
       return einval();
   }
 }
@@ -848,12 +886,8 @@ static i32 SysGetRobustList(struct Machine *m, int pid, i64 head_ptr_addr,
 }
 
 static i32 SysSetRobustList(struct Machine *m, i64 head_addr, u64 len) {
-  if (len != sizeof(struct robust_list_linux)) {
-    return einval();
-  }
-  if (!IsValidMemory(m, head_addr, len, PROT_READ | PROT_WRITE)) {
-    return efault();
-  }
+  if (len != sizeof(struct robust_list_linux)) return einval();
+  if (!IsValidMemory(m, head_addr, len, PROT_READ | PROT_WRITE)) return -1;
   m->robust_list = head_addr;
   return 0;
 }
@@ -870,26 +904,20 @@ static int SysSchedSetaffinity(struct Machine *m,  //
                                i64 maskaddr) {
   if (ValidateAffinityPid(m, pid) == -1) return -1;
 #ifdef HAVE_SCHED_GETAFFINITY
-  int rc;
   u8 *mask;
   size_t i, n;
   cpu_set_t sysmask;
   GetCpuCount();  // call for effect
   n = MIN(cpusetsize, CPU_SETSIZE / 8) * 8;
-  if (!(mask = (u8 *)malloc(n / 8))) return -1;
-  if (CopyFromUserRead(m, mask, maskaddr, n / 8) == -1) {
-    free(mask);
-    return -1;
-  }
+  if (!(mask = (u8 *)AddToFreeList(m, malloc(n / 8)))) return -1;
+  if (CopyFromUserRead(m, mask, maskaddr, n / 8) == -1) return -1;
   CPU_ZERO(&sysmask);
   for (i = 0; i < n; ++i) {
     if (mask[i / 8] & (1 << (i % 8))) {
       CPU_SET(i, &sysmask);
     }
   }
-  rc = sched_setaffinity(pid, sizeof(sysmask), &sysmask);
-  free(mask);
-  return rc;
+  return sched_setaffinity(pid, sizeof(sysmask), &sysmask);
 #else
   return 0;  // do nothing
 #endif
@@ -906,7 +934,7 @@ static int SysSchedGetaffinity(struct Machine *m,  //
   size_t i, n;
   cpu_set_t sysmask;
   n = MIN(cpusetsize, CPU_SETSIZE / 8) * 8;
-  if (!(mask = (u8 *)malloc(n / 8))) return -1;
+  if (!(mask = (u8 *)AddToFreeList(m, malloc(n / 8)))) return -1;
   rc = sched_getaffinity(pid, sizeof(sysmask), &sysmask);
   unassert(rc == 0 || rc == -1);
   if (!rc) {
@@ -919,7 +947,6 @@ static int SysSchedGetaffinity(struct Machine *m,  //
     }
     if (CopyToUserWrite(m, maskaddr, mask, n / 8) == -1) rc = -1;
   }
-  free(mask);
   return rc;
 #else
   u8 *mask;
@@ -927,37 +954,84 @@ static int SysSchedGetaffinity(struct Machine *m,  //
   count = GetCpuCount();
   rc = ROUNDUP(count, 64) / 8;
   if (cpusetsize < rc) return einval();
-  if (!(mask = (u8 *)calloc(1, rc))) return -1;
+  if (!(mask = (u8 *)AddToFreeList(m, calloc(1, rc)))) return -1;
   count = MIN(count, rc * 8);
   for (i = 0; i < count; ++i) {
     mask[i / 8] |= 1 << (i % 8);
   }
   if (CopyToUserWrite(m, maskaddr, mask, rc) == -1) rc = -1;
-  free(mask);
   return rc;
 #endif
 }
 
-static int SysPrctl(struct Machine *m, int op, i64 a, i64 b, i64 c, i64 d) {
-  return einval();
+static int SysPrctlGetTsc(struct Machine *m, i64 arg2) {
+  u8 word[4];
+  Write32(word, m->traprdtsc ? PR_TSC_SIGSEGV_LINUX : PR_TSC_ENABLE_LINUX);
+  return CopyToUserWrite(m, arg2, word, sizeof(word));
 }
 
-static int SysArchPrctl(struct Machine *m, int code, i64 addr) {
-  u8 buf[8];
-  switch (code) {
-    case ARCH_SET_GS_LINUX:
-      m->gs.base = addr;
+static int SysPrctlSetTsc(struct Machine *m, i64 arg2) {
+  switch (arg2) {
+    case PR_TSC_ENABLE_LINUX:
+      m->traprdtsc = false;
       return 0;
+    case PR_TSC_SIGSEGV_LINUX:
+      m->traprdtsc = true;
+      return 0;
+    default:
+      return einval();
+  }
+}
+
+static int SysPrctl(struct Machine *m, int op, i64 arg2, i64 arg3, i64 arg4,
+                    i64 arg5) {
+  switch (op) {
+    case PR_GET_TSC_LINUX:
+      return SysPrctlGetTsc(m, arg2);
+    case PR_SET_TSC_LINUX:
+      return SysPrctlSetTsc(m, arg2);
+#ifdef PR_SET_NO_NEW_PRIVS
+    case PR_SET_NO_NEW_PRIVS_LINUX:
+      return prctl(PR_SET_NO_NEW_PRIVS, arg2, arg3, arg4, arg5);
+#endif
+    case PR_GET_SECCOMP_LINUX:
+    case PR_SET_SECCOMP_LINUX:
+      // avoid noisy feature check warnings in cosmopolitan
+      if (!m->system->iscosmo) goto DefaultCase;
+      return einval();
+    default:
+    DefaultCase:
+      LOGF("unsupported %s op %#x", "prctl", op);
+      return einval();
+  }
+}
+
+static int SysArchPrctl(struct Machine *m, int op, i64 addr) {
+#ifndef DISABLE_NONPOSIX
+  u8 buf[8];
+#endif
+  switch (op) {
     case ARCH_SET_FS_LINUX:
       m->fs.base = addr;
       return 0;
-    case ARCH_GET_GS_LINUX:
-      Write64(buf, m->gs.base);
-      return CopyToUserWrite(m, addr, buf, 8);
+#ifndef DISABLE_NONPOSIX
+    case ARCH_SET_GS_LINUX:
+      m->gs.base = addr;
+      return 0;
     case ARCH_GET_FS_LINUX:
       Write64(buf, m->fs.base);
       return CopyToUserWrite(m, addr, buf, 8);
+    case ARCH_GET_GS_LINUX:
+      Write64(buf, m->gs.base);
+      return CopyToUserWrite(m, addr, buf, 8);
+    case ARCH_GET_CPUID_LINUX:
+      return !m->trapcpuid;
+    case ARCH_SET_CPUID_LINUX:
+      m->trapcpuid = !addr;
+      return 0;
+#endif
     default:
+      LOGF("unsupported %s op %#x", "arch_prctl", op);
       return einval();
   }
 }
@@ -1011,14 +1085,20 @@ static i64 SysBrk(struct Machine *m, i64 addr) {
   MEM_LOGF("brk(%#" PRIx64 ") currently %#" PRIx64, addr, m->system->brk);
   pagesize = GetSystemPageSize();
   addr = ROUNDUP(addr, pagesize);
-  if (addr >= kNullPageSize) {
+  if (addr >= kNullSize) {
     if (addr > m->system->brk) {
       size = addr - m->system->brk;
       CleanseMemory(m->system, size);
       if (m->system->rss < GetMaxRss(m->system)) {
         if (size / 4096 + m->system->vss < GetMaxVss(m->system)) {
           if (ReserveVirtual(m->system, m->system->brk, addr - m->system->brk,
-                             PAGE_RW | PAGE_U, -1, 0, false) != -1) {
+                             PAGE_FILE | PAGE_RW | PAGE_U | PAGE_XD, -1, 0, 0,
+                             0) != -1) {
+            if (!m->system->brkchanged) {
+              unassert(AddFileMap(m->system, m->system->brk,
+                                  addr - m->system->brk, "[heap]", -1));
+              m->system->brkchanged = true;
+            }
             MEM_LOGF("increased break %" PRIx64 " -> %" PRIx64, m->system->brk,
                      addr);
             m->system->brk = addr;
@@ -1073,8 +1153,7 @@ static i64 SysMmapImpl(struct Machine *m, i64 virt, u64 size, int prot,
                        int flags, int fildes, i64 offset) {
   u64 key;
   int oflags;
-  ssize_t rc;
-  long pagesize;
+  bool fixedmap;
   i64 newautomap;
   if (!IsValidAddrSize(virt, size)) return einval();
   if (flags & MAP_GROWSDOWN_LINUX) return enotsup();
@@ -1113,38 +1192,42 @@ static i64 SysMmapImpl(struct Machine *m, i64 virt, u64 size, int prot,
     }
   }
   newautomap = -1;
+  fixedmap = false;
   if (flags & MAP_FIXED_LINUX) {
+    fixedmap = true;
     goto CreateTheMap;
   }
   if (flags & MAP_FIXED_NOREPLACE_LINUX) {
     if (IsFullyUnmapped(m->system, virt, size)) {
       goto CreateTheMap;
     } else {
-      MEM_LOGF("memory already exists on the interval [%" PRIx64 ",%" PRIx64
-               ")\n%s",
+      MEM_LOGF("memory already exists on the interval"
+               " [%" PRIx64 ",%" PRIx64 ")\n"
+               "%s",
                virt, virt + size, FormatPml4t(g_machine));
       errno = EEXIST;
       virt = -1;
       goto Finished;
     }
   }
+  if (HasLinearMapping() && FLAG_vabits <= 47 && !kSkew && !virt) {
+    goto CreateTheMap;
+  }
   if ((!virt || !IsFullyUnmapped(m->system, virt, size))) {
     if ((virt = FindVirtual(m->system, m->system->automap, size)) == -1) {
       goto Finished;
     }
-    pagesize = GetSystemPageSize();
-    newautomap = ROUNDUP(virt + size, pagesize);
-    if (newautomap >= kAutomapEnd) {
-      newautomap = kAutomapStart;
+    newautomap = ROUNDUP(virt + size, GetSystemPageSize());
+    if (newautomap >= FLAG_automapend) {
+      newautomap = FLAG_automapstart;
     }
   }
 CreateTheMap:
-  rc = ReserveVirtual(m->system, virt, size, key, fildes, offset,
-                      !!(flags & MAP_SHARED_LINUX));
-  if (rc != -1 && newautomap != -1) {
+  virt = ReserveVirtual(m->system, virt, size, key, fildes, offset,
+                        !!(flags & MAP_SHARED_LINUX), fixedmap);
+  if (virt != -1 && newautomap != -1) {
     m->system->automap = newautomap;
   }
-  if (rc == -1) virt = -1;
 Finished:
   return virt;
 }
@@ -1330,6 +1413,26 @@ static void FixupSock(int fd, int flags) {
   }
 }
 
+#ifndef BUILD_TIMESTAMP
+#define BUILD_TIMESTAMP __TIMESTAMP__
+#endif
+#ifndef BLINK_VERSION
+#define BLINK_VERSION "BLINK_VERSION_UNKNOWN"
+#warning "-DBLINK_VERSION=... should be passed to blink/syscall.c"
+#endif
+#ifndef LINUX_VERSION
+#define LINUX_VERSION "LINUX_VERSION_UNKNOWN"
+#warning "-DLINUX_VERSION=... should be passed to blink/syscall.c"
+#endif
+#ifndef BLINK_COMMITS
+#define BLINK_COMMITS "BLINK_COMMITS_UNKNOWN"
+#warning "-DBLINK_COMMITS=... should be passed to blink/syscall.c"
+#endif
+#ifndef BLINK_UNAME_V
+#define BLINK_UNAME_V "BLINK_UNAME_V_UNKNOWN"
+#warning "-DBLINK_UNAME_V=... should be passed to blink/syscall.c"
+#endif
+
 static int SysUname(struct Machine *m, i64 utsaddr) {
   // glibc binaries won't run unless we report blink as a
   // modern linux kernel on top of genuine intel hardware
@@ -1386,9 +1489,7 @@ static int SysSocketpair(struct Machine *m, i32 family, i32 type, i32 protocol,
   if ((type = XlatSocketType(type)) == -1) return -1;
   if ((family = XlatSocketFamily(family)) == -1) return -1;
   if ((protocol = XlatSocketProtocol(protocol)) == -1) return -1;
-  if (!IsValidMemory(m, pipefds_addr, sizeof(fds_linux), PROT_WRITE)) {
-    return efault();
-  }
+  if (!IsValidMemory(m, pipefds_addr, sizeof(fds_linux), PROT_WRITE)) return -1;
   if (flags) LOCK(&m->system->exec_lock);
   if ((rc = socketpair(family, type, protocol, fds)) != -1) {
     FixupSock(fds[0], flags);
@@ -1549,9 +1650,7 @@ static int XlatSendFlags(int flags, int socktype) {
   int supported, hostflags;
   supported = MSG_OOB_LINUX |        //
               MSG_DONTROUTE_LINUX |  //
-#ifdef MSG_NOSIGNAL
-              MSG_NOSIGNAL_LINUX |  //
-#endif
+              MSG_NOSIGNAL_LINUX |   //
 #ifdef MSG_EOR
               MSG_EOR_LINUX |
 #endif
@@ -1569,9 +1668,6 @@ static int XlatSendFlags(int flags, int socktype) {
   }
   if (flags & MSG_DONTROUTE_LINUX) hostflags |= MSG_DONTROUTE;
   if (flags & MSG_DONTWAIT_LINUX) hostflags |= MSG_DONTWAIT;
-#ifdef MSG_NOSIGNAL
-  if (flags & MSG_NOSIGNAL_LINUX) hostflags |= MSG_NOSIGNAL;
-#endif
 #ifdef MSG_EOR
   if (flags & MSG_EOR_LINUX) hostflags |= MSG_EOR;
 #endif
@@ -1636,12 +1732,6 @@ static int UnXlatMsgFlags(int flags) {
     flags &= ~MSG_EOR;
   }
 #endif
-#ifdef MSG_NOSIGNAL
-  if (flags & MSG_NOSIGNAL) {
-    guestflags |= MSG_NOSIGNAL_LINUX;
-    flags &= ~MSG_NOSIGNAL;
-  }
-#endif
 #ifdef MSG_CMSG_CLOEXEC
 #ifndef DISABLE_NONPOSIX
   if (flags & MSG_CMSG_CLOEXEC) {
@@ -1656,27 +1746,35 @@ static int UnXlatMsgFlags(int flags) {
   return guestflags;
 }
 
-static i64 ConvertEnotconnToSigpipe(struct Machine *m, i64 rc) {
-#if defined(__linux) || !defined(HAVE_FORK)
-  return rc;
-#else
-  if (!(rc == -1 && errno == ENOTCONN)) return rc;
-  LOCK(&m->system->sig_lock);
-  if ((m->sigmask & (1ull << (SIGPIPE_LINUX - 1))) ||
-      Read64(m->system->hands[SIGPIPE_LINUX - 1].handler) == SIG_IGN_LINUX) {
+// we need to handle any shutdown via pipeline explicitly
+// because blink always puts SIGPIPE in the SIG_IGN state
+static i64 HandleSigpipe(struct Machine *m, i64 rc, int flags) {
+#ifndef __linux
+  // TODO(jart): Should we just intercept shutdown() state instead?
+  if (rc == -1 && errno == ENOTCONN) {
     errno = EPIPE;
-  } else if (Read64(m->system->hands[SIGPIPE_LINUX - 1].handler) ==
-             SIG_DFL_LINUX) {
-    TerminateSignal(m, SIGPIPE_LINUX);
-    errno = EPIPE;
-  } else {
-    m->interrupted = true;
-    Put64(m->ax, -EPIPE_LINUX);
-    DeliverSignal(m, SIGPIPE_LINUX, SI_KERNEL_LINUX);
   }
-  UNLOCK(&m->system->sig_lock);
-  return rc;
 #endif
+  if (rc == -1 && errno == EPIPE &&
+      !((flags & MSG_NOSIGNAL_LINUX) ||
+        (m->sigmask & (1ull << (SIGPIPE_LINUX - 1))))) {
+    LOCK(&m->system->sig_lock);
+    switch (Read64(m->system->hands[SIGPIPE_LINUX - 1].handler)) {
+      case SIG_IGN_LINUX:
+        break;
+      case SIG_DFL_LINUX:
+        TerminateSignal(m, SIGPIPE_LINUX);
+        errno = EPIPE;
+        break;
+      default:
+        m->interrupted = true;
+        Put64(m->ax, -EPIPE_LINUX);
+        DeliverSignal(m, SIGPIPE_LINUX, SI_KERNEL_LINUX);
+        break;
+    }
+    UNLOCK(&m->system->sig_lock);
+  }
+  return rc;
 }
 
 static bool IsSockAddrEmpty(const struct sockaddr *sa) {
@@ -1765,7 +1863,7 @@ static i64 SysSendto(struct Machine *m,  //
     INTERRUPTIBLE(!norestart, rc = sendmsg(fildes, &msg, hostflags));
   }
   FreeIovs(&iv);
-  return ConvertEnotconnToSigpipe(m, rc);
+  return HandleSigpipe(m, rc, flags);
 }
 
 static i64 SysRecvfrom(struct Machine *m,  //
@@ -1861,7 +1959,7 @@ static i64 SysSendmsg(struct Machine *m, i32 fildes, i64 msgaddr, i32 flags) {
     INTERRUPTIBLE(!norestart, rc = sendmsg(fildes, &msg, flags));
   }
   FreeIovs(&iv);
-  return ConvertEnotconnToSigpipe(m, rc);
+  return HandleSigpipe(m, rc, flags);
 }
 
 static i64 SysRecvmsg(struct Machine *m, i32 fildes, i64 msgaddr, i32 flags) {
@@ -2069,9 +2167,7 @@ static int GetsockoptInt32(struct Machine *m, i32 fd, int level, int optname,
   u32 optvalsize_linux;
   if (!(psize = (u8 *)SchlepRW(m, optvalsizeaddr, 4))) return -1;
   optvalsize_linux = Read32(psize);
-  if (!IsValidMemory(m, optvaladdr, optvalsize_linux, PROT_WRITE)) {
-    return efault();
-  }
+  if (!IsValidMemory(m, optvaladdr, optvalsize_linux, PROT_WRITE)) return -1;
   optvalsize = sizeof(val);
   if ((rc = getsockopt(fd, level, optname, &val, &optvalsize)) != -1) {
     if ((val = xlat(val)) == -1) return -1;
@@ -2106,9 +2202,7 @@ static int GetsockoptLinger(struct Machine *m, i32 fd, i64 optvaladdr,
   struct linger_linux gl;
   if (!(psize = (u8 *)SchlepRW(m, optvalsizeaddr, 4))) return -1;
   optvalsize_linux = Read32(psize);
-  if (!IsValidMemory(m, optvaladdr, optvalsize_linux, PROT_WRITE)) {
-    return efault();
-  }
+  if (!IsValidMemory(m, optvaladdr, optvalsize_linux, PROT_WRITE)) return -1;
   optvalsize = sizeof(hl);
   if ((rc = getsockopt(fd, SOL_SOCKET, SO_LINGER_, &hl, &optvalsize)) != -1) {
     Write32(gl.onoff, hl.l_onoff);
@@ -2188,13 +2282,12 @@ static int SysGetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
   }
   optvalsize = Read32(optvalsize_linux);
   if (optvalsize > 256) return einval();
-  if (!(optval = calloc(1, optvalsize))) return -1;
+  if (!(optval = AddToFreeList(m, calloc(1, optvalsize)))) return -1;
   rc = getsockopt(fildes, syslevel, sysoptname, optval, &optvalsize);
   Write32(optvalsize_linux, optvalsize);
   CopyToUserWrite(m, optvaladdr, optval, optvalsize);
   CopyToUserWrite(m, optvalsizeaddr, optvalsize_linux,
                   sizeof(optvalsize_linux));
-  free(optval);
   return rc;
 }
 
@@ -2259,7 +2352,7 @@ static i64 SysWrite(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   } else {
     rc = 0;
   }
-  return ConvertEnotconnToSigpipe(m, rc);
+  return HandleSigpipe(m, rc, 0);
 }
 
 // FreeBSD doesn't do access mode check on read/write to pipes.
@@ -2400,7 +2493,7 @@ static i64 SysPwritev2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
       if (iv.i) {
         if (offset == -1) {
           RESTARTABLE(rc = writev_impl(fildes, iv.p, iv.i));
-          rc = ConvertEnotconnToSigpipe(m, rc);
+          rc = HandleSigpipe(m, rc, 0);
         } else if (offset < 0) {
           return einval();
         } else if (offset > NUMERIC_MAX(off_t)) {
@@ -2439,6 +2532,45 @@ static i64 SysPwritev(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
   return SysPwritev2(m, fildes, iovaddr, iovlen, offset, 0);
 }
 
+static i64 SysSendfile(struct Machine *m, i32 out_fd, i32 in_fd, i64 offsetaddr,
+                       u64 count) {
+  u64 toto, offset;
+  ssize_t got, wrote;
+  u8 *buf, *offsetp = 0;
+  size_t chunk, maxchunk = 16384;
+  if (CheckFdAccess(m, out_fd, true, EBADF) == -1) return -1;
+  if (CheckFdAccess(m, in_fd, false, EBADF) == -1) return -1;
+  if (offsetaddr && !(offsetp = (u8 *)SchlepRW(m, offsetaddr, 8))) return -1;
+  if (!(buf = (u8 *)AddToFreeList(m, malloc(maxchunk)))) return -1;
+  if (offsetp) {
+    offset = Read64(offsetp);
+    if ((i64)offset < 0) return einval();
+    if (Read64(offsetp) + count < count ||
+        Read64(offsetp) + count > NUMERIC_MAX(off_t)) {
+      return eoverflow();
+    }
+  }
+  for (toto = 0; toto < count; toto += wrote) {
+    chunk = MIN(count - toto, maxchunk);
+    if (offsetp) {
+      got = pread(in_fd, buf, chunk, offset + toto);
+    } else {
+      got = read(in_fd, buf, chunk);
+    }
+    if (got == -1) goto OnFailure;
+    if (offsetp) Write64(offsetp, offset + toto + got);
+    if ((wrote = write(out_fd, buf, got)) == -1) goto OnFailure;
+  }
+  return count;
+OnFailure:
+  if (toto) {
+    LOGF("sendfile() partial failure: %s", DescribeHostErrno(errno));
+    return toto;
+  } else {
+    return -1;
+  }
+}
+
 static int UnXlatDt(int x) {
 #ifndef DT_UNKNOWN
   return DT_UNKNOWN_LINUX;
@@ -2470,7 +2602,7 @@ static i64 Getdents(struct Machine *m, i32 fildes, i64 addr, i64 size,
   struct dirent_linux rec;
   if (size < sizeof(rec) - sizeof(rec.name)) return einval();
   if ((fd->oflags & O_DIRECTORY) != O_DIRECTORY) return enotdir();
-  if (!IsValidMemory(m, addr, size, PROT_WRITE)) return efault();
+  if (!IsValidMemory(m, addr, size, PROT_WRITE)) return -1;
   if (fstat(fildes, &st) || !st.st_nlink) return enoent();
   if (!fd->dirstream && !(fd->dirstream = fdopendir(fd->fildes))) {
     return -1;
@@ -2782,7 +2914,7 @@ static int SysSync(struct Machine *m) {
 }
 
 static int CheckSyncable(int fildes) {
-#ifdef __FreeBSD__
+#ifndef __linux
   // FreeBSD doesn't return EINVAL like Linux does when trying to
   // synchronize character devices, e.g. /dev/null. An unresolved
   // question though is if FreeBSD actually does something here.
@@ -3017,7 +3149,7 @@ static int SysFcntlSetownEx(struct Machine *m, i32 fildes, i64 addr) {
 static int SysFcntlGetownEx(struct Machine *m, i32 fildes, i64 addr) {
   int rc;
   struct f_owner_ex_linux gowner;
-  if (!IsValidMemory(m, addr, sizeof(gowner), PROT_WRITE)) return efault();
+  if (!IsValidMemory(m, addr, sizeof(gowner), PROT_WRITE)) return -1;
 #ifdef HAVE_F_GETOWN_EX
   int type;
   struct f_owner_ex howner;
@@ -3120,12 +3252,11 @@ static ssize_t SysReadlinkat(struct Machine *m, int dirfd, i64 path,
   // ──Quoth the Linux Programmer's Manual § readlink(2). Some libc
   // implementations (e.g. Musl) consider it to be posixly incorrect.
   if (bufsiz <= 0) return einval();
-  if (!(buf = (char *)malloc(bufsiz))) return -1;
+  if (!(buf = (char *)AddToFreeList(m, malloc(bufsiz)))) return -1;
   if ((rc = OverlaysReadlink(GetDirFildes(dirfd), LoadStr(m, path), buf,
                              bufsiz)) != -1) {
     if (CopyToUserWrite(m, bufaddr, buf, rc) == -1) rc = -1;
   }
-  free(buf);
   return rc;
 }
 
@@ -3349,6 +3480,10 @@ static void ExecveBlink(struct Machine *m, char *prog, char **argv,
     sigfillset(&block);
     unassert(!pthread_sigmask(SIG_BLOCK, &block, &m->system->exec_sigmask));
     if (CanEmulateExecutable(m, &prog, &argv)) {
+      // point of no return
+      // prog/argv/envp are copied onto the freelist
+      m->sysdepth = 0;
+      CollectPageLocks(m);
       // TODO(jart): Prevent possibility of stack overflow.
       SYS_LOGF("m->system->exec(%s)", prog);
       SysCloseExec(m->system);
@@ -3386,7 +3521,7 @@ static int SysWait4(struct Machine *m, int pid, i64 opt_out_wstatus_addr,
                                               sizeof(gwstatusb), PROT_WRITE)) ||
       (opt_out_rusage_addr &&
        !IsValidMemory(m, opt_out_rusage_addr, sizeof(grusage), PROT_WRITE))) {
-    return efault();
+    return -1;
   }
 #ifdef HAVE_WAIT4
   RESTARTABLE(rc = wait4(pid, &wstatus, options, &hrusage));
@@ -3513,7 +3648,7 @@ static int SysPrlimit(struct Machine *m, i32 pid, i32 resource,
       (new_rlimit_addr &&
        !IsValidMemory(m, new_rlimit_addr, sizeof(struct rlimit_linux),
                       PROT_READ))) {
-    return efault();
+    return -1;
   }
 #endif
   if ((old_rlimit_addr && SysGetrlimit(m, resource, old_rlimit_addr) == -1) ||
@@ -3560,14 +3695,13 @@ static ssize_t SysGetrandom(struct Machine *m, i64 a, size_t n, int f) {
     return einval();
   }
   if (n) {
-    if (!(p = (char *)malloc(n))) return -1;
+    if (!(p = (char *)AddToFreeList(m, malloc(n)))) return -1;
     RESTARTABLE(rc = GetRandom(p, n, f));
     if (rc != -1) {
       if (CopyToUserWrite(m, a, p, rc) == -1) {
         rc = -1;
       }
     }
-    free(p);
   } else {
     rc = 0;
   }
@@ -3599,8 +3733,8 @@ static int SysSigaction(struct Machine *m, int sig, i64 act, i64 old,
   if (sigsetsize != 8) return einval();
   if (!(1 <= sig && sig <= 64)) return einval();
   if (sig == SIGKILL_LINUX || sig == SIGSTOP_LINUX) return einval();
+  if (old && !IsValidMemory(m, old, sizeof(hand), PROT_WRITE)) return -1;
   memset(&hand, 0, sizeof(hand));
-  if (old && !IsValidMemory(m, old, sizeof(hand), PROT_WRITE)) return efault();
   if (act) {
     if (CopyFromUserRead(m, &hand, act, sizeof(hand)) == -1) return -1;
     flags = Read64(hand.flags);
@@ -3627,7 +3761,7 @@ static int SysSigaction(struct Machine *m, int sig, i64 act, i64 old,
         if (!IsValidMemory(m, Read64(hand.restorer), 1, PROT_EXEC)) {
           LOGF("sigaction() SA_RESTORER at %" PRIx64 " isn't executable",
                Read64(hand.restorer));
-          return efault();
+          return -1;
         }
         break;
     }
@@ -3689,7 +3823,7 @@ static int SysSetitimer(struct Machine *m, int which, i64 neuaddr,
   if ((neuaddr && !(git = (const struct itimerval_linux *)SchlepR(
                         m, neuaddr, sizeof(*git)))) ||
       (oldaddr && !IsValidMemory(m, oldaddr, sizeof(gold), PROT_WRITE))) {
-    return efault();
+    return -1;
   }
   if (git) {
     XlatLinuxToItimerval(&neu, git);
@@ -3897,7 +4031,7 @@ static int SysSigaltstack(struct Machine *m, i64 newaddr, i64 oldaddr) {
         LOGF("sigaltstack ss_sp=%#" PRIx64 " ss_size=%#" PRIx64
              " didn't exist with read+write permission",
              Read64(ss->sp), Read64(ss->size));
-        return efault();
+        return -1;
       }
     }
   }
@@ -4337,7 +4471,7 @@ static i32 SysSelect(struct Machine *m, i32 nfds, i64 readfds_addr,
   rc =
       Select(m, nfds, readfds_addr, writefds_addr, exceptfds_addr, timeoutp, 0);
 #ifndef DISABLE_NONPOSIX
-  if (timeout_addr && (rc != -1 || errno == EINTR)) {
+  if (timeout_addr) {
     Write64(timeout_linux.sec, timeout.tv_sec);
     Write64(timeout_linux.usec, (timeout.tv_nsec + 999) / 1000);
     CopyToUserWrite(m, timeout_addr, &timeout_linux, sizeof(timeout_linux));
@@ -4403,7 +4537,7 @@ static i32 SysPselect(struct Machine *m, i32 nfds, i64 readfds_addr,
   rc = Select(m, nfds, readfds_addr, writefds_addr, exceptfds_addr, timeoutp,
               sigmaskp);
 #ifndef DISABLE_NONPOSIX
-  if (timeout_addr && (rc != -1 || errno == EINTR)) {
+  if (timeout_addr) {
     Write64(timeout_linux.sec, timeout.tv_sec);
     Write64(timeout_linux.nsec, timeout.tv_nsec);
     CopyToUserWrite(m, timeout_addr, &timeout_linux, sizeof(timeout_linux));
@@ -4422,9 +4556,9 @@ static int Poll(struct Machine *m, i64 fdsaddr, u64 nfds,
   struct pollfd_linux *gfds;
   struct timespec now, wait, remain;
   int (*poll_impl)(struct pollfd *, nfds_t, int);
-  if (!mulo(nfds, sizeof(struct pollfd_linux), &gfdssize) &&
+  if (!Mul(nfds, sizeof(struct pollfd_linux), &gfdssize) &&
       gfdssize <= 0x7ffff000) {
-    if ((gfds = (struct pollfd_linux *)malloc(gfdssize))) {
+    if ((gfds = (struct pollfd_linux *)AddToFreeList(m, malloc(gfdssize)))) {
       rc = 0;
       CopyFromUserRead(m, gfds, fdsaddr, gfdssize);
       for (;;) {
@@ -4495,7 +4629,6 @@ static int Poll(struct Machine *m, i64 fdsaddr, u64 nfds,
     } else {
       rc = enomem();
     }
-    free(gfds);
     return rc;
   } else {
     return einval();
@@ -4546,17 +4679,15 @@ static int SysPpoll(struct Machine *m, i64 fdsaddr, u64 nfds, i64 timeoutaddr,
       }
       deadline = AddTime(GetTime(), timeout);
       rc = Poll(m, fdsaddr, nfds, deadline);
-      if (rc != -1 || errno == EINTR) {
-        now = GetTime();
-        if (CompareTime(now, deadline) >= 0) {
-          remain = FromMilliseconds(0);
-        } else {
-          remain = SubtractTime(deadline, now);
-        }
-        Write64(timeout_linux.sec, remain.tv_sec);
-        Write64(timeout_linux.nsec, remain.tv_nsec);
-        CopyToUserWrite(m, timeoutaddr, &timeout_linux, sizeof(timeout_linux));
+      now = GetTime();
+      if (CompareTime(now, deadline) >= 0) {
+        remain = FromMilliseconds(0);
+      } else {
+        remain = SubtractTime(deadline, now);
       }
+      Write64(timeout_linux.sec, remain.tv_sec);
+      Write64(timeout_linux.nsec, remain.tv_nsec);
+      CopyToUserWrite(m, timeoutaddr, &timeout_linux, sizeof(timeout_linux));
     } else {
       rc = Poll(m, fdsaddr, nfds, GetMaxTime());
     }
@@ -4576,6 +4707,7 @@ static int SysSigprocmask(struct Machine *m, int how, i64 setaddr,
   u8 word[8];
   sigset_t ss;
   const u8 *neu;
+  int sig, delivered;
   if (sigsetsize != 8) {
     return einval();
   }
@@ -4614,6 +4746,12 @@ static int SysSigprocmask(struct Machine *m, int how, i64 setaddr,
                                          1ull << (SIGTTOU_LINUX - 1)));
     sigprocmask(SIG_BLOCK, &ss, 0);
   }
+  Put64(m->ax, 0);
+  do {
+    if ((sig = ConsumeSignal(m, &delivered, 0))) {
+      TerminateSignal(m, sig);
+    }
+  } while (delivered && DeliverSignalRecursively(m, delivered));
   return 0;
 }
 
@@ -4634,31 +4772,42 @@ static bool IsValidThreadId(struct System *s, int tid) {
 
 static int SysTkill(struct Machine *m, int tid, int sig) {
 #if defined(HAVE_FORK) || defined(HAVE_THREADS)
-  int err;
   bool found;
-  struct Dll *e;
-  struct Machine *m2;
+  int rc, err;
   if (tid < 0) return einval();
   if (!(0 <= sig && sig <= 64)) {
     LOGF("tkill(%d, %d) failed due to bogus signal", tid, sig);
     return einval();
   }
   // trigger signal immediately if possible
-  if (tid == m->tid && (~m->sigmask & (1ull << (sig - 1)))) {
-    switch (Read64(m->system->hands[sig - 1].handler)) {
-      case SIG_DFL_LINUX:
-        if (!IsSignalIgnoredByDefault(sig)) {
-          TerminateSignal(m, sig);
-          return 0;
-        }
-        // fallthrough
-      case SIG_IGN_LINUX:
-        return 0;
-      default:
-        Put64(m->ax, 0);
-        m->interrupted = true;
-        DeliverSignal(m, sig, SI_TKILL_LINUX);
-        return -1;
+  if (tid == m->tid) {
+    if (sig == SIGSTOP_LINUX || sig == SIGKILL_LINUX) {
+      return raise(XlatSignal(sig));
+    } else if (~m->sigmask & (1ull << (sig - 1))) {
+      LOCK(&m->system->sig_lock);
+      switch (Read64(m->system->hands[sig - 1].handler)) {
+        case SIG_DFL_LINUX:
+          if (!IsSignalIgnoredByDefault(sig)) {
+            UNLOCK(&m->system->sig_lock);
+            TerminateSignal(m, sig);
+            return 0;
+          }
+          // fallthrough
+        case SIG_IGN_LINUX:
+          rc = 0;
+          break;
+        default:
+          Put64(m->ax, 0);
+          m->interrupted = true;
+          DeliverSignal(m, sig, SI_TKILL_LINUX);
+          rc = -1;
+          break;
+      }
+      UNLOCK(&m->system->sig_lock);
+      return rc;
+    } else {
+      m->signals |= 1ull << (sig - 1);
+      return 0;
     }
   }
   if (!IsValidThreadId(m->system, tid)) {
@@ -4666,22 +4815,29 @@ static int SysTkill(struct Machine *m, int tid, int sig) {
     return esrch();
   }
   err = 0;
-  LOCK(&m->system->machines_lock);
-  for (e = dll_first(m->system->machines); e;
-       e = dll_next(m->system->machines, e)) {
-    m2 = MACHINE_CONTAINER(e);
-    if (m2->tid == tid) {
-      if (sig) {
-        EnqueueSignal(m2, sig);
-        err = pthread_kill(m2->thread, SIGSYS);
-      } else {
-        err = pthread_kill(m2->thread, 0);
+  found = 0;
+#ifndef DISABLE_THREADS
+  {
+    struct Dll *e;
+    LOCK(&m->system->machines_lock);
+    for (e = dll_first(m->system->machines); e;
+         e = dll_next(m->system->machines, e)) {
+      struct Machine *m2;
+      m2 = MACHINE_CONTAINER(e);
+      if (m2->tid == tid) {
+        if (sig) {
+          EnqueueSignal(m2, sig);
+          err = pthread_kill(m2->thread, SIGSYS);
+        } else {
+          err = pthread_kill(m2->thread, 0);
+        }
+        found = true;
+        break;
       }
-      found = true;
-      break;
     }
+    UNLOCK(&m->system->machines_lock);
   }
-  UNLOCK(&m->system->machines_lock);
+#endif
   if (!found) {
     return SysKill(m, tid, sig);
   }
@@ -4766,34 +4922,33 @@ static i32 SysGetgroups(struct Machine *m, i32 size, i64 addr) {
     ngroups_max = sysconf(_SC_NGROUPS_MAX);
 #endif
     size = MIN(size, ngroups_max);
-    if (!IsValidMemory(m, addr, (size_t)size * 4, PROT_WRITE)) return efault();
-    if (!(group = (gid_t *)malloc(size * sizeof(gid_t)))) return -1;
+    if (!IsValidMemory(m, addr, (size_t)size * 4, PROT_WRITE)) return -1;
+    if (!(group = (gid_t *)AddToFreeList(m, malloc(size * sizeof(gid_t))))) {
+      return -1;
+    }
     if ((ngroups = getgroups(size, group)) != -1) {
       for (i = 0; i < ngroups; ++i) {
         Write32(i32buf, group[i]);
         CopyToUserWrite(m, addr + (size_t)i * 4, i32buf, 4);
       }
     }
-    free(group);
     return ngroups;
   }
 }
 
 static i32 SysSetgroups(struct Machine *m, i32 size, i64 addr) {
 #ifdef HAVE_SETGROUPS
-  int i, rc;
+  int i;
   gid_t *group;
   const u8 *group_linux;
   if (!(group_linux = (const u8 *)SchlepR(m, addr, (size_t)size * 4)) ||
-      !(group = (gid_t *)malloc(size * sizeof(gid_t)))) {
+      !(group = (gid_t *)AddToFreeList(m, malloc(size * sizeof(gid_t))))) {
     return -1;
   }
   for (i = 0; i < size; ++i) {
     group[i] = Read32(group_linux + (size_t)i * 4);
   }
-  rc = setgroups(size, group);
-  free(group);
-  return rc;
+  return setgroups(size, group);
 #else
   return enosys();
 #endif
@@ -5019,10 +5174,31 @@ static int SysPipe(struct Machine *m, i64 pipefds_addr) {
 void OpSyscall(P) {
   size_t mark;
   u64 ax, di, si, dx, r0, r8, r9;
+  unassert(!m->nofault);
   STATISTIC(++syscalls);
-  if (m->system->redraw) {
+  // make sure blinkenlights display is up to date before performing any
+  // potentially blocking operations which would otherwise freeze things
+  if (m->system->redraw && m->tid == m->system->pid) {
     m->system->redraw(true);
   }
+  // unlike pure opcodes where we'll confidently longjmp out of segfault
+  // handlers, system calls are too complex to do that safely, and it is
+  // therefore of the highest importance that they never crash under any
+  // circumstances. in order to do ensure that we need to lock any pages
+  // the system call accesses, so the user can't munmap() them away from
+  // some other thread. since we don't want to slow down instructions by
+  // adding locking logic to the tranlation lookaside buffer, we need to
+  // ensure any memory references the system call performs will tlb miss
+  m->insyscall = true;
+  if (!m->sysdepth++) {
+    ResetTlb(m);
+  }
+  // to make system calls simpler and safer, any temporary memory that's
+  // allocated will be added to a free list to be collected later. since
+  // OpSyscall() is potentially recursive when SA_RESTART signals happen
+  // we need to save the current mark, so we don't collect parent's data
+  mark = m->freelist.n;
+  m->interrupted = false;
   ax = Get64(m->ax);
   di = Get64(m->di);
   si = Get64(m->si);
@@ -5030,205 +5206,200 @@ void OpSyscall(P) {
   r0 = Get64(m->r10);
   r8 = Get64(m->r8);
   r9 = Get64(m->r9);
-  mark = m->freelist.n;
-  m->interrupted = false;
   switch (ax & 0xfff) {
-    SYSCALL3(0x000, "read", SysRead, STRACE_READ);
-    SYSCALL3(0x001, "write", SysWrite, STRACE_WRITE);
-    SYSCALL3(0x002, "open", SysOpen, STRACE_OPEN);
-    SYSCALL1(0x003, "close", SysClose, STRACE_CLOSE);
-    SYSCALL2(0x004, "stat", SysStat, STRACE_2);
-    SYSCALL2(0x005, "fstat", SysFstat, STRACE_2);
-    SYSCALL2(0x006, "lstat", SysLstat, STRACE_2);
-    SYSCALL3(0x007, "poll", SysPoll, STRACE_3);
-    SYSCALL3(0x008, "lseek", SysLseek, STRACE_3);
-    SYSCALL6(0x009, "mmap", SysMmap, STRACE_MMAP);
-    SYSCALL4(0x011, "pread", SysPread, STRACE_PREAD);
-    SYSCALL4(0x012, "pwrite", SysPwrite, STRACE_PWRITE);
-    SYSCALL5(0x017, "select", SysSelect, STRACE_5);
-    SYSCALL5(0x019, "mremap", SysMremap, STRACE_5);
-    SYSCALL6(0x10E, "pselect6", SysPselect, STRACE_6);
-    SYSCALL3(0x01A, "msync", SysMsync, STRACE_3);
-    SYSCALL3(0x00A, "mprotect", SysMprotect, STRACE_MPROTECT);
-    SYSCALL2(0x00B, "munmap", SysMunmap, STRACE_MUNMAP);
-    SYSCALL4(0x00D, "rt_sigaction", SysSigaction, STRACE_SIGACTION);
-    SYSCALL4(0x00E, "rt_sigprocmask", SysSigprocmask, STRACE_SIGPROCMASK);
-    SYSCALL3(0x010, "ioctl", SysIoctl, STRACE_3);
-    SYSCALL3(0x013, "readv", SysReadv, STRACE_3);
-    SYSCALL3(0x014, "writev", SysWritev, STRACE_3);
-    SYSCALL2(0x015, "access", SysAccess, STRACE_2);
-    SYSCALL0(0x018, "sched_yield", SysSchedYield, STRACE_0);
-    SYSCALL3(0x01C, "madvise", SysMadvise, STRACE_3);
-    SYSCALL1(0x020, "dup", SysDup1, STRACE_DUP);
-    SYSCALL2(0x021, "dup2", SysDup2, STRACE_DUP2);
-    SYSCALL0(0x022, "pause", SysPause, STRACE_PAUSE);
-    SYSCALL2(0x023, "nanosleep", SysNanosleep, STRACE_NANOSLEEP);
-    SYSCALL2(0x024, "getitimer", SysGetitimer, STRACE_2);
-    SYSCALL1(0x025, "alarm", SysAlarm, STRACE_ALARM);
-    SYSCALL3(0x026, "setitimer", SysSetitimer, STRACE_3);
-    SYSCALL0(0x027, "getpid", SysGetpid, STRACE_GETPID);
-    SYSCALL0(0x0BA, "gettid", SysGettid, STRACE_GETTID);
-    SYSCALL1(0x03F, "uname", SysUname, STRACE_1);
-    SYSCALL3(0x048, "fcntl", SysFcntl, STRACE_3);
-    SYSCALL2(0x049, "flock", SysFlock, STRACE_2);
-    SYSCALL1(0x04A, "fsync", SysFsync, STRACE_FSYNC);
-    SYSCALL1(0x04B, "fdatasync", SysFdatasync, STRACE_FDATASYNC);
-    SYSCALL2(0x04C, "truncate", SysTruncate, STRACE_TRUNCATE);
-    SYSCALL2(0x04D, "ftruncate", SysFtruncate, STRACE_FTRUNCATE);
-    SYSCALL2(0x04F, "getcwd", SysGetcwd, STRACE_GETCWD);
-    SYSCALL1(0x050, "chdir", SysChdir, STRACE_CHDIR);
-    SYSCALL1(0x051, "fchdir", SysFchdir, STRACE_FCHOWN);
-    SYSCALL2(0x052, "rename", SysRename, STRACE_RENAME);
-    SYSCALL2(0x053, "mkdir", SysMkdir, STRACE_MKDIR);
-    SYSCALL1(0x054, "rmdir", SysRmdir, STRACE_RMDIR);
-    SYSCALL2(0x055, "creat", SysCreat, STRACE_CREAT);
-    SYSCALL2(0x056, "link", SysLink, STRACE_LINK);
-    SYSCALL1(0x057, "unlink", SysUnlink, STRACE_UNLINK);
-    SYSCALL2(0x058, "symlink", SysSymlink, STRACE_SYMLINK);
-    SYSCALL3(0x059, "readlink", SysReadlink, STRACE_READLINK);
-    SYSCALL2(0x05A, "chmod", SysChmod, STRACE_CHMOD);
-    SYSCALL2(0x05B, "fchmod", SysFchmod, STRACE_FCHOWN);
-    SYSCALL3(0x05C, "chown", SysChown, STRACE_CHOWN);
-    SYSCALL3(0x05D, "fchown", SysFchown, STRACE_FCHOWN);
-    SYSCALL3(0x05E, "lchown", SysLchown, STRACE_LCHOWN);
-    SYSCALL5(0x104, "fchownat", SysFchownat, STRACE_CHOWNAT);
-    SYSCALL1(0x05F, "umask", SysUmask, STRACE_UMASK);
-    SYSCALL2(0x060, "gettimeofday", SysGettimeofday, STRACE_2);
-    SYSCALL2(0x061, "getrlimit", SysGetrlimit, STRACE_2);
-    SYSCALL2(0x062, "getrusage", SysGetrusage, STRACE_2);
-    SYSCALL1(0x064, "times", SysTimes, STRACE_1);
-    SYSCALL0(0x06F, "getpgrp", SysGetpgrp, STRACE_GETPGRP);
-    SYSCALL0(0x070, "setsid", SysSetsid, STRACE_SETSID);
-    SYSCALL2(0x073, "getgroups", SysGetgroups, STRACE_2);
-    SYSCALL1(0x079, "getpgid", SysGetpgid, STRACE_1);
-    SYSCALL1(0x07C, "getsid", SysGetsid, STRACE_1);
-    SYSCALL1(0x07F, "rt_sigpending", SysSigpending, STRACE_1);
-    SYSCALL2(0x089, "statfs", SysStatfs, STRACE_2);
-    SYSCALL2(0x08A, "fstatfs", SysFstatfs, STRACE_2);
-    SYSCALL2(0x06D, "setpgid", SysSetpgid, STRACE_2);
-    SYSCALL0(0x066, "getuid", SysGetuid, STRACE_GETUID);
-    SYSCALL0(0x068, "getgid", SysGetgid, STRACE_GETGID);
-    SYSCALL1(0x069, "setuid", SysSetuid, STRACE_SETUID);
-    SYSCALL1(0x06A, "setgid", SysSetgid, STRACE_SETGID);
-    SYSCALL0(0x06B, "geteuid", SysGeteuid, STRACE_GETEUID);
-    SYSCALL0(0x06C, "getegid", SysGetegid, STRACE_GETEGID);
-    SYSCALL0(0x06E, "getppid", SysGetppid, STRACE_GETPPID);
-    SYSCALL2(0x071, "setreuid", SysSetreuid, STRACE_SETREUID);
-    SYSCALL2(0x072, "setregid", SysSetregid, STRACE_SETREGID);
-    SYSCALL2(0x082, "rt_sigsuspend", SysSigsuspend, STRACE_SIGSUSPEND);
-    SYSCALL2(0x083, "sigaltstack", SysSigaltstack, STRACE_2);
-    SYSCALL3(0x085, "mknod", SysMknod, STRACE_3);
-    SYSCALL2(0x09E, "arch_prctl", SysArchPrctl, STRACE_2);
-    SYSCALL2(0x0A0, "setrlimit", SysSetrlimit, STRACE_2);
-    SYSCALL0(0x0A2, "sync", SysSync, STRACE_SYNC);
-    SYSCALL3(0x0D9, "getdents", SysGetdents, STRACE_3);
-    SYSCALL1(0x0DA, "set_tid_address", SysSetTidAddress, STRACE_1);
-    SYSCALL4(0x0DD, "fadvise", SysFadvise, STRACE_4);
-    SYSCALL2(0x0E3, "clock_settime", SysClockSettime, STRACE_2);
-    SYSCALL2(0x0E5, "clock_getres", SysClockGetres, STRACE_2);
-    SYSCALL4(0x0E6, "clock_nanosleep", SysClockNanosleep, STRACE_CLOCK_SLEEP);
-    SYSCALL2(0x084, "utime", SysUtime, STRACE_2);
-    SYSCALL2(0x0EB, "utimes", SysUtimes, STRACE_2);
-    SYSCALL3(0x105, "futimesat", SysFutimesat, STRACE_3);
-    SYSCALL4(0x118, "utimensat", SysUtimensat, STRACE_4);
-    SYSCALL4(0x101, "openat", SysOpenat, STRACE_OPENAT);
-    SYSCALL3(0x102, "mkdirat", SysMkdirat, STRACE_MKDIRAT);
-    SYSCALL4(0x106, "fstatat", SysFstatat, STRACE_4);
-    SYSCALL3(0x107, "unlinkat", SysUnlinkat, STRACE_UNLINKAT);
-    SYSCALL4(0x108, "renameat", SysRenameat, STRACE_RENAMEAT);
-    SYSCALL5(0x109, "linkat", SysLinkat, STRACE_LINKAT);
-    SYSCALL3(0x10A, "symlinkat", SysSymlinkat, STRACE_SYMLINKAT);
-    SYSCALL4(0x10B, "readlinkat", SysReadlinkat, STRACE_READLINKAT);
-    SYSCALL3(0x10C, "fchmodat", SysFchmodat, STRACE_FCHMODAT);
-    SYSCALL3(0x10D, "faccessat", SysFaccessat, STRACE_FACCESSAT);
-    SYSCALL4(0x1b7, "faccessat2", SysFaccessat2, STRACE_FACCESSAT);
-
+    SYSCALL(3, 0x000, "read", SysRead, STRACE_READ);
+    SYSCALL(3, 0x001, "write", SysWrite, STRACE_WRITE);
+    SYSCALL(3, 0x002, "open", SysOpen, STRACE_OPEN);
+    SYSCALL(1, 0x003, "close", SysClose, STRACE_CLOSE);
+    SYSCALL(2, 0x004, "stat", SysStat, STRACE_STAT);
+    SYSCALL(2, 0x005, "fstat", SysFstat, STRACE_FSTAT);
+    SYSCALL(2, 0x006, "lstat", SysLstat, STRACE_LSTAT);
+    SYSCALL(3, 0x007, "poll", SysPoll, STRACE_3);
+    SYSCALL(3, 0x008, "lseek", SysLseek, STRACE_LSEEK);
+    SYSCALL(6, 0x009, "mmap", SysMmap, STRACE_MMAP);
+    SYSCALL(4, 0x011, "pread", SysPread, STRACE_PREAD);
+    SYSCALL(4, 0x012, "pwrite", SysPwrite, STRACE_PWRITE);
+    SYSCALL(5, 0x017, "select", SysSelect, STRACE_SELECT);
+    SYSCALL(5, 0x019, "mremap", SysMremap, STRACE_5);
+    SYSCALL(6, 0x10E, "pselect6", SysPselect, STRACE_6);
+    SYSCALL(3, 0x01A, "msync", SysMsync, STRACE_3);
+    SYSCALL(3, 0x00A, "mprotect", SysMprotect, STRACE_MPROTECT);
+    SYSCALL(2, 0x00B, "munmap", SysMunmap, STRACE_MUNMAP);
+    SYSCALL(4, 0x00D, "rt_sigaction", SysSigaction, STRACE_SIGACTION);
+    SYSCALL(4, 0x00E, "rt_sigprocmask", SysSigprocmask, STRACE_SIGPROCMASK);
+    SYSCALL(3, 0x010, "ioctl", SysIoctl, STRACE_3);
+    SYSCALL(3, 0x013, "readv", SysReadv, STRACE_READV);
+    SYSCALL(3, 0x014, "writev", SysWritev, STRACE_WRITEV);
+    SYSCALL(2, 0x015, "access", SysAccess, STRACE_ACCESS);
+    SYSCALL(3, 0x10D, "faccessat", SysFaccessat, STRACE_FACCESSAT);
+    SYSCALL(4, 0x1b7, "faccessat2", SysFaccessat2, STRACE_FACCESSAT2);
+    SYSCALL(0, 0x018, "sched_yield", SysSchedYield, STRACE_0);
+    SYSCALL(3, 0x01C, "madvise", SysMadvise, STRACE_3);
+    SYSCALL(1, 0x020, "dup", SysDup1, STRACE_DUP);
+    SYSCALL(2, 0x021, "dup2", SysDup2, STRACE_DUP2);
+    SYSCALL(0, 0x022, "pause", SysPause, STRACE_PAUSE);
+    SYSCALL(2, 0x023, "nanosleep", SysNanosleep, STRACE_NANOSLEEP);
+    SYSCALL(2, 0x024, "getitimer", SysGetitimer, STRACE_2);
+    SYSCALL(1, 0x025, "alarm", SysAlarm, STRACE_ALARM);
+    SYSCALL(3, 0x026, "setitimer", SysSetitimer, STRACE_3);
+    SYSCALL(0, 0x027, "getpid", SysGetpid, STRACE_GETPID);
+    SYSCALL(0, 0x0BA, "gettid", SysGettid, STRACE_GETTID);
+    SYSCALL(1, 0x03F, "uname", SysUname, STRACE_1);
+    SYSCALL(3, 0x048, "fcntl", SysFcntl, STRACE_3);
+    SYSCALL(2, 0x049, "flock", SysFlock, STRACE_2);
+    SYSCALL(1, 0x04A, "fsync", SysFsync, STRACE_FSYNC);
+    SYSCALL(1, 0x04B, "fdatasync", SysFdatasync, STRACE_FDATASYNC);
+    SYSCALL(2, 0x04C, "truncate", SysTruncate, STRACE_TRUNCATE);
+    SYSCALL(2, 0x04D, "ftruncate", SysFtruncate, STRACE_FTRUNCATE);
+    SYSCALL(2, 0x04F, "getcwd", SysGetcwd, STRACE_GETCWD);
+    SYSCALL(1, 0x050, "chdir", SysChdir, STRACE_CHDIR);
+    SYSCALL(1, 0x051, "fchdir", SysFchdir, STRACE_FCHOWN);
+    SYSCALL(2, 0x052, "rename", SysRename, STRACE_RENAME);
+    SYSCALL(2, 0x053, "mkdir", SysMkdir, STRACE_MKDIR);
+    SYSCALL(1, 0x054, "rmdir", SysRmdir, STRACE_RMDIR);
+    SYSCALL(2, 0x055, "creat", SysCreat, STRACE_CREAT);
+    SYSCALL(2, 0x056, "link", SysLink, STRACE_LINK);
+    SYSCALL(1, 0x057, "unlink", SysUnlink, STRACE_UNLINK);
+    SYSCALL(2, 0x058, "symlink", SysSymlink, STRACE_SYMLINK);
+    SYSCALL(3, 0x059, "readlink", SysReadlink, STRACE_READLINK);
+    SYSCALL(2, 0x05A, "chmod", SysChmod, STRACE_CHMOD);
+    SYSCALL(2, 0x05B, "fchmod", SysFchmod, STRACE_FCHOWN);
+    SYSCALL(3, 0x05C, "chown", SysChown, STRACE_CHOWN);
+    SYSCALL(3, 0x05D, "fchown", SysFchown, STRACE_FCHOWN);
+    SYSCALL(3, 0x05E, "lchown", SysLchown, STRACE_LCHOWN);
+    SYSCALL(5, 0x104, "fchownat", SysFchownat, STRACE_CHOWNAT);
+    SYSCALL(1, 0x05F, "umask", SysUmask, STRACE_UMASK);
+    SYSCALL(2, 0x060, "gettimeofday", SysGettimeofday, STRACE_2);
+    SYSCALL(2, 0x061, "getrlimit", SysGetrlimit, STRACE_2);
+    SYSCALL(2, 0x062, "getrusage", SysGetrusage, STRACE_2);
+    SYSCALL(1, 0x064, "times", SysTimes, STRACE_1);
+    SYSCALL(0, 0x06F, "getpgrp", SysGetpgrp, STRACE_GETPGRP);
+    SYSCALL(0, 0x070, "setsid", SysSetsid, STRACE_SETSID);
+    SYSCALL(2, 0x073, "getgroups", SysGetgroups, STRACE_2);
+    SYSCALL(1, 0x079, "getpgid", SysGetpgid, STRACE_GETPGID);
+    SYSCALL(1, 0x07C, "getsid", SysGetsid, STRACE_1);
+    SYSCALL(1, 0x07F, "rt_sigpending", SysSigpending, STRACE_1);
+    SYSCALL(2, 0x089, "statfs", SysStatfs, STRACE_2);
+    SYSCALL(2, 0x08A, "fstatfs", SysFstatfs, STRACE_2);
+    SYSCALL(2, 0x06D, "setpgid", SysSetpgid, STRACE_2);
+    SYSCALL(0, 0x066, "getuid", SysGetuid, STRACE_GETUID);
+    SYSCALL(0, 0x068, "getgid", SysGetgid, STRACE_GETGID);
+    SYSCALL(1, 0x069, "setuid", SysSetuid, STRACE_SETUID);
+    SYSCALL(1, 0x06A, "setgid", SysSetgid, STRACE_SETGID);
+    SYSCALL(0, 0x06B, "geteuid", SysGeteuid, STRACE_GETEUID);
+    SYSCALL(0, 0x06C, "getegid", SysGetegid, STRACE_GETEGID);
+    SYSCALL(0, 0x06E, "getppid", SysGetppid, STRACE_GETPPID);
+    SYSCALL(2, 0x071, "setreuid", SysSetreuid, STRACE_SETREUID);
+    SYSCALL(2, 0x072, "setregid", SysSetregid, STRACE_SETREGID);
+    SYSCALL(2, 0x082, "rt_sigsuspend", SysSigsuspend, STRACE_SIGSUSPEND);
+    SYSCALL(2, 0x083, "sigaltstack", SysSigaltstack, STRACE_2);
+    SYSCALL(3, 0x085, "mknod", SysMknod, STRACE_3);
+    SYSCALL(2, 0x09E, "arch_prctl", SysArchPrctl, STRACE_2);
+    SYSCALL(2, 0x0A0, "setrlimit", SysSetrlimit, STRACE_2);
+    SYSCALL(0, 0x0A2, "sync", SysSync, STRACE_SYNC);
+    SYSCALL(3, 0x0D9, "getdents", SysGetdents, STRACE_3);
+    SYSCALL(1, 0x0DA, "set_tid_address", SysSetTidAddress, STRACE_1);
+    SYSCALL(4, 0x0DD, "fadvise", SysFadvise, STRACE_4);
+    SYSCALL(2, 0x0E3, "clock_settime", SysClockSettime, STRACE_2);
+    SYSCALL(2, 0x0E5, "clock_getres", SysClockGetres, STRACE_2);
+    SYSCALL(4, 0x0E6, "clock_nanosleep", SysClockNanosleep, STRACE_CLOCK_SLEEP);
+    SYSCALL(2, 0x084, "utime", SysUtime, STRACE_2);
+    SYSCALL(2, 0x0EB, "utimes", SysUtimes, STRACE_2);
+    SYSCALL(3, 0x105, "futimesat", SysFutimesat, STRACE_3);
+    SYSCALL(4, 0x118, "utimensat", SysUtimensat, STRACE_UTIMENSAT);
+    SYSCALL(4, 0x101, "openat", SysOpenat, STRACE_OPENAT);
+    SYSCALL(3, 0x102, "mkdirat", SysMkdirat, STRACE_MKDIRAT);
+    SYSCALL(4, 0x106, "fstatat", SysFstatat, STRACE_FSTATAT);
+    SYSCALL(3, 0x107, "unlinkat", SysUnlinkat, STRACE_UNLINKAT);
+    SYSCALL(4, 0x108, "renameat", SysRenameat, STRACE_RENAMEAT);
+    SYSCALL(5, 0x109, "linkat", SysLinkat, STRACE_LINKAT);
+    SYSCALL(3, 0x10A, "symlinkat", SysSymlinkat, STRACE_SYMLINKAT);
+    SYSCALL(4, 0x10B, "readlinkat", SysReadlinkat, STRACE_READLINKAT);
+    SYSCALL(3, 0x10C, "fchmodat", SysFchmodat, STRACE_FCHMODAT);
 #ifndef DISABLE_SOCKETS
-    SYSCALL3(0x029, "socket", SysSocket, STRACE_SOCKET);
-    SYSCALL3(0x02A, "connect", SysConnect, STRACE_CONNECT);
-    SYSCALL3(0x02B, "accept", SysAccept, STRACE_ACCEPT);
-    SYSCALL4(0x120, "accept4", SysAccept4, STRACE_ACCEPT4);
-    SYSCALL6(0x02C, "sendto", SysSendto, STRACE_SENDTO);
-    SYSCALL6(0x02D, "recvfrom", SysRecvfrom, STRACE_RECVFROM);
-    SYSCALL3(0x02E, "sendmsg", SysSendmsg, STRACE_3);
-    SYSCALL3(0x02F, "recvmsg", SysRecvmsg, STRACE_3);
+    SYSCALL(3, 0x029, "socket", SysSocket, STRACE_SOCKET);
+    SYSCALL(3, 0x02A, "connect", SysConnect, STRACE_CONNECT);
+    SYSCALL(3, 0x02B, "accept", SysAccept, STRACE_ACCEPT);
+    SYSCALL(4, 0x120, "accept4", SysAccept4, STRACE_ACCEPT4);
+    SYSCALL(6, 0x02C, "sendto", SysSendto, STRACE_SENDTO);
+    SYSCALL(6, 0x02D, "recvfrom", SysRecvfrom, STRACE_RECVFROM);
+    SYSCALL(3, 0x02E, "sendmsg", SysSendmsg, STRACE_3);
+    SYSCALL(3, 0x02F, "recvmsg", SysRecvmsg, STRACE_3);
 #ifndef DISABLE_NONPOSIX
-    SYSCALL4(0x133, "sendmmsg", SysSendmmsg, STRACE_4);
-    SYSCALL5(0x12B, "recvmmsg", SysRecvmmsg, STRACE_5);
+    SYSCALL(4, 0x133, "sendmmsg", SysSendmmsg, STRACE_4);
+    SYSCALL(5, 0x12B, "recvmmsg", SysRecvmmsg, STRACE_5);
 #endif
-    SYSCALL2(0x030, "shutdown", SysShutdown, STRACE_2);
-    SYSCALL3(0x031, "bind", SysBind, STRACE_BIND);
-    SYSCALL2(0x032, "listen", SysListen, STRACE_LISTEN);
-    SYSCALL3(0x033, "getsockname", SysGetsockname, STRACE_GETSOCKNAME);
-    SYSCALL3(0x034, "getpeername", SysGetpeername, STRACE_GETPEERNAME);
-    SYSCALL5(0x036, "setsockopt", SysSetsockopt, STRACE_5);
-    SYSCALL5(0x037, "getsockopt", SysGetsockopt, STRACE_5);
+    SYSCALL(2, 0x030, "shutdown", SysShutdown, STRACE_2);
+    SYSCALL(3, 0x031, "bind", SysBind, STRACE_BIND);
+    SYSCALL(2, 0x032, "listen", SysListen, STRACE_LISTEN);
+    SYSCALL(3, 0x033, "getsockname", SysGetsockname, STRACE_GETSOCKNAME);
+    SYSCALL(3, 0x034, "getpeername", SysGetpeername, STRACE_GETPEERNAME);
+    SYSCALL(5, 0x036, "setsockopt", SysSetsockopt, STRACE_5);
+    SYSCALL(5, 0x037, "getsockopt", SysGetsockopt, STRACE_5);
 #endif /* DISABLE_SOCKETS */
-
 #ifdef HAVE_FORK
-    SYSCALL0(0x039, "fork", SysFork, STRACE_FORK);
+    SYSCALL(0, 0x039, "fork", SysFork, STRACE_FORK);
 #ifndef DISABLE_NONPOSIX
-    SYSCALL0(0x03A, "vfork", SysVfork, STRACE_VFORK);
+    SYSCALL(0, 0x03A, "vfork", SysVfork, STRACE_VFORK);
 #endif
-    SYSCALL4(0x03D, "wait4", SysWait4, STRACE_WAIT4);
-    SYSCALL2(0x03E, "kill", SysKill, STRACE_KILL);
+    SYSCALL(4, 0x03D, "wait4", SysWait4, STRACE_WAIT4);
+    SYSCALL(2, 0x03E, "kill", SysKill, STRACE_KILL);
 #endif /* HAVE_FORK */
-
 #ifdef HAVE_THREADS
-    SYSCALL6(0x0CA, "futex", SysFutex, STRACE_6);
+    SYSCALL(6, 0x0CA, "futex", SysFutex, STRACE_FUTEX);
 #endif
-
 #if defined(HAVE_FORK) || defined(HAVE_THREADS)
-    SYSCALL1(0x016, "pipe", SysPipe, STRACE_PIPE);
+    SYSCALL(1, 0x016, "pipe", SysPipe, STRACE_PIPE);
 #ifndef DISABLE_NONPOSIX
-    SYSCALL2(0x125, "pipe2", SysPipe2, STRACE_PIPE2);
+    SYSCALL(2, 0x125, "pipe2", SysPipe2, STRACE_PIPE2);
 #endif
-    SYSCALL6(0x038, "clone", SysClone, STRACE_CLONE);
-    SYSCALL2(0x0C8, "tkill", SysTkill, STRACE_TKILL);
-    SYSCALL3(0x0EA, "tgkill", SysTgkill, STRACE_3);
-    SYSCALL3(0x03B, "execve", SysExecve, STRACE_3);
-    SYSCALL4(0x035, "socketpair", SysSocketpair, STRACE_SOCKETPAIR);
-    SYSCALL2(0x111, "set_robust_list", SysSetRobustList, STRACE_2);
-    SYSCALL3(0x112, "get_robust_list", SysGetRobustList, STRACE_3);
-    SYSCALL2(0x08C, "getpriority", SysGetpriority, STRACE_2);
-    SYSCALL3(0x08D, "setpriority", SysSetpriority, STRACE_3);
-    SYSCALL2(0x08E, "sched_set_param", SysSchedSetparam, STRACE_2);
-    SYSCALL2(0x08F, "sched_get_param", SysSchedGetparam, STRACE_2);
-    SYSCALL3(0x090, "sched_set_scheduler", SysSchedSetscheduler, STRACE_3);
-    SYSCALL1(0x091, "sched_get_scheduler", SysSchedGetscheduler, STRACE_1);
-    SYSCALL1(0x092, "sched_get_priority_max", SysSchedGetPriorityMax, STRACE_1);
-    SYSCALL1(0x093, "sched_get_priority_min", SysSchedGetPriorityMin, STRACE_1);
+    SYSCALL(6, 0x038, "clone", SysClone, STRACE_CLONE);
+    SYSCALL(2, 0x0C8, "tkill", SysTkill, STRACE_TKILL);
+    SYSCALL(3, 0x0EA, "tgkill", SysTgkill, STRACE_3);
+    SYSCALL(3, 0x03B, "execve", SysExecve, STRACE_3);
+    SYSCALL(4, 0x035, "socketpair", SysSocketpair, STRACE_SOCKETPAIR);
+    SYSCALL(2, 0x111, "set_robust_list", SysSetRobustList, STRACE_2);
+    SYSCALL(3, 0x112, "get_robust_list", SysGetRobustList, STRACE_3);
+    SYSCALL(2, 0x08C, "getpriority", SysGetpriority, STRACE_2);
+    SYSCALL(3, 0x08D, "setpriority", SysSetpriority, STRACE_3);
+    SYSCALL(2, 0x08E, "sched_set_param", SysSchedSetparam, STRACE_2);
+    SYSCALL(2, 0x08F, "sched_get_param", SysSchedGetparam, STRACE_2);
+    SYSCALL(3, 0x090, "sched_set_scheduler", SysSchedSetscheduler, STRACE_3);
+    SYSCALL(1, 0x091, "sched_get_scheduler", SysSchedGetscheduler, STRACE_1);
+    SYSCALL(1, 0x092, "sched_get_priority_max", SysSchedGetPriorityMax,
+            STRACE_1);
+    SYSCALL(1, 0x093, "sched_get_priority_min", SysSchedGetPriorityMin,
+            STRACE_1);
 #ifndef DISABLE_NONPOSIX
-    SYSCALL3(0x0CB, "sched_set_affinity", SysSchedSetaffinity, STRACE_3);
+    SYSCALL(3, 0x0CB, "sched_set_affinity", SysSchedSetaffinity, STRACE_3);
 #endif
 #endif /* defined(HAVE_FORK) || defined(HAVE_THREADS) */
-
 #ifndef DISABLE_NONPOSIX
-    SYSCALL3(0x0CC, "sched_get_affinity", SysSchedGetaffinity, STRACE_3);
-    SYSCALL1(0x00C, "brk", SysBrk, STRACE_1);
-    SYSCALL1(0x063, "sysinfo", SysSysinfo, STRACE_1);
-    SYSCALL2(0x074, "setgroups", SysSetgroups, STRACE_2);
-    SYSCALL3(0x075, "setresuid", SysSetresuid, STRACE_SETRESUID);
-    SYSCALL3(0x076, "getresuid", SysGetresuid, STRACE_3);
-    SYSCALL3(0x077, "setresgid", SysSetresgid, STRACE_SETRESGID);
-    SYSCALL3(0x078, "getresgid", SysGetresgid, STRACE_3);
-    SYSCALL5(0x09D, "prctl", SysPrctl, STRACE_5);
+    SYSCALL(4, 0x028, "sendfile", SysSendfile, STRACE_4);
+    SYSCALL(3, 0x0CC, "sched_get_affinity", SysSchedGetaffinity, STRACE_3);
+    SYSCALL(1, 0x00C, "brk", SysBrk, STRACE_1);
+    SYSCALL(1, 0x063, "sysinfo", SysSysinfo, STRACE_1);
+    SYSCALL(2, 0x074, "setgroups", SysSetgroups, STRACE_2);
+    SYSCALL(3, 0x075, "setresuid", SysSetresuid, STRACE_SETRESUID);
+    SYSCALL(3, 0x076, "getresuid", SysGetresuid, STRACE_3);
+    SYSCALL(3, 0x077, "setresgid", SysSetresgid, STRACE_SETRESGID);
+    SYSCALL(3, 0x078, "getresgid", SysGetresgid, STRACE_3);
+    SYSCALL(5, 0x09D, "prctl", SysPrctl, STRACE_5);
 #ifndef DISABLE_OVERLAYS
-    SYSCALL1(0x0A1, "chroot", SysChroot, STRACE_CHROOT);
+    SYSCALL(1, 0x0A1, "chroot", SysChroot, STRACE_CHROOT);
 #endif
-    SYSCALL3(0x124, "dup3", SysDup3, STRACE_DUP3);
-    SYSCALL4(0x103, "mknodat", SysMknodat, STRACE_4);
-    SYSCALL4(0x127, "preadv", SysPreadv, STRACE_4);
-    SYSCALL4(0x128, "pwritev", SysPwritev, STRACE_4);
-    SYSCALL4(0x12E, "prlimit", SysPrlimit, STRACE_4);
-    SYSCALL5(0x10F, "ppoll", SysPpoll, STRACE_5);
-    SYSCALL5(0x13C, "renameat2", SysRenameat2, STRACE_RENAMEAT2);
-    SYSCALL3(0x13E, "getrandom", SysGetrandom, STRACE_3);
-    SYSCALL5(0x147, "preadv2", SysPreadv2, STRACE_5);
-    SYSCALL5(0x148, "pwritev2", SysPwritev2, STRACE_5);
-    SYSCALL3(0x1B4, "close_range", SysCloseRange, STRACE_3);
+    SYSCALL(3, 0x124, "dup3", SysDup3, STRACE_DUP3);
+    SYSCALL(4, 0x103, "mknodat", SysMknodat, STRACE_4);
+    SYSCALL(4, 0x127, "preadv", SysPreadv, STRACE_PREADV);
+    SYSCALL(4, 0x128, "pwritev", SysPwritev, STRACE_PWRITEV);
+    SYSCALL(4, 0x12E, "prlimit", SysPrlimit, STRACE_4);
+    SYSCALL(5, 0x10F, "ppoll", SysPpoll, STRACE_5);
+    SYSCALL(5, 0x13C, "renameat2", SysRenameat2, STRACE_RENAMEAT2);
+    SYSCALL(3, 0x13E, "getrandom", SysGetrandom, STRACE_GETRANDOM);
+    SYSCALL(5, 0x147, "preadv2", SysPreadv2, STRACE_PREADV2);
+    SYSCALL(5, 0x148, "pwritev2", SysPwritev2, STRACE_PWRITEV2);
+    SYSCALL(3, 0x1B4, "close_range", SysCloseRange, STRACE_3);
 #endif /* DISABLE_NONPOSIX */
-
     case 0x3C:
       SYS_LOGF("%s(%#" PRIx64 ")", "exit", di);
       SysExit(m, di);
@@ -5236,11 +5407,16 @@ void OpSyscall(P) {
       SYS_LOGF("%s(%#" PRIx64 ")", "exit_group", di);
       SysExitGroup(m, di);
     case 0x00F:
-      SYS_LOGF("rt_sigreturn()");
       SigRestore(m);
-      return;
+      m->interrupted = true;  // preevnt ax clobber
+      break;
+    case 0x146:
+      // avoid noisy copy_file_range() feature check in cosmo
+    case 0x1BC:
+      // avoid noisy landlock_create_ruleset() feature check in cosmo
     case 0x500:
       // Cosmopolitan uses this number to trigger ENOSYS for testing.
+      if (!m->system->iscosmo) goto DefaultCase;
       ax = enosys();
       break;
     case 0x0E4:
@@ -5255,8 +5431,8 @@ void OpSyscall(P) {
       // time() is also noisy in some environments.
       ax = SysTime(m, di);
       break;
-
     default:
+    DefaultCase:
       LOGF("missing syscall 0x%03" PRIx64, ax);
       ax = enosys();
       break;
@@ -5264,5 +5440,9 @@ void OpSyscall(P) {
   if (!m->interrupted) {
     Put64(m->ax, ax != -1 ? ax : -(XlatErrno(errno) & 0xfff));
   }
+  unassert(--m->sysdepth >= 0);
+  CollectPageLocks(m);
+  unassert(!m->pagelocks.i || m->sysdepth);
   CollectGarbage(m, mark);
+  m->insyscall = false;
 }

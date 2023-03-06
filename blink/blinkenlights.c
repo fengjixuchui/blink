@@ -80,6 +80,40 @@
 #include "blink/xlat.h"
 #include "blink/xmmtype.h"
 
+#ifdef DISABLE_OVERLAYS
+#define OverlaysOpen   openat
+#define OverlaysStat   fstatat
+#define OverlaysAccess faccessat
+#endif
+
+#ifndef BUILD_TIMESTAMP
+#define BUILD_TIMESTAMP __TIMESTAMP__
+#endif
+#ifndef BUILD_MODE
+#define BUILD_MODE "BUILD_MODE_UNKNOWN"
+#warning "-DBUILD_MODE=... should be passed to blink/blinkenlights.c"
+#endif
+#ifndef BUILD_TOOLCHAIN
+#define BUILD_TOOLCHAIN "BUILD_TOOLCHAIN_UNKNOWN"
+#warning "-DBUILD_TOOLCHAIN=... should be passed to blink/blinkenlights.c"
+#endif
+#ifndef BLINK_VERSION
+#define BLINK_VERSION "BLINK_VERSION_UNKNOWN"
+#warning "-DBLINK_VERSION=... should be passed to blink/blinkenlights.c"
+#endif
+#ifndef BLINK_COMMITS
+#define BLINK_COMMITS "BLINK_COMMITS_UNKNOWN"
+#warning "-DBLINK_COMMITS=... should be passed to blink/blinkenlights.c"
+#endif
+#ifndef BLINK_GITSHA
+#define BLINK_GITSHA "BLINK_GITSHA_UNKNOWN"
+#warning "-DBLINK_GITSHA=... should be passed to blink/blinkenlights.c"
+#endif
+#ifndef CONFIG_ARGUMENTS
+#define CONFIG_ARGUMENTS "CONFIG_ARGUMENTS_UNKNOWN"
+#warning "-DCONFIG_ARGUMENTS=... should be passed to blink/blinkenlights.c"
+#endif
+
 #define VERSION \
   "Blinkenlights " BLINK_VERSION " (" BUILD_TIMESTAMP ")\n\
 Copyright (c) 2023 Justine Alexandra Roberts Tunney\n\
@@ -301,7 +335,6 @@ static bool react;
 static bool tuimode;
 static bool alarmed;
 static bool natural;
-static bool wantjit;
 static bool mousemode;
 static bool wantmetal;
 static bool showhighsse;
@@ -396,6 +429,25 @@ invalid mode\0\
 bad evex ll\0\
 unimplemented\0\
 ";
+
+static struct CHS {
+  ssize_t imagesize;
+  int c, h, s;
+} chs[] = {
+  { 163840,  40, 1, 8 },
+  { 184320,  40, 1, 9 },
+  { 327680,  40, 2, 8 },
+  { 368640,  40, 2, 9 },
+  { 737280,  80, 2, 9 },
+  { 1228800, 80, 2, 15 },
+  { 1474560, 80, 2, 18 },
+  { 2949120, 80, 2, 36 }
+};
+
+static off_t diskimagesize = 0;
+static int diskcyls = 1023;
+static int diskheads = 16;  // default to 16 heads/cylinder, following QEMU
+static int disksects = 63;
 
 static char *xasprintf(const char *fmt, ...) {
   char *s;
@@ -517,18 +569,6 @@ static i64 GetSp(void) {
   }
 }
 
-static i64 ReadWord(u8 *p) {
-  switch (GetPointerWidth()) {
-    default:
-    case 8:
-      return Read64(p);
-    case 4:
-      return Read32(p);
-    case 2:
-      return Read16(p);
-  }
-}
-
 static void AppendPanel(struct Panel *p, i64 line, const char *s) {
   if (0 <= line && line < p->bottom - p->top) {
     AppendStr(&p->lines[line], s);
@@ -590,7 +630,7 @@ static void DrawProfile(struct Panel *p) {
   for (i = 0; i < profsyms.i; ++i) {
     snprintf(line, sizeof(line), "%7.3f%% %s",
              (double)profsyms.p[i].hits / profsyms.toto * 100,
-             dis->syms.stab + dis->syms.p[profsyms.p[i].sym].name);
+             dis->syms.p[profsyms.p[i].sym].name);
     AppendPanel(p, i - framesstart, line);
   }
 }
@@ -689,7 +729,9 @@ static void HideCursor(void) {
 }
 
 static void ShowCursor(void) {
-  TtyWriteString("\033[?25h");
+  if (tuimode) {
+    TtyWriteString("\033[?25h");
+  }
 }
 
 static void EnableMouseTracking(void) {
@@ -698,8 +740,10 @@ static void EnableMouseTracking(void) {
 }
 
 static void DisableMouseTracking(void) {
-  mousemode = false;
-  TtyWriteString("\033[?1000;1002;1015;1006l");
+  if (mousemode) {
+    TtyWriteString("\033[?1000;1002;1015;1006l");
+    mousemode = false;
+  }
 }
 
 static void ToggleMouseTracking(void) {
@@ -712,8 +756,10 @@ static void ToggleMouseTracking(void) {
 
 static void LeaveScreen(void) {
   char buf[64];
-  sprintf(buf, "\033[%d;%dH\033[S\n", tyn, txn);
-  TtyWriteString(buf);
+  if (tuimode) {
+    sprintf(buf, "\033[%d;%dH\033[S\n", tyn, txn);
+    TtyWriteString(buf);
+  }
 }
 
 static void GetTtySize(int fd) {
@@ -786,6 +832,26 @@ static void OnSigAlrm(int sig, siginfo_t *si, void *uc) {
   action |= ALARM;
 }
 
+static void TtyRestore(void) {
+  LOGF("TtyRestore");
+  TtyWriteString("\033[0m");
+  DisableMouseTracking();
+  ShowCursor();
+  tcsetattr(ttyout, TCSANOW, &oldterm);
+}
+
+static void TuiCleanup(void) {
+  LOGF("TuiCleanup");
+  sigaction(SIGCONT, oldsig + 2, 0);
+  TtyRestore();
+  tuimode = false;
+}
+
+static void OnSigTstp(int sig, siginfo_t *si, void *uc) {
+  TtyRestore();
+  raise(SIGSTOP);
+}
+
 static void OnSigCont(int sig, siginfo_t *si, void *uc) {
   if (tuimode) {
     TuiRejuvinate();
@@ -794,38 +860,12 @@ static void OnSigCont(int sig, siginfo_t *si, void *uc) {
   EnqueueSignal(m, SIGCONT);
 }
 
-static void TtyRestore1(void) {
-  LOGF("TtyRestore1");
-  ShowCursor();
-  TtyWriteString("\033[0m");
-}
-
-static void TtyRestore2(void) {
-  LOGF("TtyRestore2");
-  tcsetattr(ttyout, TCSANOW, &oldterm);
-  DisableMouseTracking();
-}
-
-static void TuiCleanup(void) {
-  LOGF("TuiCleanup");
-  sigaction(SIGCONT, oldsig + 2, 0);
-  TtyRestore1();
-  DisableMouseTracking();
-  tuimode = false;
-  // LeaveScreen();
-}
-
 static void ResolveBreakpoints(void) {
   long i, sym;
   for (i = 0; i < breakpoints.i; ++i) {
     if (breakpoints.p[i].symbol && !breakpoints.p[i].addr) {
       if ((sym = DisFindSymByName(dis, breakpoints.p[i].symbol)) != -1) {
         breakpoints.p[i].addr = dis->syms.p[sym].addr;
-      } else {
-        fprintf(stderr,
-                "error: breakpoint not found: %s (out of %d loaded symbols)\n",
-                breakpoints.p[i].symbol, dis->syms.i);
-        exit(1);
       }
     }
   }
@@ -837,11 +877,6 @@ static void ResolveWatchpoints(void) {
     if (watchpoints.p[i].symbol && !watchpoints.p[i].addr) {
       if ((sym = DisFindSymByName(dis, watchpoints.p[i].symbol)) != -1) {
         watchpoints.p[i].addr = dis->syms.p[sym].addr;
-      } else {
-        fprintf(stderr,
-                "error: watchpoint not found: %s (out of %d loaded symbols)\n",
-                watchpoints.p[i].symbol, dis->syms.i);
-        exit(1);
       }
     }
   }
@@ -853,11 +888,6 @@ static void BreakAtNextInstruction(void) {
   b.addr = GetPc(m) + m->xedd->length;
   b.oneshot = true;
   PushBreakpoint(&breakpoints, &b);
-}
-
-static void LoadSyms(void) {
-  LoadDebugSymbols(&m->system->elf);
-  DisLoadElf(dis, &m->system->elf);
 }
 
 static int DrainInput(int fd) {
@@ -900,13 +930,18 @@ static int GetCursorPosition(int *out_y, int *out_x) {
   return ReadCursorPosition(out_y, out_x);
 }
 
+void OnSymbols(struct System *s) {
+  ResolveBreakpoints();
+  ResolveWatchpoints();
+}
+
 void CommonSetup(void) {
   static bool once;
   if (!once) {
     if (tuimode || breakpoints.i || watchpoints.i) {
-      LoadSyms();
-      ResolveBreakpoints();
-      ResolveWatchpoints();
+      m->system->dis = dis;
+      m->system->onsymbols = OnSymbols;
+      LoadDebugSymbols(m->system);
     }
     once = true;
   }
@@ -921,10 +956,10 @@ void TuiSetup(void) {
   struct sigaction sa;
   report = false;
   if (!once) {
-    /* LOGF("loaded program %s\n%s", codepath, gc(FormatPml4t(m))); */
+    LOGF("loaded program %s\n%s", codepath, FormatPml4t(m));
     CommonSetup();
     tcgetattr(ttyout, &oldterm);
-    atexit(TtyRestore2);
+    atexit(TtyRestore);
     once = true;
     report = true;
   }
@@ -934,6 +969,8 @@ void TuiSetup(void) {
   sa.sa_sigaction = OnSigCont;
   sa.sa_flags = SA_RESTART | SA_NODEFER | SA_SIGINFO;
   sigaction(SIGCONT, &sa, oldsig + 2);
+  sa.sa_sigaction = OnSigTstp;
+  sigaction(SIGTSTP, &sa, 0);
   CopyMachineState(&laststate);
   TuiRejuvinate();
   if (report) {
@@ -1093,7 +1130,7 @@ void SetupDraw(void) {
   a = 1 / 8. * yn;
   b = 3 / 8. * yn;
   if (ShouldShowDisplay()) {
-    c2y[0] = breakpoints.i ? a * .7 : 0;
+    c2y[0] = breakpoints.i || watchpoints.i ? a * .7 : 0;
     c2y[1] = a * 2.3;
     c2y[2] = a * 2 + b;
     if (yn - c2y[2] > 26) {
@@ -1104,8 +1141,8 @@ void SetupDraw(void) {
       c2y[2] = yn - 26;
     }
   } else {
-    c2y[0] = breakpoints.i ? a * .7 : 0;
-    c2y[1] = yn / 2;
+    c2y[0] = breakpoints.i || watchpoints.i ? a * .7 : 0;
+    c2y[1] = yn / 20 * 12;
     c2y[2] = yn;
   }
 
@@ -1127,7 +1164,7 @@ void SetupDraw(void) {
 
   pan.breakpointshr.top = 0;
   pan.breakpointshr.left = dx[0];
-  pan.breakpointshr.bottom = !!breakpoints.i;
+  pan.breakpointshr.bottom = breakpoints.i || watchpoints.i;
   pan.breakpointshr.right = dx[1] - 1;
 
   pan.breakpoints.top = 1;
@@ -1717,16 +1754,15 @@ static void DrawMemory(struct Panel *p, struct MemoryView *view, i64 histart,
 
 static void DrawMaps(struct Panel *p) {
   int i;
-  char *text, *p1, *p2;
+  char *p1, *p2;
   if (p->top == p->bottom) return;
-  p1 = text = FormatPml4t(m);
+  p1 = FormatPml4t(m);
   for (i = 0; p1; ++i, p1 = p2) {
     if ((p2 = strchr(p1, '\n'))) *p2++ = '\0';
     if (i >= mapsstart) {
       AppendPanel(p, i - mapsstart, p1);
     }
   }
-  free(text);
 }
 
 static void DrawBreakpoints(struct Panel *p) {
@@ -1740,7 +1776,9 @@ static void DrawBreakpoints(struct Panel *p) {
     if (line >= breakpointsstart) {
       addr = watchpoints.p[i].addr;
       sym = DisFindSym(dis, addr);
-      name = sym != -1 ? dis->syms.stab + dis->syms.p[sym].name : "UNKNOWN";
+      if (!(name = watchpoints.p[i].symbol)) {
+        name = sym != -1 ? dis->syms.p[sym].name : "UNKNOWN";
+      }
       snprintf(buf, sizeof(buf), "%0*" PRIx64 " %s", GetAddrHexWidth(), addr,
                name);
       AppendPanel(p, line - breakpointsstart, buf);
@@ -1758,7 +1796,9 @@ static void DrawBreakpoints(struct Panel *p) {
     if (line >= breakpointsstart) {
       addr = breakpoints.p[i].addr;
       sym = DisFindSym(dis, addr);
-      name = sym != -1 ? dis->syms.stab + dis->syms.p[sym].name : "UNKNOWN";
+      if (!(name = breakpoints.p[i].symbol)) {
+        name = sym != -1 ? dis->syms.p[sym].name : "UNKNOWN";
+      }
       s = buf;
       s += sprintf(s, "%0*" PRIx64 " ", GetAddrHexWidth(), addr);
       strcpy(s, name);
@@ -1798,7 +1838,7 @@ static void DrawFrames(struct Panel *p) {
   sp = Read64(m->sp);
   for (i = 0; i < p->bottom - p->top;) {
     sym = DisFindSym(dis, rp);
-    name = sym != -1 ? dis->syms.stab + dis->syms.p[sym].name : "UNKNOWN";
+    name = sym != -1 ? dis->syms.p[sym].name : "UNKNOWN";
     s = line;
     s += sprintf(s, "%0*" PRIx64 " %0*" PRIx64 " ", GetAddrHexWidth(),
                  m->ss.base + bp, GetAddrHexWidth(), rp);
@@ -1825,8 +1865,8 @@ static void DrawFrames(struct Panel *p) {
       break;
     }
     sp = bp;
-    bp = ReadWord(r + 0);
-    rp = ReadWord(r + 8);
+    bp = ReadWordSafely(m->mode, r + 0);
+    rp = ReadWordSafely(m->mode, r + 8);
   }
 }
 
@@ -1895,9 +1935,9 @@ static const char *DescribeAction(void) {
 }
 
 static char *GetStatus(int m) {
-  bool first;
+  bool once;
   unsigned i, n;
-  struct timespec t;
+  struct timespec now;
   struct Buffer s = {0};
   if (statusmessage && CompareTime(GetTime(), statusexpires)) {
     AppendStr(&s, statusmessage);
@@ -1905,21 +1945,21 @@ static char *GetStatus(int m) {
     AppendStr(&s, "das blinkenlights");
   }
   n = ARRAYLEN(keystrokes.p);
-  for (first = true, t = GetTime(), i = 1; i <= n; --i) {
-    if (!keystrokes.p[(keystrokes.i - i) % n][0]) continue;
-    if (CompareTime(SubtractTime(t, keystrokes.s[(keystrokes.i - i) % n]),
+  for (once = false, now = GetTime(), i = 1; i <= n; --i) {
+    if (!keystrokes.p[(keystrokes.i - i) % n][0] ||
+        CompareTime(SubtractTime(now, keystrokes.s[(keystrokes.i - i) % n]),
                     FromSeconds(1)) > 0) {
-      continue;
+      break;
     }
-    if (first) {
-      first = false;
+    if (!once) {
       AppendStr(&s, " (keystroke: ");
+      once = true;
     } else {
       AppendChar(&s, ' ');
     }
     AppendStr(&s, keystrokes.p[(keystrokes.i - i) % n]);
   }
-  if (!first) {
+  if (once) {
     AppendChar(&s, ')');
   }
   return s.p;
@@ -2034,6 +2074,16 @@ static void RewindHistory(int delta) {
   action &= ~MODAL;
 }
 
+// we need to handle any shutdown via pipeline explicitly
+// because blink always puts SIGPIPE in the SIG_IGN state
+static ssize_t HandleEpipe(ssize_t rc) {
+  if (rc == -1 && errno == EPIPE) {
+    LOGF("got EPIPE, shutting down");
+    exit(128 + EPIPE);
+  }
+  return rc;
+}
+
 static void ShowHistory(void) {
   char *ansi;
   size_t len, size;
@@ -2056,7 +2106,7 @@ static void ShowHistory(void) {
   Inflate(ansi, r->origsize, r->data, r->compsize);
   memcpy(ansi + r->origsize, status, len);
   if (PreventBufferbloat()) {
-    unassert(UninterruptibleWrite(ttyout, ansi, size) != -1);
+    HandleEpipe(UninterruptibleWrite(ttyout, ansi, size));
   }
   free(ansi);
 }
@@ -2072,19 +2122,12 @@ static void Redraw(bool force) {
     ShowHistory();
     return;
   }
+  LookupAddress(m, m->ip);
+  LookupAddress(m, Get64(m->sp));
   BEGIN_NO_PAGE_FAULTS;
   start_draw = GetTime();
   execsecs = ToNanoseconds(SubtractTime(start_draw, last_draw)) * 1e-9;
   oldlen = m->xedd->length;
-  if (!IsShadow(m->readaddr) && !IsShadow(m->readaddr + m->readsize)) {
-    readaddr = m->readaddr;
-    readsize = m->readsize;
-  }
-  if (!IsShadow(m->writeaddr) && !IsShadow(m->writeaddr + m->writesize)) {
-    writeaddr = m->writeaddr;
-    writesize = m->writesize;
-  }
-  ScrollOp(&pan.disassembly, GetDisIndex());
   ips = last_cycle ? (cycle - last_cycle) / execsecs : 0;
   SetupDraw();
   for (i = 0; i < ARRAYLEN(pan.p); ++i) {
@@ -2129,7 +2172,7 @@ static void Redraw(bool force) {
   STATISTIC(AVERAGE(redraw_latency_us,
                     ToMicroseconds(SubtractTime(end_draw, start_draw))));
   if (force || PreventBufferbloat()) {
-    UninterruptibleWrite(ttyout, ansi, size);
+    HandleEpipe(UninterruptibleWrite(ttyout, ansi, size));
   }
   AddHistory(ansi, size);
   free(ansi);
@@ -2162,11 +2205,23 @@ static void DescribeKeystroke(char *b, const char *p) {
   } while (*p);
 }
 
+static void SetStatusDeadline(void) {
+  struct itimerval it;
+  statusexpires = AddTime(GetTime(), FromSeconds(1));
+  it.it_interval.tv_sec = 0;
+  it.it_interval.tv_usec = 0;
+  it.it_value.tv_sec = 1;
+  it.it_value.tv_usec = 0;
+  setitimer(ITIMER_REAL, &it, 0);
+}
+
 static void RecordKeystroke(const char *k) {
   if (!strchr(k, '[')) {
     keystrokes.s[keystrokes.i] = GetTime();
     DescribeKeystroke(keystrokes.p[keystrokes.i], k);
     keystrokes.i = (keystrokes.i + 1) % ARRAYLEN(keystrokes.p);
+    ReactiveDraw();
+    SetStatusDeadline();
   }
 }
 
@@ -2199,10 +2254,7 @@ static void HandleAppReadInterrupt(void) {
     if (action & CONTINUE) {
       action &= ~CONTINUE;
     } else {
-      if (tuimode) {
-        LeaveScreen();
-        TuiCleanup();
-      }
+      LeaveScreen();
       exit(0);
     }
   }
@@ -2402,7 +2454,10 @@ static void DrawDisplayOnly(struct Panel *p) {
 static ssize_t OnPtyFdWritev(int fd, const struct iovec *iov, int iovlen) {
   int i;
   size_t size;
-  ptyisenabled = true;
+  if (!ptyisenabled) {
+    ptyisenabled = true;
+    ReactiveDraw();
+  }
   for (size = i = 0; i < iovlen; ++i) {
     PtyWrite(pty, iov[i].iov_base, iov[i].iov_len);
     size += iov[i].iov_len;
@@ -2537,7 +2592,8 @@ static void OnExitTrap(void) {
   tuimode = true;
   action |= MODAL;
   action &= ~CONTINUE;
-  strcpy(systemfailure, "program called exit_group()");
+  snprintf(systemfailure, sizeof(systemfailure), "guest called exit_group(%d)",
+           m->system->exitcode);
 }
 
 static void OnSegmentationFault(void) {
@@ -2602,15 +2658,35 @@ static void OnDiskServiceBadCommand(void) {
   SetCarry(true);
 }
 
+static void DetermineCHS(void) {
+  struct stat st;
+  int i;
+  off_t size = diskimagesize;
+  if (size) return;  // do nothing if disk geometry already detected
+  unassert(!OverlaysStat(AT_FDCWD, m->system->elf.prog, &st, 0));
+  diskimagesize = size = st.st_size;
+  for (i = 0; i < ARRAYLEN(chs); ++i) {
+    if (size == chs[i].imagesize) {
+      diskcyls = chs[i].c;
+      diskheads = chs[i].h;
+      disksects = chs[i].s;
+      return;
+    }
+  }
+}
+
 static void OnDiskServiceGetParams(void) {
   size_t lastsector, lastcylinder, lasthead;
-  lastcylinder = GetLastIndex(m->system->elf.mapsize, 512 * 63 * 255, 0, 1023);
-  lasthead = GetLastIndex(m->system->elf.mapsize, 512 * 63, 0, 255);
-  lastsector = GetLastIndex(m->system->elf.mapsize, 512, 1, 63);
+  DetermineCHS();
+  lastcylinder = GetLastIndex(diskimagesize,
+                              512 * disksects * diskheads, 0, 1023);
+  lasthead = GetLastIndex(diskimagesize, 512 * disksects, 0, diskheads - 1);
+  lastsector = GetLastIndex(diskimagesize, 512, 1, disksects);
   m->dl = 1;
   m->dh = lasthead;
   m->cl = lastcylinder >> 8 << 6 | lastsector;
   m->ch = lastcylinder;
+  m->bl = 4;        // CMOS drive type: 1.4M floppy
   m->ah = 0;
   m->es.sel = m->es.base = 0;
   Put16(m->di, 0);
@@ -2618,40 +2694,44 @@ static void OnDiskServiceGetParams(void) {
 }
 
 static void OnDiskServiceReadSectors(void) {
+  int fd;
   i64 addr, size;
   i64 sectors, drive, head, cylinder, sector, offset;
+  DetermineCHS();
   sectors = m->al;
   drive = m->dl;
   head = m->dh;
   cylinder = (m->cl & 192) << 2 | m->ch;
   sector = (m->cl & 63) - 1;
   size = sectors * 512;
-  offset = sector * 512 + head * 512 * 63 + cylinder * 512 * 63 * 255;
+  offset = sector * 512 + head * 512 * disksects
+                        + cylinder * 512 * disksects * diskheads;
   (void)drive;
-  LOGF("bios read sectors %" PRId64 " "
-       "@ sector %" PRId64 " cylinder %" PRId64 " head %" PRId64
-       " drive %" PRId64 " offset %#" PRIx64 "",
-       sectors, sector, cylinder, head, drive, offset);
-  if (0 <= sector && offset + size <= m->system->elf.mapsize) {
-    addr = m->es.base + Get16(m->bx);
-    if (addr + size <= kRealSize) {
-      SetWriteAddr(m, addr, size);
-      memcpy(m->system->real + addr, m->system->elf.map + offset, size);
-      m->ah = 0x00;
-      SetCarry(false);
-    } else {
-      m->al = 0x00;
-      m->ah = 0x02;
-      SetCarry(true);
-    }
-  } else {
-    LOGF("bios read sector failed 0 <= %" PRId64 " && %" PRIx64 " + %" PRIx64
-         " <= %lx",
-         sector, offset, size, m->system->elf.mapsize);
+  ELF_LOGF("bios read sectors %" PRId64 " "
+           "@ sector %" PRId64 " cylinder %" PRId64 " head %" PRId64
+           " drive %" PRId64 " offset %#" PRIx64 " from %s",
+           sectors, sector, cylinder, head, drive, offset, m->system->elf.prog);
+  addr = m->es.base + Get16(m->bx);
+  if (addr >= kRealSize || size > kRealSize || addr + size > kRealSize) {
+    LOGF("bios disk read exceeded real memory");
     m->al = 0x00;
-    m->ah = 0x0d;
+    m->ah = 0x02;  // cannot find address mark
+    SetCarry(true);
+    return;
+  }
+  errno = 0;
+  if ((fd = OverlaysOpen(AT_FDCWD, m->system->elf.prog, O_RDONLY, 0)) != -1 &&
+      pread(fd, m->system->real + addr, size, offset) == size) {
+    SetWriteAddr(m, addr, size);
+    m->ah = 0x00;  // success
+    SetCarry(false);
+  } else {
+    LOGF("bios read sectors failed: %s", DescribeHostErrno(errno));
+    m->al = 0x00;
+    m->ah = 0x0d;  // invalid number of sector
     SetCarry(true);
   }
+  close(fd);
 }
 
 static void OnDiskServiceProbeExtended(void) {
@@ -2669,6 +2749,7 @@ static void OnDiskServiceProbeExtended(void) {
 }
 
 static void OnDiskServiceReadSectorsExtended(void) {
+  int fd;
   u8 drive = m->dl;
   i64 pkt_addr = m->ds.base + Get16(m->si), addr, sectors, size, lba, offset;
   u8 pkt_size, *pkt;
@@ -2691,27 +2772,33 @@ static void OnDiskServiceReadSectorsExtended(void) {
     size = sectors * 512;
     lba = Read32(pkt + 8);
     offset = lba * 512;
-    LOGF("bios read sector ext 0 <= %" PRId64 " && %" PRIx64 " + %" PRIx64
-         " <= %lx",
-         lba, offset, size, m->system->elf.mapsize);
-    if (offset >= m->system->elf.mapsize ||
-        offset + size > m->system->elf.mapsize) {
-      LOGF("bios read sector failed 0 <= %" PRId64 " && %" PRIx64 " <= %lx",
-           lba, offset, m->system->elf.mapsize);
+    ELF_LOGF("bios read sector ext "
+             "lba=%" PRId64 " "
+             "offset=%" PRIx64 " "
+             "size=%" PRIx64,
+             lba, offset, size);
+    if (addr >= kRealSize || size > kRealSize || addr + size > kRealSize) {
+      LOGF("bios disk read exceeded real memory");
       SetWriteAddr(m, pkt_addr + 2, 2);
       Write16(pkt + 2, 0);
-      m->ah = 0x0d;
-    } else if (addr >= kRealSize || addr + size > kRealSize) {
-      SetWriteAddr(m, pkt_addr + 2, 2);
-      Write16(pkt + 2, 0);
-      m->ah = 0x02;
+      m->ah = 0x02;  // cannot find address mark
       SetCarry(true);
-    } else {
-      SetWriteAddr(m, addr, size);
-      memcpy(m->system->real + addr, m->system->elf.map + offset, size);
-      m->ah = 0x00;
-      SetCarry(false);
+      return;
     }
+    errno = 0;
+    if ((fd = OverlaysOpen(AT_FDCWD, m->system->elf.prog, O_RDONLY, 0)) != -1 &&
+        pread(fd, m->system->real + addr, size, offset) == size) {
+      SetWriteAddr(m, addr, size);
+      m->ah = 0x00;  // success
+      SetCarry(false);
+    } else {
+      LOGF("bios read sector failed: %s", DescribeHostErrno(errno));
+      SetWriteAddr(m, pkt_addr + 2, 2);
+      Write16(pkt + 2, 0);
+      m->ah = 0x0d;  // invalid number of sectors
+      SetCarry(true);
+    }
+    close(fd);
   }
 }
 
@@ -2741,6 +2828,8 @@ static void OnDiskService(void) {
 static void OnVidyaServiceSetMode(void) {
   if (LookupAddress(m, 0xB0000)) {
     vidya = m->al;
+    ptyisenabled = true;
+    ReactiveDraw();
   } else {
     LOGF("maybe you forgot -r flag");
   }
@@ -2813,6 +2902,10 @@ static void OnVidyaServiceTeletypeOutput(void) {
   int n;
   u64 w;
   char buf[12];
+  if (!ptyisenabled) {
+    ptyisenabled = true;
+    ReactiveDraw();
+  }
   n = 0 /* FormatCga(m->bl, buf) */;
   w = tpenc(VidyaServiceXlatTeletype(m->al));
   do {
@@ -3019,18 +3112,12 @@ static void OnLongBranch(struct Machine *m) {
 static void SetStatus(const char *fmt, ...) {
   char *s;
   va_list va;
-  struct itimerval it;
   va_start(va, fmt);
   unassert(vasprintf(&s, fmt, va) >= 0);
   va_end(va);
   free(statusmessage);
   statusmessage = s;
-  statusexpires = AddTime(GetTime(), FromSeconds(1));
-  it.it_interval.tv_sec = 0;
-  it.it_interval.tv_usec = 0;
-  it.it_value.tv_sec = 1;
-  it.it_value.tv_usec = 0;
-  setitimer(ITIMER_REAL, &it, 0);
+  SetStatusDeadline();
 }
 
 static int ClampSpeed(int s) {
@@ -3084,6 +3171,7 @@ static void OnEnd(void) {
 }
 
 static void OnEnter(void) {
+  dialog = NULL;
   action &= ~MODAL;
 }
 
@@ -3139,7 +3227,6 @@ static void OnContinueExec(void) {
 
 static void OnInt(void) {
   action |= INT;
-  ReactiveDraw();
 }
 
 static void OnRestart(void) {
@@ -3288,7 +3375,6 @@ static void OnHelp(void) {
 
 static void HandleKeyboard(const char *k) {
   const char *p = k;
-  // LOGF("HandleKeyboard(%#x [%c])", *k, isprint(*k) ? *k : '.');
   switch (*p++) {
     CASE('q', OnQ());
     CASE('v', OnV());
@@ -3358,9 +3444,7 @@ static void HandleKeyboard(const char *k) {
 
 static void ReadKeyboard(void) {
   char buf[64];
-  // LOGF("ReadKeyboard");
   memset(buf, 0, sizeof(buf));
-  dialog = NULL;
   if (readansi(ttyin, buf, sizeof(buf)) == -1) {
     if (errno == EINTR) {
       LOGF("ReadKeyboard interrupted");
@@ -3471,6 +3555,7 @@ static void Exec(void) {
   int interrupt;
   LOGF("Exec");
   ExecSetup();
+  m->nofault = false;
   if (!(interrupt = sigsetjmp(m->onhalt, 1))) {
     m->canhalt = true;
     if (!(action & CONTINUE) &&
@@ -3481,7 +3566,7 @@ static void Exec(void) {
       LoadInstruction(m, GetPc(m));
       if (verbose) LogInstruction();
       Execute();
-      if (m->signals) {
+      if (m->signals & ~m->sigmask) {
         if ((sig = ConsumeSignal(m, 0, 0))) {
           exit(128 + sig);
         }
@@ -3509,7 +3594,7 @@ static void Exec(void) {
         }
         if (verbose) LogInstruction();
         Execute();
-        if (m->signals) {
+        if (m->signals & ~m->sigmask) {
           if ((sig = ConsumeSignal(m, 0, 0))) {
             exit(128 + sig);
           }
@@ -3559,6 +3644,7 @@ static void Tui(void) {
   LOGF("Tui");
   TuiSetup();
   SetupDraw();
+  m->nofault = false;
   m->system->trapexit = true;
   ScrollOp(&pan.disassembly, GetDisIndex());
   if (!(interrupt = sigsetjmp(m->onhalt, 1))) {
@@ -3571,11 +3657,13 @@ static void Tui(void) {
           action &= ~(FINISH | NEXT | CONTINUE);
           LOGF("BREAK %0*" PRIx64 "", GetAddrHexWidth(),
                breakpoints.p[bp].addr);
+          ReactiveDraw();
         } else if ((action & (FINISH | NEXT | CONTINUE)) &&
                    (bp = IsAtWatchpoint(&watchpoints, m)) != -1) {
           action &= ~(FINISH | NEXT | CONTINUE);
           LOGF("WATCH %0*" PRIx64 " AT PC %" PRIx64, GetAddrHexWidth(),
                watchpoints.p[bp].addr, GetPc(m));
+          ReactiveDraw();
         }
       } else {
         m->xedd = (struct XedDecodedInst *)m->opcache->icache[0];
@@ -3601,7 +3689,6 @@ static void Tui(void) {
       if (!(action & CONTINUE) || interactive) {
         tick = 0;
         Redraw(false);
-        CopyMachineState(&laststate);
       }
       if (dialog) {
         PrintMessageBox(ttyout, dialog, tyn, txn);
@@ -3609,11 +3696,6 @@ static void Tui(void) {
       if (action & MODAL) {
         PrintMessageBox(ttyout, systemfailure, tyn, txn);
         ReadKeyboard();
-        if (action & INT) {
-          LOGF("TUI INT");
-          LeaveScreen();
-          exit(1);
-        }
       } else if (dialog || !IsExecuting() ||
                  (!(action & CONTINUE) && !(action & INT) &&
                   HasPendingKeyboard())) {
@@ -3624,10 +3706,17 @@ static void Tui(void) {
         action &= ~INT;
         RecordKeystroke("\3");
         if (action & (CONTINUE | NEXT | FINISH)) {
-          action &= ~(CONTINUE | NEXT | FINISH);
-        } else {
+          action &= ~(CONTINUE | NEXT | FINISH | STEP);
+          ReactiveDraw();
+        } else if ((~m->sigmask & (1ull << (SIGINT_LINUX - 1))) &&
+                   Read64(m->system->hands[SIGINT_LINUX - 1].handler) !=
+                       SIG_DFL_LINUX &&
+                   Read64(m->system->hands[SIGINT_LINUX - 1].handler) !=
+                       SIG_IGN_LINUX) {
           EnqueueSignal(m, SIGINT_LINUX);
           action |= STEP;
+        } else {
+          SetStatus("press q to quit");
         }
       }
       if (action & EXIT) {
@@ -3660,8 +3749,20 @@ static void Tui(void) {
         if (!IsDebugBreak() && IsAtWatchpoint(&watchpoints, m) == -1) {
           UpdateXmmType(m->xedd->op.rde, &xmmtype);
           if (verbose) LogInstruction();
+          CopyMachineState(&laststate);
           Execute();
-          if (m->signals) {
+          ScrollOp(&pan.disassembly, GetDisIndex());
+          if (!IsShadow(m->readaddr) && !IsShadow(m->readaddr + m->readsize)) {
+            readaddr = m->readaddr;
+            readsize = m->readsize;
+          }
+          if (!IsShadow(m->writeaddr) &&
+              !IsShadow(m->writeaddr + m->writesize)) {
+            writeaddr = m->writeaddr;
+            writesize = m->writesize;
+          }
+          ScrollMemoryViews();
+          if (m->signals & ~m->sigmask) {
             if ((sig = ConsumeSignal(m, 0, 0))) {
               exit(128 + sig);
             }
@@ -3719,7 +3820,7 @@ static void GetOpts(int argc, char *argv[]) {
   while ((opt = GetOpt(argc, argv, "hjmvVtrzRNsZb:Hw:L:C:")) != -1) {
     switch (opt) {
       case 'j':
-        wantjit = true;
+        FLAG_wantjit = true;
         break;
       case 't':
         tuimode = false;
@@ -3794,13 +3895,20 @@ static void AddPath_StartOp_Tui(P) {
   Jitter(m, rde, 0, 0, "qc", StartOp_Tui);
 }
 
+static bool FileExists(const char *path) {
+  return !OverlaysAccess(AT_FDCWD, path, F_OK, 0);
+}
+
 int VirtualMachine(int argc, char *argv[]) {
   struct Dll *e;
-  if (!Commandv(argv[optind_], pathbuf, sizeof(pathbuf))) {
+  if (FileExists(argv[optind_])) {
+    codepath = argv[optind_];
+  } else if (Commandv(argv[optind_], pathbuf, sizeof(pathbuf))) {
+    codepath = pathbuf;
+  } else {
     fprintf(stderr, "%s: command not found: %s\n", argv[0], argv[optind_]);
     exit(127);
   }
-  codepath = pathbuf;
   optind_++;
   do {
     action = 0;
@@ -3837,7 +3945,6 @@ int VirtualMachine(int argc, char *argv[]) {
       ttyout = -1;
     }
     if (ttyout != -1) {
-      atexit(TtyRestore1);
       tyn = 24;
       txn = 80;
       GetTtySize(ttyout);
@@ -3856,9 +3963,6 @@ int VirtualMachine(int argc, char *argv[]) {
       }
     } while (!(action & (RESTART | EXIT)));
   } while (action & RESTART);
-  if (m->system->elf.ehdr) {
-    unassert(!Munmap(m->system->elf.ehdr, m->system->elf.size));
-  }
   DisFree(dis);
   return exitcode;
 }
@@ -3886,11 +3990,15 @@ static void OnSigSegv(int sig, siginfo_t *si, void *uc) {
   LOGF("OnSigSegv(%p)", si->si_addr);
   RestoreIp(g_machine);
   // TODO(jart): Fix address translation in non-linear mode.
-  g_machine->faultaddr = ToGuest(si->si_addr);
+  g_machine->faultaddr =
+      ConvertHostToGuestAddress(g_machine->system, si->si_addr);
   ERRF("SIGSEGV AT ADDRESS %" PRIx64 " (OR %p) at RIP=%" PRIx64,
        g_machine->faultaddr, si->si_addr, m->ip);
   ERRF("BACKTRACE\n\t%s", GetBacktrace(g_machine));
-  if (!react) DeliverSignalToUser(g_machine, SIGSEGV_LINUX);
+  if (!react) {
+    sig = UnXlatSignal(si->si_signo);
+    DeliverSignalToUser(m, sig, UnXlatSiCode(sig, si->si_code));
+  }
   siglongjmp(g_machine->onhalt, kMachineSegmentationFault);
 }
 
@@ -3901,6 +4009,7 @@ int main(int argc, char *argv[]) {
   setlocale(LC_ALL, "");
   g_exitdontabort = true;
   SetupWeb();
+  GetStartDir();
   // Ensure utf-8 is printed correctly on windows, this method
   // has issues(http://stackoverflow.com/a/10884364/4279) but
   // should work for at least windows 7 and newer.
@@ -3912,6 +4021,7 @@ int main(int argc, char *argv[]) {
   tuimode = true;
   WriteErrorInit();
   GetOpts(argc, argv);
+  InitMap();
   InitBus();
 #ifdef HAVE_JIT
   AddPath_StartOp_Hook = AddPath_StartOp_Tui;
@@ -3920,13 +4030,12 @@ int main(int argc, char *argv[]) {
   unassert((s = NewSystem(wantmetal ? XED_MODE_REAL : XED_MODE_LONG)));
   unassert((m = g_machine = NewMachine(s, 0)));
 #ifdef HAVE_JIT
-  if (!wantjit || wantmetal) {
+  if (!FLAG_wantjit || wantmetal) {
     DisableJit(&m->system->jit);
   }
 #endif
   if (wantmetal) {
     m->metal = true;
-    g_disisprog_disable = true;
   }
   m->system->redraw = Redraw;
   m->system->onbinbase = OnBinbase;
@@ -3940,6 +4049,7 @@ int main(int argc, char *argv[]) {
     exit(1);
   }
 #endif
+  signal(SIGPIPE, SIG_IGN);
   sigfillset(&sa.sa_mask);
   sa.sa_flags = 0;
   sa.sa_handler = OnSigSys;
@@ -3953,6 +4063,7 @@ int main(int argc, char *argv[]) {
   unassert(!sigaction(SIGALRM, &sa, 0));
 #ifndef __SANITIZE_THREAD__
   sa.sa_sigaction = OnSigSegv;
+  unassert(!sigaction(SIGBUS, &sa, 0));
   unassert(!sigaction(SIGSEGV, &sa, 0));
 #endif
   m->system->blinksigs |= 1ull << (SIGINT_LINUX - 1) |   //

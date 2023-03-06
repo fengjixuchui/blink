@@ -16,12 +16,14 @@ extern const short kCp437[256];
 extern bool g_exitdontabort;
 
 _Noreturn void Abort(void);
-char *ExpandUser(const char *);
+char *GetStartDir(void);
 int GetOpt(int, char *const[], const char *);
 u64 tpenc(wint_t);
-bool mulo(u64, u64, u64 *);
 const char *DescribeSignal(int);
 const char *DescribeHostErrno(int);
+bool Sub(i64, i64, i64 *) dontdiscard;
+bool Add(i64, i64, i64 *) dontdiscard;
+bool Mul(u64, u64, u64 *) dontdiscard;
 bool endswith(const char *, const char *);
 bool startswith(const char *, const char *);
 const char *doublenul(const char *, unsigned);
@@ -67,7 +69,7 @@ u64 Vigna(u64[1]);
 #define realpath realpath_
 #endif
 
-#ifndef HAVE_MEMCCPY
+#if !defined(HAVE_MEMCCPY) || defined(TINY)
 #ifdef memccpy
 #undef memccpy
 #endif

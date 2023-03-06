@@ -36,6 +36,7 @@
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
+#include "blink/map.h"
 #include "blink/overlays.h"
 #include "blink/pml4t.h"
 #include "blink/signal.h"
@@ -49,6 +50,34 @@
 #include "blink/x86.h"
 #include "blink/xlat.h"
 
+#ifndef BUILD_TIMESTAMP
+#define BUILD_TIMESTAMP __TIMESTAMP__
+#endif
+#ifndef BUILD_MODE
+#define BUILD_MODE "BUILD_MODE_UNKNOWN"
+#warning "-DBUILD_MODE=... should be passed to blink/blink.c"
+#endif
+#ifndef BUILD_TOOLCHAIN
+#define BUILD_TOOLCHAIN "BUILD_TOOLCHAIN_UNKNOWN"
+#warning "-DBUILD_TOOLCHAIN=... should be passed to blink/blink.c"
+#endif
+#ifndef BLINK_VERSION
+#define BLINK_VERSION "BLINK_VERSION_UNKNOWN"
+#warning "-DBLINK_VERSION=... should be passed to blink/blink.c"
+#endif
+#ifndef BLINK_COMMITS
+#define BLINK_COMMITS "BLINK_COMMITS_UNKNOWN"
+#warning "-DBLINK_COMMITS=... should be passed to blink/blink.c"
+#endif
+#ifndef BLINK_GITSHA
+#define BLINK_GITSHA "BLINK_GITSHA_UNKNOWN"
+#warning "-DBLINK_GITSHA=... should be passed to blink/blink.c"
+#endif
+#ifndef CONFIG_ARGUMENTS
+#define CONFIG_ARGUMENTS "CONFIG_ARGUMENTS_UNKNOWN"
+#warning "-DCONFIG_ARGUMENTS=... should be passed to blink/blink.c"
+#endif
+
 #define VERSION \
   "Blink Virtual Machine " BLINK_VERSION " (" BUILD_TIMESTAMP ")\n\
 Copyright (c) 2023 Justine Alexandra Roberts Tunney\n\
@@ -61,7 +90,7 @@ Config: ./configure MODE=" BUILD_MODE " " CONFIG_ARGUMENTS "\n"
 
 #define OPTS "hvjemZs0L:C:"
 
-static const char USAGE[] =
+_Alignas(1) static const char USAGE[] =
     " [-" OPTS "] PROG [ARGS...]\n"
     "Options:\n"
     "  -h                   help\n"
@@ -104,12 +133,24 @@ static void OnSigSys(int sig) {
   // do nothing
 }
 
+static void PrintDiagnostics(struct Machine *m) {
+  ERRF("additional information\n"
+       "\t%s\n"
+       "%s\n"
+       "%s",
+       GetBacktrace(m), FormatPml4t(m), GetBlinkBacktrace());
+}
+
 void TerminateSignal(struct Machine *m, int sig) {
   int syssig;
   struct sigaction sa;
   unassert(!IsSignalIgnoredByDefault(sig));
-  ERRF("terminating due to signal %s", DescribeSignal(sig));
-  if ((syssig = XlatSignal(sig)) == -1) syssig = SIGTERM;
+  if (IsSignalSerious(sig)) {
+    ERRF("terminating due to %s (rip=%" PRIx64 " faultaddr=%" PRIx64 ")",
+         DescribeSignal(sig), m->ip, m->faultaddr);
+    PrintDiagnostics(m);
+  }
+  if ((syssig = XlatSignal(sig)) == -1) syssig = SIGKILL;
   KillOtherThreads(m->system);
   FreeMachine(m);
 #ifdef HAVE_JIT
@@ -125,53 +166,42 @@ void TerminateSignal(struct Machine *m, int sig) {
   Abort();
 }
 
-static void OnSigSegv(int sig, siginfo_t *si, void *ptr) {
-  int sig_linux;
-  RestoreIp(g_machine);
-  // TODO: Fix memory leak with FormatPml4t()
-  // TODO(jart): Fix address translation in non-linear mode.
-  g_machine->faultaddr = ToGuest(si->si_addr);
-  ERRF("SEGMENTATION FAULT (%s) AT ADDRESS %" PRIx64 " at RIP=%" PRIx64,
-       strsignal(sig), g_machine->faultaddr, g_machine->ip);
-  ERRF("ADDITIONAL INFORMATION\n\t%s\n%s", GetBacktrace(g_machine),
-       FormatPml4t(g_machine));
-#ifdef DEBUG
-  PrintBacktrace();
-#endif
-  if ((sig_linux = UnXlatSignal(sig)) != -1) {
-    DeliverSignalToUser(g_machine, sig_linux);
-  }
-  siglongjmp(g_machine->onhalt, kMachineSegmentationFault);
+static void OnFatalSystemSignal(int sig, siginfo_t *si, void *ptr) {
+  g_siginfo = *si;
+  unassert(g_machine);
+  unassert(g_machine->canhalt);
+  siglongjmp(g_machine->onhalt, kMachineFatalSystemSignal);
 }
 
 static int Exec(char *execfn, char *prog, char **argv, char **envp) {
   int i;
   sigset_t oldmask;
-  struct Machine *old;
+  struct Machine *m, *old;
   if ((old = g_machine)) KillOtherThreads(old->system);
-  unassert((g_machine = NewMachine(NewSystem(XED_MODE_LONG), 0)));
+  unassert((g_machine = m = NewMachine(NewSystem(XED_MODE_LONG), 0)));
 #ifdef HAVE_JIT
-  if (FLAG_nojit) DisableJit(&g_machine->system->jit);
+  if (FLAG_nojit) DisableJit(&m->system->jit);
 #endif
-  g_machine->system->exec = Exec;
+  m->system->exec = Exec;
   if (!old) {
     // this is the first time a program is being loaded
-    LoadProgram(g_machine, execfn, prog, argv, envp);
-    SetupCod(g_machine);
+    LoadProgram(m, execfn, prog, argv, envp);
+    SetupCod(m);
     for (i = 0; i < 10; ++i) {
-      AddStdFd(&g_machine->system->fds, i);
+      AddStdFd(&m->system->fds, i);
     }
   } else {
+    unassert(!m->sysdepth);
+    unassert(!m->pagelocks.i);
     unassert(!FreeVirtual(old->system, -0x800000000000, 0x1000000000000));
     for (i = 1; i <= 64; ++i) {
       if (Read64(old->system->hands[i - 1].handler) == SIG_IGN_LINUX) {
-        Write64(g_machine->system->hands[i - 1].handler, SIG_IGN_LINUX);
+        Write64(m->system->hands[i - 1].handler, SIG_IGN_LINUX);
       }
     }
-    memcpy(g_machine->system->rlim, old->system->rlim,
-           sizeof(old->system->rlim));
-    LoadProgram(g_machine, execfn, prog, argv, envp);
-    g_machine->system->fds.list = old->system->fds.list;
+    memcpy(m->system->rlim, old->system->rlim, sizeof(old->system->rlim));
+    LoadProgram(m, execfn, prog, argv, envp);
+    m->system->fds.list = old->system->fds.list;
     old->system->fds.list = 0;
     // releasing the execve() lock must come after unlocking fds
     memcpy(&oldmask, &old->system->exec_sigmask, sizeof(oldmask));
@@ -181,16 +211,7 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
     // restore the signal mask we had before execve() was called
     unassert(!pthread_sigmask(SIG_SETMASK, &oldmask, 0));
   }
-  // meta interpreter loop
-  for (;;) {
-    if (!sigsetjmp(g_machine->onhalt, 1)) {
-      g_machine->canhalt = true;
-      Actor(g_machine);
-    }
-    if (IsMakingPath(g_machine)) {
-      AbandonPath(g_machine);
-    }
-  }
+  Blink(m);
 }
 
 static void Print(int fd, const char *s) {
@@ -270,6 +291,7 @@ static void GetOpts(int argc, char *argv[]) {
 
 static void HandleSigs(void) {
   struct sigaction sa;
+  signal(SIGPIPE, SIG_IGN);
   sigfillset(&sa.sa_mask);
   sa.sa_flags = 0;
 #ifdef HAVE_THREADS
@@ -280,12 +302,11 @@ static void HandleSigs(void) {
   unassert(!sigaction(SIGINT, &sa, 0));
   unassert(!sigaction(SIGQUIT, &sa, 0));
   unassert(!sigaction(SIGHUP, &sa, 0));
-  unassert(!sigaction(SIGPIPE, &sa, 0));
   unassert(!sigaction(SIGTERM, &sa, 0));
   unassert(!sigaction(SIGXCPU, &sa, 0));
   unassert(!sigaction(SIGXFSZ, &sa, 0));
 #if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__)
-  sa.sa_sigaction = OnSigSegv;
+  sa.sa_sigaction = OnFatalSystemSignal;
   sa.sa_flags = SA_SIGINFO;
   unassert(!sigaction(SIGBUS, &sa, 0));
   unassert(!sigaction(SIGILL, &sa, 0));
@@ -303,7 +324,10 @@ void exit(int status) {
 
 int main(int argc, char *argv[]) {
   SetupWeb();
+  GetStartDir();
+#ifndef DISABLE_STRACE
   setlocale(LC_ALL, "");
+#endif
   // Ensure utf-8 is printed correctly on windows, this method
   // has issues(http://stackoverflow.com/a/10884364/4279) but
   // should work for at least windows 7 and newer.
@@ -313,7 +337,10 @@ int main(int argc, char *argv[]) {
   g_blink_path = argc > 0 ? argv[0] : 0;
   WriteErrorInit();
   GetOpts(argc, argv);
-  if (optind_ == argc) PrintUsage(argc, argv, 48, 2);
+  InitMap();
+  if (optind_ == argc) {
+    PrintUsage(argc, argv, 48, 2);
+  }
 #ifndef DISABLE_OVERLAYS
   if (SetOverlays(FLAG_overlays, true)) {
     WriteErrorString("bad blink overlays spec; see log for details\n");

@@ -17,46 +17,76 @@
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "blink/builtin.h"
 #include "blink/elf.h"
 #include "blink/endian.h"
 #include "blink/log.h"
+#include "blink/macros.h"
+#include "blink/map.h"
 #include "blink/util.h"
 
-void CheckElfAddress(const Elf64_Ehdr_ *elf, size_t mapsize, intptr_t addr,
+i64 GetElfMemorySize(const Elf64_Ehdr_ *ehdr, size_t size, i64 *base) {
+  size_t off;
+  unsigned i;
+  i64 x, y, lo, hi, res;
+  const Elf64_Phdr_ *phdr;
+  lo = INT64_MAX;
+  hi = INT64_MIN;
+  if (Read64(ehdr->phoff) < size) {
+    for (i = 0; i < Read16(ehdr->phnum); ++i) {
+      off = Read64(ehdr->phoff) + Read16(ehdr->phentsize) * i;
+      if (off + Read16(ehdr->phentsize) > size) return -1;
+      phdr = (const Elf64_Phdr_ *)((const u8 *)ehdr + off);
+      if (Read32(phdr->type) == PT_LOAD_) {
+        x = Read64(phdr->vaddr);
+        if (Add(x, Read64(phdr->memsz), &y)) return -1;
+        lo = MIN(x, lo);
+        hi = MAX(y, hi);
+      }
+    }
+  }
+  lo &= -GetSystemPageSize();
+  if (Sub(hi, lo, &res)) return -1;
+  *base = lo;
+  return res;
+}
+
+void CheckElfAddress(const Elf64_Ehdr_ *elf, size_t mapsize, uintptr_t addr,
                      size_t addrsize) {
-  if (addr < (intptr_t)elf || addr + addrsize > (intptr_t)elf + mapsize) {
-    LOGF("CheckElfAddress failed: %#" PRIxPTR "..%#" PRIxPTR " %p..%#" PRIxPTR,
-         addr, addr + addrsize, (void *)elf, (intptr_t)elf + mapsize);
+  if (addr < (uintptr_t)elf || addr + addrsize > (uintptr_t)elf + mapsize) {
+    ERRF("CheckElfAddress failed: %#" PRIxPTR "..%#" PRIxPTR " %p..%#" PRIxPTR,
+         addr, addr + addrsize, (void *)elf, (uintptr_t)elf + mapsize);
     exit(202);
   }
 }
 
 char *GetElfString(const Elf64_Ehdr_ *elf, size_t mapsize, const char *strtab,
                    u32 rva) {
-  intptr_t addr = (intptr_t)strtab + rva;
+  uintptr_t addr = (uintptr_t)strtab + rva;
   CheckElfAddress(elf, mapsize, addr, 0);
   CheckElfAddress(elf, mapsize, addr,
-                  strnlen((char *)addr, (intptr_t)elf + mapsize - addr) + 1);
+                  strnlen((char *)addr, (uintptr_t)elf + mapsize - addr) + 1);
   return (char *)addr;
 }
 
 Elf64_Phdr_ *GetElfSegmentHeaderAddress(const Elf64_Ehdr_ *elf, size_t mapsize,
                                         u64 i) {
-  intptr_t addr = ((intptr_t)elf + (intptr_t)Read64(elf->phoff) +
-                   (intptr_t)Read16(elf->phentsize) * i);
+  uintptr_t addr = ((uintptr_t)elf + (uintptr_t)Read64(elf->phoff) +
+                    (uintptr_t)Read16(elf->phentsize) * i);
   CheckElfAddress(elf, mapsize, addr, Read16(elf->phentsize));
   return (Elf64_Phdr_ *)addr;
 }
 
 void *GetElfSectionAddress(const Elf64_Ehdr_ *elf, size_t mapsize,
                            const Elf64_Shdr_ *shdr) {
-  intptr_t addr, size;
-  addr = (intptr_t)elf + (intptr_t)Read64(shdr->offset);
-  size = (intptr_t)Read64(shdr->size);
+  uintptr_t addr, size;
+  addr = (uintptr_t)elf + (uintptr_t)Read64(shdr->offset);
+  size = (uintptr_t)Read64(shdr->size);
   CheckElfAddress(elf, mapsize, addr, size);
   return (void *)addr;
 }
@@ -77,9 +107,9 @@ const char *GetElfSectionName(const Elf64_Ehdr_ *elf, size_t mapsize,
 
 Elf64_Shdr_ *GetElfSectionHeaderAddress(const Elf64_Ehdr_ *elf, size_t mapsize,
                                         u16 i) {
-  intptr_t addr;
-  addr = ((intptr_t)elf + (intptr_t)Read64(elf->shoff) +
-          (intptr_t)Read16(elf->shentsize) * i);
+  uintptr_t addr;
+  addr = ((uintptr_t)elf + (uintptr_t)Read64(elf->shoff) +
+          (uintptr_t)Read16(elf->shentsize) * i);
   CheckElfAddress(elf, mapsize, addr, Read16(elf->shentsize));
   return (Elf64_Shdr_ *)addr;
 }

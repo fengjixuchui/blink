@@ -8,13 +8,17 @@ TEST_FUNC_OBJS = $(TEST_FUNC_SRCS:%.c=o/$(MODE)/x86_64/%.o)
 TEST_FUNC_BINS = $(TEST_FUNC_SRCS:%.c=o/$(MODE)/%.elf)
 TEST_FUNC_COMS = $(TEST_FUNC_SRCS:%.c=o/$(MODE)/%.com)
 TEST_FUNC_CHECKS = $(TEST_FUNC_SRCS:%.c=o/$(MODE)/%.com.ok)
-TEST_FUNC_EMULATES = $(foreach ARCH,$(ARCHITECTURES),$(foreach SRC,$(TEST_FUNC_SRCS),$(SRC:%.c=o/$(MODE)/$(ARCH)/%.elf.emulates)))
+TEST_FUNC_EMULATES = $(foreach ARCH,$(ARCHITECTURES),$(foreach SRC,$(filter-out $(TEST_FUNC_NOEMU),$(TEST_FUNC_SRCS)),$(SRC:%.c=o/$(MODE)/$(ARCH)/%.elf.emulates)))
+
+# qemu static doesn't appear to emulate this correctly
+TEST_FUNC_NOEMU = test/func/busted_test.c
 
 TEST_FUNC_LINK =							\
 		$(VM)							\
 		o/third_party/gcc/x86_64/bin/x86_64-linux-musl-gcc	\
 		-static							\
-		-Wl,-z,common-page-size=65536,-z,max-page-size=65536	\
+		-Wl,-z,max-page-size=65536				\
+		-Wl,-z,common-page-size=65536				\
 		$<							\
 		-o $@
 
@@ -24,7 +28,7 @@ o/$(MODE)/test/func/%.com.ok:						\
 	$<
 	@touch $@
 
-$(TEST_FUNC_OBJS): private CFLAGS = -O
+$(TEST_FUNC_OBJS): private CFLAGS = -O -g
 $(TEST_FUNC_OBJS): private CPPFLAGS = -isystem.
 
 .PRECIOUS: o/$(MODE)/test/func/%.elf
@@ -53,18 +57,10 @@ o/$(MODE)/test/func/%.com:						\
 	@echo "o/$(MODE)/blink/blink -m $< || exit" >>$@
 	@echo "echo [test] o/$(MODE)/blink/blink -j $< >&2" >>$@
 	@echo "o/$(MODE)/blink/blink -j $< || exit" >>$@
-	@chmod +x $@
-
-.PRECIOUS: o/$(MODE)/test/func/mmap4096_test.com
-o/$(MODE)/test/func/mmap4096_test.com:					\
-		o/$(MODE)/test/func/mmap4096_test.elf			\
-		o/$(MODE)/blink/blink
-	@mkdir -p $(@D)
-	@echo "#!/bin/sh" >$@
-	@echo "echo [test] o/$(MODE)/blink/blink -jm $< >&2" >>$@
-	@echo "o/$(MODE)/blink/blink -jm $< || exit" >>$@
-	@echo "echo [test] o/$(MODE)/blink/blink -m $< >&2" >>$@
-	@echo "o/$(MODE)/blink/blink -m $< || exit" >>$@
+	@echo "echo [test] o/$(MODE)/blink/blink -L/dev/null -sss $< >&2" >>$@
+	@echo "o/$(MODE)/blink/blink -L/dev/null -sss $< || exit" >>$@
+	@echo "echo [test] o/$(MODE)/blink/blink -L/dev/null -msss $< >&2" >>$@
+	@echo "o/$(MODE)/blink/blink -L/dev/null -msss $< || exit" >>$@
 	@chmod +x $@
 
 .PHONY: o/$(MODE)/test/func

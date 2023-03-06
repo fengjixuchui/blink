@@ -22,8 +22,10 @@
 #include <unistd.h>
 
 #include "blink/assert.h"
+#include "blink/atomic.h"
 #include "blink/bitscan.h"
 #include "blink/endian.h"
+#include "blink/ldbl.h"
 #include "blink/linux.h"
 #include "blink/log.h"
 #include "blink/macros.h"
@@ -47,21 +49,37 @@ bool IsSignalIgnoredByDefault(int sig) {
          sig == SIGWINCH_LINUX;
 }
 
-bool IsSignalTooDangerousToIgnore(int sig) {
-  return sig == SIGFPE_LINUX ||  //
-         sig == SIGILL_LINUX ||  //
-         sig == SIGSEGV_LINUX;
+bool IsSignalSerious(int sig) {
+  return sig == SIGFPE_LINUX ||   //
+         sig == SIGILL_LINUX ||   //
+         sig == SIGBUS_LINUX ||   //
+         sig == SIGQUIT_LINUX ||  //
+         sig == SIGTRAP_LINUX ||  //
+         sig == SIGSEGV_LINUX ||  //
+         sig == SIGSTOP_LINUX ||  //
+         sig == SIGKILL_LINUX;
 }
 
 void DeliverSignal(struct Machine *m, int sig, int code) {
+  int i;
   u64 sp;
   struct SignalFrame sf;
   SYS_LOGF("delivering %s", DescribeSignal(sig));
   if (IsMakingPath(g_machine)) AbandonPath(g_machine);
   memset(&sf, 0, sizeof(sf));
   // capture the current state of the machine
-  Write32(sf.si.si_signo, sig);
-  Write32(sf.si.si_code, code);
+  Write32(sf.si.signo, sig);
+  Write32(sf.si.code, code);
+  if (sig == SIGILL_LINUX ||   //
+      sig == SIGFPE_LINUX ||   //
+      sig == SIGSEGV_LINUX ||  //
+      sig == SIGBUS_LINUX ||   //
+      sig == SIGTRAP_LINUX) {
+    Write64(sf.si.addr, m->faultaddr);
+  }
+  if (sig == SIGTRAP_LINUX) {
+    Write64(sf.uc.trapno, m->trapno);
+  }
   Write64(sf.uc.sigmask, m->sigmask);
   memcpy(sf.uc.r8, m->r8, 8);
   memcpy(sf.uc.r9, m->r9, 8);
@@ -88,9 +106,11 @@ void DeliverSignal(struct Machine *m, int sig, int code) {
   Write16(sf.fp.fop, m->fpu.op);
   Write64(sf.fp.rip, m->fpu.ip);
   Write64(sf.fp.rdp, m->fpu.dp);
-  memcpy(sf.fp.st, m->fpu.st, 128);
+  for (i = 0; i < 8; ++i) {
+    SerializeLdbl(sf.fp.st[i], m->fpu.st[i]);
+  }
 #endif
-  memcpy(sf.fp.xmm, m->xmm, 256);
+  memcpy(sf.fp.xmm, m->xmm, sizeof(sf.fp.xmm));
   // set the thread signal mask to the one specified by the signal
   // handler. by default, the signal being delivered will be added
   // within the mask unless the guest program specifies SA_NODEFER
@@ -141,6 +161,7 @@ void DeliverSignal(struct Machine *m, int sig, int code) {
 }
 
 void SigRestore(struct Machine *m) {
+  int i;
   struct SignalFrame sf;
   // when the guest returns from the signal handler, it'll call a
   // pointer to the sa_restorer trampoline which is assumed to be
@@ -151,8 +172,8 @@ void SigRestore(struct Machine *m) {
   //
   // which doesn't change SP, thus we can restore the SignalFrame
   // and load any change that the guest made to the machine state
-  SIG_LOGF("restoring from signal @ %" PRIx64, Read64(m->sp) - 8);
-  CopyFromUserRead(m, &sf, Read64(m->sp) - 8, sizeof(sf));
+  SYS_LOGF("rt_sigreturn(%#" PRIx64 ")", Read64(m->sp) - 8);
+  unassert(!CopyFromUserRead(m, &sf, Read64(m->sp) - 8, sizeof(sf)));
   m->ip = Read64(sf.uc.rip);
   m->flags = Read64(sf.uc.eflags);
   m->sigmask = Read64(sf.uc.sigmask);
@@ -172,18 +193,21 @@ void SigRestore(struct Machine *m) {
   memcpy(m->dx, sf.uc.rdx, 8);
   memcpy(m->ax, sf.uc.rax, 8);
   memcpy(m->cx, sf.uc.rcx, 8);
-  memcpy(m->sp, sf.uc.rsp, 8);
   m->fpu.cw = Read16(sf.fp.cwd);
+  memcpy(m->sp, sf.uc.rsp, 8);
 #ifndef DISABLE_X87
   m->fpu.sw = Read16(sf.fp.swd);
   m->fpu.tw = Read16(sf.fp.ftw);
   m->fpu.op = Read16(sf.fp.fop);
   m->fpu.ip = Read64(sf.fp.rip);
   m->fpu.dp = Read64(sf.fp.rdp);
-  memcpy(m->fpu.st, sf.fp.st, 128);
+  for (i = 0; i < 8; ++i) {
+    m->fpu.st[i] = DeserializeLdbl(sf.fp.st[i]);
+  }
 #endif
-  memcpy(m->xmm, sf.fp.xmm, 256);
+  memcpy(m->xmm, sf.fp.xmm, sizeof(sf.fp.xmm));
   m->restored = true;
+  atomic_store_explicit(&m->attention, true, memory_order_release);
 }
 
 static int ConsumeSignalImpl(struct Machine *m, int *delivered, bool *restart) {
@@ -193,44 +217,31 @@ static int ConsumeSignalImpl(struct Machine *m, int *delivered, bool *restart) {
   if (delivered) *delivered = 0;
   if (restart) *restart = true;
   // look for a pending signal that isn't currently masked
-  for (signals = m->signals; signals; signals &= ~(1ull << (sig - 1))) {
+  while ((signals = m->signals & ~m->sigmask)) {
     sig = bsr(signals) + 1;
-    if (~m->sigmask & (1ull << (sig - 1))) {
-      m->signals &= ~(1ull << (sig - 1));
-      handler = Read64(m->system->hands[sig - 1].handler);
-      if (handler == SIG_DFL_LINUX) {
-        if (IsSignalIgnoredByDefault(sig)) {
-          SIG_LOGF("default action is to ignore signal %s",
-                   DescribeSignal(sig));
-          return 0;
-        } else {
-          SIG_LOGF("default action is to terminate upon signal %s",
-                   DescribeSignal(sig));
-          return sig;
-        }
-      } else if (handler == SIG_IGN_LINUX) {
-        if (!IsSignalTooDangerousToIgnore(sig)) {
-          SIG_LOGF("explicitly ignoring signal %s", DescribeSignal(sig));
-          return 0;
-        } else {
-          SIG_LOGF("won't ignore signal %s", DescribeSignal(sig));
-          return sig;
-        }
+    m->signals &= ~(1ull << (sig - 1));
+    handler = Read64(m->system->hands[sig - 1].handler);
+    if (handler == SIG_DFL_LINUX) {
+      if (IsSignalIgnoredByDefault(sig)) {
+        SYS_LOGF("ignoring %s", DescribeSignal(sig));
+        return 0;
+      } else {
+        SIG_LOGF("default action is to terminate upon signal %s",
+                 DescribeSignal(sig));
+        return sig;
       }
-      if (delivered) {
-        *delivered = sig;
-      }
-      if (restart) {
-        *restart =
-            !!(Read64(m->system->hands[sig - 1].flags) & SA_RESTART_LINUX);
-      }
-      DeliverSignal(m, sig, SI_KERNEL_LINUX);
+    } else if (handler == SIG_IGN_LINUX) {
+      SYS_LOGF("explicitly ignoring %s", DescribeSignal(sig));
       return 0;
-    } else if (IsSignalTooDangerousToIgnore(sig)) {
-      // signal is too dangerous to be deferred
-      // TODO(jart): permit defer if sent by kill() or tkill()
-      return sig;
     }
+    if (delivered) {
+      *delivered = sig;
+    }
+    if (restart) {
+      *restart = !!(Read64(m->system->hands[sig - 1].flags) & SA_RESTART_LINUX);
+    }
+    DeliverSignal(m, sig, SI_KERNEL_LINUX);
+    return 0;
   }
   return 0;
 }
@@ -246,6 +257,21 @@ int ConsumeSignal(struct Machine *m, int *delivered, bool *restart) {
 
 void EnqueueSignal(struct Machine *m, int sig) {
   if (m && (1 <= sig && sig <= 64)) {
-    m->signals |= 1ul << (sig - 1);
+    if ((m->signals |= 1ul << (sig - 1)) & ~m->sigmask) {
+      atomic_store_explicit(&m->attention, true, memory_order_release);
+    }
+  }
+}
+
+void CheckForSignals(struct Machine *m) {
+  int sig;
+  if (atomic_load_explicit(&m->killed, memory_order_acquire)) {
+    SysExit(m, 0);
+  } else if (m->signals & ~m->sigmask) {
+    if ((sig = ConsumeSignal(m, 0, 0))) {
+      TerminateSignal(m, sig);
+    }
+  } else {
+    atomic_store_explicit(&m->attention, false, memory_order_release);
   }
 }

@@ -139,7 +139,7 @@ struct JitHooks {
   unsigned n;
   _Atomic(unsigned) i;
   _Atomic(int) *func;
-  _Atomic(intptr_t) *virt;
+  _Atomic(uintptr_t) *virt;
 };
 
 struct Jit {
@@ -159,7 +159,6 @@ extern const u8 kJitArg[4];
 int ShutdownJit(void);
 int InitJit(struct Jit *);
 int DestroyJit(struct Jit *);
-int DisableJit(struct Jit *);
 int FixJitProtection(struct Jit *);
 bool CanJitForImmediateEffect(void) nosideeffect;
 bool AppendJit(struct JitBlock *, const void *, long);
@@ -176,7 +175,7 @@ bool AppendJitSetReg(struct JitBlock *, int, u64);
 bool AppendJitMovReg(struct JitBlock *, int, int);
 bool FinishJit(struct Jit *, struct JitBlock *, u64);
 bool RecordJitJump(struct JitBlock *, u64, int);
-intptr_t GetJitHook(struct Jit *, u64, intptr_t);
+uintptr_t GetJitHook(struct Jit *, u64, uintptr_t);
 bool SetJitHook(struct Jit *, u64, intptr_t);
 int ClearJitHooks(struct Jit *);
 
@@ -198,8 +197,24 @@ static inline long GetJitRemaining(const struct JitBlock *jb) {
  *
  * @return absolute instruction pointer memory address in bytes
  */
-static inline intptr_t GetJitPc(const struct JitBlock *jb) {
-  return (intptr_t)jb->addr + jb->index;
+static inline uintptr_t GetJitPc(const struct JitBlock *jb) {
+  return (uintptr_t)jb->addr + jb->index;
+}
+
+/**
+ * Disables Just-In-Time threader.
+ */
+static inline int DisableJit(struct Jit *jit) {
+  atomic_store_explicit(&jit->disabled, true, memory_order_relaxed);
+  return 0;
+}
+
+/**
+ * Enables Just-In-Time threader.
+ */
+static inline int EnableJit(struct Jit *jit) {
+  atomic_store_explicit(&jit->disabled, false, memory_order_relaxed);
+  return 0;
 }
 
 /**

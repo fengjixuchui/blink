@@ -19,12 +19,23 @@
 #include "blink/builtin.h"
 #include "blink/flag.h"
 
+bool FLAG_wantjit;
 bool FLAG_nolinear;
 bool FLAG_noconnect;
 bool FLAG_nologstderr;
 bool FLAG_alsologtostderr;
 
 int FLAG_strace;
+int FLAG_vabits;
+
+u64 FLAG_skew;
+u64 FLAG_vaspace;
+u64 FLAG_aslrmask;
+u64 FLAG_stacktop;
+u64 FLAG_imagestart;
+u64 FLAG_automapend;
+u64 FLAG_automapstart;
+u64 FLAG_dyninterpaddr;
 
 const char *FLAG_logpath;
 

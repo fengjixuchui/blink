@@ -61,6 +61,9 @@
 
 void OpCpuid(P) {
   u32 ax, bx, cx, dx, jit;
+  if (m->trapcpuid) {
+    ThrowSegmentationFault(m, 0);
+  }
   ax = bx = cx = dx = 0;
   switch (Get32(m->ax)) {
     case 0:
@@ -119,11 +122,13 @@ void OpCpuid(P) {
       switch (Get32(m->cx)) {
         case 0:
           bx |= 1 << 0;   // fsgsbase
-          bx |= 1 << 8;   // bmi2
           bx |= 1 << 9;   // erms
           bx |= 1 << 18;  // rdseed
-          bx |= 1 << 19;  // adx
           cx |= 1 << 22;  // rdpid
+#ifndef DISABLE_BMI2
+          bx |= 1 << 8;   // bmi2
+          bx |= 1 << 19;  // adx
+#endif
           break;
         default:
           break;
@@ -137,6 +142,7 @@ void OpCpuid(P) {
       dx |= 1 << 8;     // cmpxchg8b
       dx |= 1 << 11;    // syscall
       dx |= 1 << 15;    // cmov
+      dx |= 1 << 20;    // nx
       dx |= 1 << 23;    // mmx
       dx |= 1 << 24;    // fxsave
       dx |= 1 << 27;    // rdtscp

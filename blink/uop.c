@@ -83,6 +83,8 @@ MICRO_OP static void Convert16(P) {
 }
 const nexgen32e_f kConvert[] = {Convert16, Convert32, Convert64};
 
+#ifndef DISABLE_BMI2
+
 MICRO_OP i64 Adcx32(u64 x, u64 y, struct Machine *m) {
   u32 t = x + !!(m->flags & CF);
   u32 z = t + y;
@@ -112,6 +114,8 @@ MICRO_OP i64 Adox64(u64 x, u64 y, struct Machine *m) {
   m->flags = (m->flags & ~OF) | c << FLAGS_OF;
   return z;
 }
+
+#endif /* DISABLE_BMI2 */
 
 ////////////////////////////////////////////////////////////////////////////////
 // BRANCHING
@@ -192,12 +196,28 @@ MICRO_OP u64 Pick(u32 p, u64 x, u64 y) {
 ////////////////////////////////////////////////////////////////////////////////
 // FLOATING POINT
 
+MICRO_OP void OpPsdMuls1(u8 *p, struct Machine *m, long reg) {
+  union FloatPun x, y;
+  y.i = Read32(p);
+  x.i = Read32(m->xmm[reg]);
+  x.f = x.f * y.f;
+  Write32(m->xmm[reg], x.i);
+}
+
 MICRO_OP void OpPsdMuld1(u8 *p, struct Machine *m, long reg) {
   union DoublePun x, y;
   y.i = Read64(p);
   x.i = Read64(m->xmm[reg]);
   x.f = x.f * y.f;
   Write64(m->xmm[reg], x.i);
+}
+
+MICRO_OP void OpPsdAdds1(u8 *p, struct Machine *m, long reg) {
+  union FloatPun x, y;
+  y.i = Read32(p);
+  x.i = Read32(m->xmm[reg]);
+  x.f = x.f + y.f;
+  Write32(m->xmm[reg], x.i);
 }
 
 MICRO_OP void OpPsdAddd1(u8 *p, struct Machine *m, long reg) {
@@ -208,12 +228,28 @@ MICRO_OP void OpPsdAddd1(u8 *p, struct Machine *m, long reg) {
   Write64(m->xmm[reg], x.i);
 }
 
+MICRO_OP void OpPsdSubs1(u8 *p, struct Machine *m, long reg) {
+  union FloatPun x, y;
+  y.i = Read32(p);
+  x.i = Read32(m->xmm[reg]);
+  x.f = x.f - y.f;
+  Write32(m->xmm[reg], x.i);
+}
+
 MICRO_OP void OpPsdSubd1(u8 *p, struct Machine *m, long reg) {
   union DoublePun x, y;
   y.i = Read64(p);
   x.i = Read64(m->xmm[reg]);
   x.f = x.f - y.f;
   Write64(m->xmm[reg], x.i);
+}
+
+MICRO_OP void OpPsdDivs1(u8 *p, struct Machine *m, long reg) {
+  union FloatPun x, y;
+  y.i = Read32(p);
+  x.i = Read32(m->xmm[reg]);
+  x.f = x.f / y.f;
+  Write32(m->xmm[reg], x.i);
 }
 
 MICRO_OP void OpPsdDivd1(u8 *p, struct Machine *m, long reg) {
@@ -224,12 +260,28 @@ MICRO_OP void OpPsdDivd1(u8 *p, struct Machine *m, long reg) {
   Write64(m->xmm[reg], x.i);
 }
 
+MICRO_OP void OpPsdMins1(u8 *p, struct Machine *m, long reg) {
+  union FloatPun x, y;
+  y.i = Read32(p);
+  x.i = Read32(m->xmm[reg]);
+  x.f = MIN(x.f, y.f);
+  Write32(m->xmm[reg], x.i);
+}
+
 MICRO_OP void OpPsdMind1(u8 *p, struct Machine *m, long reg) {
   union DoublePun x, y;
   y.i = Read64(p);
   x.i = Read64(m->xmm[reg]);
   x.f = MIN(x.f, y.f);
   Write64(m->xmm[reg], x.i);
+}
+
+MICRO_OP void OpPsdMaxs1(u8 *p, struct Machine *m, long reg) {
+  union FloatPun x, y;
+  y.i = Read32(p);
+  x.i = Read32(m->xmm[reg]);
+  x.f = MAX(x.f, y.f);
+  Write32(m->xmm[reg], x.i);
 }
 
 MICRO_OP void OpPsdMaxd1(u8 *p, struct Machine *m, long reg) {
@@ -252,6 +304,18 @@ MICRO_OP void Int32ToDouble(i32 x, struct Machine *m, long reg) {
   Put64(m->xmm[reg], d.i);
 }
 
+MICRO_OP void Int64ToFloat(i64 x, struct Machine *m, long reg) {
+  union FloatPun d;
+  d.f = x;
+  Put32(m->xmm[reg], d.i);
+}
+
+MICRO_OP void Int32ToFloat(i32 x, struct Machine *m, long reg) {
+  union FloatPun d;
+  d.f = x;
+  Put32(m->xmm[reg], d.i);
+}
+
 #ifdef HAVE_JIT
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -265,19 +329,16 @@ MICRO_OP void CountOp(long *instructions_jitted_ptr) {
 // PROGRAM COUNTER
 
 MICRO_OP void AddIp(struct Machine *m, long oplen) {
-  // LOGF("AddIp %" PRIx64 " %ld", m->ip, oplen);
   m->oplen = oplen;
   m->ip += oplen;
 }
 
 MICRO_OP void SkewIp(struct Machine *m, long oplen, long delta) {
-  // LOGF("SkewIp %" PRIx64 " %ld", m->ip, delta);
   m->oplen = oplen;
   m->ip += delta;
 }
 
 MICRO_OP void AdvanceIp(struct Machine *m, long oplen) {
-  // LOGF("AdvanceIp %" PRIx64 " %ld", m->ip, oplen);
   m->ip += oplen;
 }
 
@@ -1064,6 +1125,7 @@ MICRO_OP void MulAxDx(u64 x, struct Machine *m) {
   Put64(m->ax, z);
   Put64(m->dx, z >> 64);
 }
+#ifndef DISABLE_BMI2
 MICRO_OP void Mulx64(u64 x,              //
                      struct Machine *m,  //
                      long vreg,          //
@@ -1073,7 +1135,8 @@ MICRO_OP void Mulx64(u64 x,              //
   Put64(m->weg[vreg], z);
   Put64(m->weg[rexrreg], z >> 64);
 }
-#endif
+#endif /* DISABLE_BMI2 */
+#endif /* HAVE_INT128 */
 
 MICRO_OP i64 JustNeg(u64 x) {
   return -x;
@@ -1459,7 +1522,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
         } else {
           LOG_ONCE(LOGF("jit micro-operation at address %" PRIxPTR
                         " has branches or static memory references",
-                        (intptr_t)fun));
+                        (uintptr_t)fun));
           AppendJitCall(m->path.jb, fun);
         }
         break;
@@ -1517,7 +1580,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
       case 'B':  // res0 = GetRegOrMem(RexbRm)
         if (IsModrmRegister(rde)) {
           GetReg(A, log2sz, RexbRm(rde), RexRexb(rde));
-        } else if (HasLinearMapping(m)) {
+        } else if (HasLinearMapping()) {
           if (!kSkew) {
             Jitter(A,
                    "L"         // load effective address
@@ -1552,7 +1615,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
           ItemsRequired(1);
           if (IsModrmRegister(rde)) {
             PutReg(A, log2sz, RexbRm(rde), RexRexb(rde));
-          } else if (HasLinearMapping(m)) {
+          } else if (HasLinearMapping()) {
             if (!kSkew) {
               Jitter(A,
                      "s3="       // sav3 = <pop>
@@ -1599,7 +1662,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                    "t"      // arg0 = res0
                    "m",     // call micro-op (xmm put register)
                    RexbRm(rde), kPutReg[log2sz]);
-          } else if (HasLinearMapping(m)) {
+          } else if (HasLinearMapping()) {
             if (!kSkew) {
               Jitter(
                   A,
@@ -1732,7 +1795,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                  !log2sz      ? GetBegPtr
                  : log2sz < 4 ? GetWegPtr
                               : GetXmmPtr);
-        } else if (HasLinearMapping(m)) {
+        } else if (HasLinearMapping()) {
           if (!kSkew) {
             Jitter(A, "L");  // load effective address
           } else {

@@ -37,6 +37,7 @@
 #include "blink/macros.h"
 #include "blink/map.h"
 #include "blink/overlays.h"
+#include "blink/random.h"
 #include "blink/tunables.h"
 #include "blink/util.h"
 #include "blink/x86.h"
@@ -61,7 +62,7 @@ static i64 LoadElfLoadSegment(struct Machine *m, const char *path, void *image,
   i64 memsz = Read64(phdr->memsz);
   i64 offset = Read64(phdr->offset);
   i64 filesz = Read64(phdr->filesz);
-  long pagesize = HasLinearMapping(m) ? GetSystemPageSize() : 4096;
+  long pagesize = HasLinearMapping() ? GetSystemPageSize() : 4096;
   i64 start = ROUNDDOWN(vaddr, pagesize);
   i64 end = ROUNDUP(vaddr + memsz, pagesize);
   long skew = vaddr & (pagesize - 1);
@@ -76,6 +77,7 @@ static i64 LoadElfLoadSegment(struct Machine *m, const char *path, void *image,
            vaddr, vaddr + memsz, path);
 
   ELF_LOGF("PROGRAM HEADER");
+  ELF_LOGF("  path = %s", path);
   ELF_LOGF("  aslr = %" PRIx64, aslr);
   ELF_LOGF("  flags = %s%s%s",          //
            (flags & PF_R_ ? "R" : ""),  //
@@ -85,7 +87,7 @@ static i64 LoadElfLoadSegment(struct Machine *m, const char *path, void *image,
   ELF_LOGF("  memsz = %" PRIx64, memsz);
   ELF_LOGF("  offset = %" PRIx64, offset);
   ELF_LOGF("  filesz = %" PRIx64, filesz);
-  ELF_LOGF("  pagesize = %" PRIx64, pagesize);
+  ELF_LOGF("  pagesize = %ld", pagesize);
   ELF_LOGF("  start = %" PRIx64, start);
   ELF_LOGF("  end = %" PRIx64, end);
   ELF_LOGF("  skew = %lx", skew);
@@ -135,8 +137,8 @@ static i64 LoadElfLoadSegment(struct Machine *m, const char *path, void *image,
     if (vaddr > start && start + pagesize <= end) {
       unassert(vaddr < start + pagesize);
       ELF_LOGF("alloc %" PRIx64 "-%" PRIx64, start, start + pagesize);
-      if (ReserveVirtual(s, start, pagesize, key, -1, 0, 0) == -1) {
-        LOGF("failed to allocate program header skew");
+      if (ReserveVirtual(s, start, pagesize, key, -1, 0, 0, 0) == -1) {
+        ERRF("failed to allocate program header skew");
         exit(127);
       }
       start += pagesize;
@@ -165,7 +167,8 @@ static i64 LoadElfLoadSegment(struct Machine *m, const char *path, void *image,
       // map the bulk of .text directly into memory without copying.
       ELF_LOGF("load %" PRIx64 "-%" PRIx64 " from %" PRIx64 "-%" PRIx64, start,
                start + bulk, offset, offset + bulk);
-      if (ReserveVirtual(s, start, bulk, key, fd, offset, 0) == -1) {
+      if (ReserveVirtual(s, start, bulk, PAGE_FILE | key, fd, offset, 0, 0) ==
+          -1) {
         ERRF("failed to map elf program header file data");
         exit(127);
       }
@@ -177,7 +180,7 @@ static i64 LoadElfLoadSegment(struct Machine *m, const char *path, void *image,
     if (start < end) {
       // allocate .bss zero-initialized memory.
       ELF_LOGF("alloc %" PRIx64 "-%" PRIx64, start, end);
-      if (ReserveVirtual(s, start, end - start, key, -1, 0, 0) == -1) {
+      if (ReserveVirtual(s, start, end - start, key, -1, 0, 0, 0) == -1) {
         ERRF("failed to allocate program header bss");
         exit(127);
       }
@@ -253,29 +256,60 @@ static bool IsHaikuExecutable(Elf64_Ehdr_ *ehdr, size_t size) {
 #endif
 }
 
+static bool IsShebangExecutable(void *image, size_t size) {
+  return size >= 2 && ((char *)image)[0] == '#' && ((char *)image)[1] == '!';
+}
+
+static void ExplainWhyItCantBeEmulated(const char *path, const char *reason) {
+  LOGF("%s: can't emulate: %s", path, reason);
+}
+
 bool IsSupportedExecutable(const char *path, void *image, size_t size) {
-  bool res;
   Elf64_Ehdr_ *ehdr;
   if (size >= sizeof(Elf64_Ehdr_) && READ32(image) == READ32("\177ELF")) {
     ehdr = (Elf64_Ehdr_ *)image;
-    res = (Read16(ehdr->type) == ET_EXEC_ ||  //
-           Read16(ehdr->type) == ET_DYN_) &&
-          ehdr->ident[EI_CLASS_] == ELFCLASS64_ &&
-          Read16(ehdr->machine) == EM_NEXGEN32E_ &&
-          !IsFreebsdExecutable(ehdr, size) &&  //
-          !IsOpenbsdExecutable(ehdr, size) &&  //
-          !IsHaikuExecutable(ehdr, size);
+    if (Read16(ehdr->type) != ET_EXEC_ &&  //
+        Read16(ehdr->type) != ET_DYN_) {
+      ExplainWhyItCantBeEmulated(path, "ELF is neither ET_EXEC or ET_DYN");
+      return false;
+    }
+    if (ehdr->ident[EI_CLASS_] != ELFCLASS64_) {
+      ExplainWhyItCantBeEmulated(path, "ELF is not 64-bit");
+      return false;
+    }
+    if (Read16(ehdr->machine) != EM_NEXGEN32E_) {
+      ExplainWhyItCantBeEmulated(path, "ELF is not AMD64");
+      return false;
+    }
+    if (IsFreebsdExecutable(ehdr, size)) {
+      ExplainWhyItCantBeEmulated(path, "ELF is FreeBSD executable");
+      return false;
+    }
+    if (IsOpenbsdExecutable(ehdr, size)) {
+      ExplainWhyItCantBeEmulated(path, "ELF is OpenBSD executable");
+      return false;
+    }
+    if (IsHaikuExecutable(ehdr, size)) {
+      ExplainWhyItCantBeEmulated(path, "ELF is Haiku executable");
+      return false;
+    }
 #if defined(__ELF__) && !defined(__linux)
-    if (res) LOGF("blink believes %s is an x86_64-linux executable", path);
+    LOGF("blink believes %s is an x86_64-linux executable", path);
 #endif
-    return res;
+    return true;
   }
-  return (size >= 4096 && (READ64(image) == READ64("MZqFpD='") ||    //
-                           READ64(image) == READ64("jartsr='"))) ||  //
-         endswith(path, ".bin");
+  if ((size >= 4096 && (READ64(image) == READ64("MZqFpD='") ||    //
+                        READ64(image) == READ64("jartsr='"))) ||  //
+      endswith(path, ".bin")) {
+    return true;
+  }
+  if (!IsShebangExecutable(image, size)) {
+    ExplainWhyItCantBeEmulated(path, "not ELF, not APE, and not a .bin file");
+  }
+  return false;
 }
 
-static void LoadFlatExecutable(struct Machine *m, intptr_t base,
+static void LoadFlatExecutable(struct Machine *m, uintptr_t base,
                                const char *prog, void *image, size_t imagesize,
                                int fd) {
   Elf64_Phdr_ phdr;
@@ -289,32 +323,58 @@ static void LoadFlatExecutable(struct Machine *m, intptr_t base,
   m->ip = base;
 }
 
-static bool LoadElf(struct Machine *m, struct Elf *elf, u64 aslr, int fd) {
+static i64 ChooseAslr(const Elf64_Ehdr_ *ehdr, size_t size, i64 dflt,
+                      i64 *base) {
+  i64 aslr;
+  if (GetElfMemorySize(ehdr, size, base) <= 0) {
+    ERRF("couldn't determine boundaries of loaded executable");
+    exit(127);
+  }
+  if (Read16(ehdr->type) == ET_DYN_ && !*base) {
+    aslr = dflt;
+    ELF_LOGF("choosing base skew %" PRIx64 " because dynamic", aslr);
+  } else {
+    aslr = 0;
+    ELF_LOGF("won't skew base since not dynamic");
+  }
+  *base += aslr;
+  if (!(*base & ~(GetSystemPageSize() - 1))) {
+    ERRF("won't load program to null base address");
+    exit(127);
+  }
+  return aslr;
+}
+
+static bool LoadElf(struct Machine *m,  //
+                    struct Elf *elf,    //
+                    Elf64_Ehdr_ *ehdr,  //
+                    size_t esize,       //
+                    int fd) {
   int i;
   Elf64_Phdr_ *phdr;
   i64 end = INT64_MIN;
   bool execstack = true;
-  elf->aslr = aslr;
-  m->ip = elf->base = elf->at_entry = Read64(elf->ehdr->entry) + aslr;
-  elf->at_phent = Read16(elf->ehdr->phentsize);
+  elf->aslr = ChooseAslr(ehdr, esize, m->system->brk, &elf->base);
+  m->ip = elf->at_entry = elf->aslr + Read64(ehdr->entry);
+  m->cs.sel = USER_CS_LINUX;
+  m->ss.sel = USER_DS_LINUX;
+  elf->at_phdr = elf->base + Read64(ehdr->phoff);
+  elf->at_phent = Read16(ehdr->phentsize);
   elf->at_phnum = 0;
-  for (i = 0; i < Read16(elf->ehdr->phnum); ++i) {
+  for (i = 0; i < Read16(ehdr->phnum); ++i) {
     ++elf->at_phnum;
-    phdr = GetElfSegmentHeaderAddress(elf->ehdr, elf->size, i);
-    CheckElfAddress(elf->ehdr, elf->size,
-                    (intptr_t)elf->ehdr + Read64(phdr->offset),
-                    Read64(phdr->filesz));
+    phdr = (Elf64_Phdr_ *)((u8 *)ehdr + Read64(ehdr->phoff) +
+                           Read16(ehdr->phentsize) * i);
     switch (Read32(phdr->type)) {
       case PT_GNU_STACK_:
         execstack = false;
         break;
       case PT_LOAD_:
-        elf->base = MIN(elf->base, (i64)Read64(phdr->vaddr) + aslr);
-        end = LoadElfLoadSegment(m, elf->execfn, elf->ehdr, elf->size, phdr,
-                                 end, aslr, fd);
+        end = LoadElfLoadSegment(m, elf->execfn, ehdr, esize, phdr, end,
+                                 elf->aslr, fd);
         break;
       case PT_INTERP_:
-        elf->interpreter = (char *)elf->ehdr + Read64(phdr->offset);
+        elf->interpreter = (char *)ehdr + Read64(phdr->offset);
         if (elf->interpreter[Read64(phdr->filesz) - 1]) {
           ELF_LOGF("elf interpreter not nul terminated");
           exit(127);
@@ -324,22 +384,22 @@ static bool LoadElf(struct Machine *m, struct Elf *elf, u64 aslr, int fd) {
         break;
     }
   }
-  elf->at_phdr = elf->base + Read64(elf->ehdr->phoff);
   if (elf->interpreter) {
     int fd;
+    i64 aslr;
     char ibuf[21];
     struct stat st;
-    Elf64_Ehdr_ *ehdr;
+    Elf64_Ehdr_ *ehdri;
     end = INT64_MIN;
     ELF_LOGF("loading elf interpreter %s", elf->interpreter);
     errno = 0;
     SYS_LOGF("LoadInterpreter %s", elf->interpreter);
     if ((fd = OverlaysOpen(AT_FDCWD, elf->interpreter, O_RDONLY, 0)) == -1 ||
         (fstat(fd, &st) == -1 || !st.st_size) ||
-        (ehdr = (Elf64_Ehdr_ *)Mmap(0, st.st_size, PROT_READ | PROT_WRITE,
-                                    MAP_PRIVATE, fd, 0, "loader")) ==
+        (ehdri = (Elf64_Ehdr_ *)Mmap(0, st.st_size, PROT_READ | PROT_WRITE,
+                                     MAP_PRIVATE, fd, 0, "loader")) ==
             MAP_FAILED ||
-        !IsSupportedExecutable(elf->interpreter, ehdr, st.st_size)) {
+        !IsSupportedExecutable(elf->interpreter, ehdri, st.st_size)) {
       WriteErrorString(elf->interpreter);
       WriteErrorString(": failed to load interpreter (errno ");
       FormatInt64(ibuf, errno);
@@ -347,29 +407,35 @@ static bool LoadElf(struct Machine *m, struct Elf *elf, u64 aslr, int fd) {
       WriteErrorString(")\n");
       exit(127);
     }
-    aslr = Read16(ehdr->type) == ET_DYN_ ? kDynInterpAddr : 0;
-    elf->at_base = m->ip = Read64(ehdr->entry) + aslr;
-    for (i = 0; i < Read16(ehdr->phnum); ++i) {
-      phdr = GetElfSegmentHeaderAddress(ehdr, st.st_size, i);
-      CheckElfAddress(ehdr, st.st_size, (intptr_t)ehdr + Read64(phdr->offset),
+    aslr = ChooseAslr(
+        ehdri, st.st_size,
+        elf->aslr ? elf->aslr - (16 * 1024 * 1024) : FLAG_dyninterpaddr,
+        &elf->at_base);
+    m->ip = elf->at_base + Read64(ehdri->entry);
+    for (i = 0; i < Read16(ehdri->phnum); ++i) {
+      phdr = GetElfSegmentHeaderAddress(ehdri, st.st_size, i);
+      CheckElfAddress(ehdri, st.st_size,
+                      (uintptr_t)ehdri + Read64(phdr->offset),
                       Read64(phdr->filesz));
       switch (Read32(phdr->type)) {
         case PT_LOAD_:
-          elf->at_base = MIN(elf->at_base, (i64)Read64(phdr->vaddr) + aslr);
-          end = LoadElfLoadSegment(m, elf->interpreter, ehdr, st.st_size, phdr,
+          end = LoadElfLoadSegment(m, elf->interpreter, ehdri, st.st_size, phdr,
                                    end, aslr, fd);
           break;
         default:
           break;
       }
     }
-    unassert(!Munmap(ehdr, st.st_size));
+    unassert(!Munmap(ehdri, st.st_size));
     unassert(!close(fd));
   }
   return execstack;
 }
 
-static void BootProgram(struct Machine *m, struct Elf *elf, size_t codesize) {
+static void BootProgram(struct Machine *m,  //
+                        struct Elf *elf,    //
+                        void *map,          //
+                        size_t mapsize) {
   m->cs.sel = m->cs.base = 0;
   m->ip = 0x7c00;
   elf->base = 0x7c00;
@@ -379,16 +445,7 @@ static void BootProgram(struct Machine *m, struct Elf *elf, size_t codesize) {
   Write16(m->system->real + 0x413, 0xb0000 / 1024);
   Write16(m->system->real + 0x44A, 80);
   Write64(m->dx, 0);
-  memcpy(m->system->real + 0x7c00, elf->map, 512);
-  if (memcmp(elf->map, "\177ELF", 4) == 0) {
-    elf->ehdr = (Elf64_Ehdr_ *)elf->map;
-    elf->size = codesize;
-    elf->base = Read64(elf->ehdr->entry);
-  } else {
-    elf->base = 0x7c00;
-    elf->ehdr = NULL;
-    elf->size = 0;
-  }
+  memcpy(m->system->real + 0x7c00, map, 512);
 }
 
 static int GetElfHeader(char ehdr[64], const char *prog, const char *image) {
@@ -415,21 +472,21 @@ static int GetElfHeader(char ehdr[64], const char *prog, const char *image) {
       if (i < 64) {
         ehdr[i++] = c;
       } else {
-        LOGF("%s: ape printf elf header too long\n", prog);
+        ERRF("%s: ape printf elf header too long\n", prog);
         return -1;
       }
     }
     if (i != 64) {
-      LOGF("%s: ape printf elf header too short\n", prog);
+      ERRF("%s: ape printf elf header too short\n", prog);
       return -1;
     }
     if (READ32(ehdr) != READ32("\177ELF")) {
-      LOGF("%s: ape printf elf header didn't have elf magic\n", prog);
+      ERRF("%s: ape printf elf header didn't have elf magic\n", prog);
       return -1;
     }
     return 0;
   }
-  LOGF("%s: printf statement not found in first 4096 bytes\n", prog);
+  ERRF("%s: printf statement not found in first 4096 bytes\n", prog);
   return -1;
 }
 
@@ -437,13 +494,16 @@ static void FreeProgName(void) {
   free(g_progname);
 }
 
-static int CheckExecutableFile(const struct stat *st) {
+static int CheckExecutableFile(const char *prog, const struct stat *st) {
   if (!S_ISREG(st->st_mode)) {
     LOGF("execve needs regular file");
     errno = EACCES;
     return -1;
   }
-  if (!(st->st_mode & 0111)) {
+  if (!(st->st_mode & 0111) &&    //
+      !endswith(prog, ".bin") &&  //
+      !endswith(prog, ".img") &&  //
+      !endswith(prog, ".raw")) {
     LOGF("execve needs chmod +x");
     errno = EACCES;
     return -1;
@@ -565,12 +625,13 @@ static int CanEmulateData(struct Machine *m, char **prog, char ***argv,
 void LoadProgram(struct Machine *m, char *execfn, char *prog, char **args,
                  char **vars) {
   int fd;
-  i64 sp;
+  i64 stack;
+  void *map;
   int status;
+  char tmp[64];
   bool isfirst;
-  char ibuf[21];
-  char ehdr[64];
   long pagesize;
+  size_t mapsize;
   bool execstack;
   struct stat st;
   struct Elf *elf;
@@ -579,9 +640,10 @@ void LoadProgram(struct Machine *m, char *execfn, char *prog, char **args,
     atexit(FreeProgName);
     once = true;
   }
+  elf = &m->system->elf;
+  unassert(GetRandom(elf->rng, sizeof(elf->rng), 0) == sizeof(elf->rng));
   for (isfirst = true;;) {
     unassert(prog);
-    elf = &m->system->elf;
     elf->execfn = execfn;
     elf->prog = prog;
     elf->interpreter = 0;
@@ -592,18 +654,17 @@ void LoadProgram(struct Machine *m, char *execfn, char *prog, char **args,
     g_progname = strdup(prog);
     SYS_LOGF("LoadProgram %s", prog);
     if ((fd = OverlaysOpen(AT_FDCWD, prog, O_RDONLY, 0)) == -1 ||
-        fstat(fd, &st) == -1 || CheckExecutableFile(&st) == -1 ||
-        (elf->map = (char *)Mmap(0, (elf->mapsize = st.st_size),
-                                 PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0,
-                                 "loader")) == MAP_FAILED) {
+        fstat(fd, &st) == -1 || CheckExecutableFile(prog, &st) == -1 ||
+        (map = Mmap(0, (mapsize = st.st_size), PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE, fd, 0, "loader")) == MAP_FAILED) {
       WriteErrorString(prog);
       WriteErrorString(": failed to load executable (errno ");
-      FormatInt64(ibuf, errno);
-      WriteErrorString(ibuf);
+      FormatInt64(tmp, errno);
+      WriteErrorString(tmp);
       WriteErrorString(")\n");
       exit(127);
     }
-    status = CanEmulateData(m, &prog, &args, isfirst, elf->map, elf->mapsize);
+    status = CanEmulateData(m, &prog, &args, isfirst, (char *)map, mapsize);
     if (!status) {
       WriteErrorString("\
 error: unsupported executable; we need:\n\
@@ -618,7 +679,7 @@ error: unsupported executable; we need:\n\
       // turns out it's a shell script
       if (isfirst) {
         // start over using the shebang interpreter instead
-        unassert(!munmap(elf->map, elf->mapsize));
+        unassert(!munmap(map, mapsize));
         unassert(!close(fd));
         isfirst = false;
       } else {
@@ -632,50 +693,60 @@ error: unsupported executable; we need:\n\
   ResetCpu(m);
   m->system->codesize = 0;
   m->system->codestart = 0;
-  m->system->brk = kNullPageSize;
+  m->system->brk = FLAG_imagestart;
+  m->system->automap = FLAG_automapstart;
+  if (HasLinearMapping()) {
+    m->system->brk ^= Read64(elf->rng) & FLAG_aslrmask;
+    m->system->automap ^= (Read64(elf->rng) & FLAG_aslrmask);
+  }
   if (m->mode == XED_MODE_REAL) {
-    BootProgram(m, elf, elf->mapsize);
+    BootProgram(m, elf, map, mapsize);
+    if (endswith(prog, ".com")) {
+      // cosmo convention (see also binbase)
+      AddFileMap(m->system, 4 * 1024 * 1024, 512, prog, 0);
+    } else {
+      // sectorlisp convention
+      AddFileMap(m->system, 0, 512, prog, 0);
+    }
   } else {
     m->system->cr3 = AllocatePageTable(m->system);
-    if (READ32(elf->map) == READ32("\177ELF")) {
-      elf->ehdr = (Elf64_Ehdr_ *)elf->map;
-      elf->size = elf->mapsize;
-      execstack = LoadElf(
-          m, elf, Read16(elf->ehdr->type) == ET_DYN_ ? kDynExecAddr : 0, fd);
-    } else if (READ64(elf->map) == READ64("MZqFpD='") ||
-               READ64(elf->map) == READ64("jartsr='")) {
-      if (GetElfHeader(ehdr, prog, elf->map) == -1) exit(127);
-      memcpy(elf->map, ehdr, 64);
-      elf->ehdr = (Elf64_Ehdr_ *)elf->map;
-      elf->size = elf->mapsize;
-      execstack = LoadElf(m, elf, 0, fd);
+    if (READ32(map) == READ32("\177ELF")) {
+      execstack = LoadElf(m, elf, (Elf64_Ehdr_ *)map, mapsize, fd);
+    } else if (READ64(map) == READ64("MZqFpD='") ||
+               READ64(map) == READ64("jartsr='")) {
+      m->system->iscosmo = true;
+      if (GetElfHeader(tmp, prog, (const char *)map) == -1) exit(127);
+      memcpy(map, tmp, 64);
+      execstack = LoadElf(m, elf, (Elf64_Ehdr_ *)map, mapsize, fd);
     } else {
       elf->base = 0x400000;
-      elf->ehdr = NULL;
-      elf->size = 0;
-      LoadFlatExecutable(m, elf->base, prog, elf->map, elf->mapsize, fd);
+      LoadFlatExecutable(m, elf->base, prog, map, mapsize, fd);
       execstack = true;
     }
-    sp = kStackTop;
-    Put64(m->sp, sp);
-    unassert(AddFileMap(m->system, sp - kStackSize, kStackSize, "[stack]", -1));
-    if (ReserveVirtual(m->system, sp - kStackSize, kStackSize,
-                       PAGE_U | PAGE_RW | (execstack ? 0 : PAGE_XD), -1, 0,
-                       false) == -1) {
+    stack = HasLinearMapping() && FLAG_vabits <= 47 && !kSkew
+                ? 0
+                : kStackTop - kStackSize;
+    if ((stack = ReserveVirtual(
+             m->system, stack, kStackSize,
+             PAGE_FILE | PAGE_U | PAGE_RW | (execstack ? 0 : PAGE_XD), -1, 0, 0,
+             0)) != -1) {
+      unassert(AddFileMap(m->system, stack, kStackSize, "[stack]", -1));
+      Put64(m->sp, stack + kStackSize);
+    } else {
       LOGF("failed to reserve stack memory");
       exit(127);
     }
-    LoadArgv(m, execfn, prog, args, vars);
+    LoadArgv(m, execfn, prog, args, vars, elf->rng);
   }
   pagesize = GetSystemPageSize();
   pagesize = MAX(4096, pagesize);
-  m->system->brk = ROUNDUP(m->system->brk, pagesize);
   if (elf->interpreter) {
     elf->interpreter = strdup(elf->interpreter);
   }
   unassert(CheckMemoryInvariants(m->system));
   elf->execfn = strdup(elf->execfn);
   elf->prog = strdup(elf->prog);
+  unassert(!munmap(map, mapsize));
   unassert(!close(fd));
 }
 
@@ -686,16 +757,18 @@ static bool CanEmulateImpl(struct Machine *m, char **prog, char ***argv,
   void *img;
   struct stat st;
   if ((fd = OverlaysOpen(AT_FDCWD, *prog, O_RDONLY | O_CLOEXEC, 0)) == -1) {
+  CantEmulate:
+    LOGF("%s: can't emulate: %s", *prog, strerror(errno));
     return false;
   }
   unassert(!fstat(fd, &st));
-  if (CheckExecutableFile(&st) == -1) {
+  if (CheckExecutableFile(*prog, &st) == -1) {
     close(fd);
     return false;
   }
   img = mmap(0, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
   close(fd);
-  if (img == MAP_FAILED) return false;
+  if (img == MAP_FAILED) goto CantEmulate;
   res = !!CanEmulateData(m, prog, argv, isfirst, (char *)img, st.st_size);
   unassert(!munmap(img, st.st_size));
   return res;

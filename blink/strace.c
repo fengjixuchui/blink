@@ -39,10 +39,21 @@
 
 #define APPEND(...) bi += snprintf(bp + bi, bn - bi, __VA_ARGS__)
 
+struct thatispacked MagicNumber {
+  int x;
+  const char *s;
+};
+
 static const char *const kOpenAccmode[] = {
     "O_RDONLY",  //
     "O_WRONLY",  //
     "O_RDWR",    //
+};
+
+static const struct DescribeFlags kAccessModes[] = {
+    {R_OK_LINUX, "R_OK"},  //
+    {W_OK_LINUX, "W_OK"},  //
+    {X_OK_LINUX, "X_OK"},  //
 };
 
 static const struct DescribeFlags kOpenFlags[] = {
@@ -135,11 +146,13 @@ static const struct DescribeFlags kCloneFlags[] = {
 };
 #endif
 
+#ifndef DISABLE_NONPOSIX
 static const struct DescribeFlags kRenameFlags[] = {
     {RENAME_NOREPLACE_LINUX, "NOREPLACE"},  //
     {RENAME_EXCHANGE_LINUX, "EXCHANGE"},    //
     {RENAME_WHITEOUT_LINUX, "WHITEOUT"},    //
 };
+#endif
 
 #ifdef HAVE_FORK
 static const struct DescribeFlags kWaitFlags[] = {
@@ -161,57 +174,52 @@ static const struct DescribeFlags kSockFlags[] = {
 };
 #endif
 
-static const char *DescribeSigHow(int x) {
-  _Thread_local static char ibuf[21];
-  switch (x) {
-    case SIG_BLOCK_LINUX:
-      return "SIG_BLOCK";
-    case SIG_UNBLOCK_LINUX:
-      return "SIG_UNBLOCK";
-    case SIG_SETMASK_LINUX:
-      return "SIG_SETMASK";
-    default:
-      FormatInt64(ibuf, x);
-      return ibuf;
-  }
-}
+const struct MagicNumber kSigHow[] = {
+    {SIG_BLOCK, "SIG_BLOCK"},      //
+    {SIG_UNBLOCK, "SIG_UNBLOCK"},  //
+    {SIG_SETMASK, "SIG_SETMASK"},  //
+};
 
-static const char *DescribeSocketFamily(int af) {
-  _Thread_local static char ibuf[21];
-  switch (af) {
-    case AF_UNSPEC_LINUX:
-      return "AF_UNSPEC";
-    case AF_UNIX_LINUX:
-      return "AF_UNIX";
-    case AF_INET_LINUX:
-      return "AF_INET";
-    case AF_INET6_LINUX:
-      return "AF_INET6";
-    case AF_NETLINK_LINUX:
-      return "AF_NETLINK";
-    case AF_PACKET_LINUX:
-      return "AF_PACKET";
-    case AF_VSOCK_LINUX:
-      return "AF_VSOCK";
-    default:
-      FormatInt64(ibuf, af);
-      return ibuf;
-  }
-}
+const struct MagicNumber kSocketFamily[] = {
+    {AF_UNSPEC_LINUX, "AF_UNSPEC"},    //
+    {AF_UNIX_LINUX, "AF_UNIX"},        //
+    {AF_INET_LINUX, "AF_INET"},        //
+    {AF_INET6_LINUX, "AF_INET6"},      //
+    {AF_NETLINK_LINUX, "AF_NETLINK"},  //
+    {AF_PACKET_LINUX, "AF_PACKET"},    //
+    {AF_VSOCK_LINUX, "AF_VSOCK"},      //
+};
 
-static const char *DescribeSocketType(int af) {
+const struct MagicNumber kSocketType[] = {
+    {SOCK_STREAM_LINUX, "SOCK_STREAM"},  //
+    {SOCK_DGRAM_LINUX, "SOCK_DGRAM"},    //
+    {SOCK_RAW_LINUX, "SOCK_RAW"},        //
+};
+
+const struct MagicNumber kClock[] = {
+    {CLOCK_REALTIME_LINUX, "CLOCK_REALTIME"},                      //
+    {CLOCK_MONOTONIC_LINUX, "CLOCK_MONOTONIC"},                    //
+    {CLOCK_PROCESS_CPUTIME_ID_LINUX, "CLOCK_PROCESS_CPUTIME_ID"},  //
+    {CLOCK_THREAD_CPUTIME_ID_LINUX, "CLOCK_THREAD_CPUTIME_ID"},    //
+    {CLOCK_MONOTONIC_RAW_LINUX, "CLOCK_MONOTONIC_RAW"},            //
+    {CLOCK_REALTIME_COARSE_LINUX, "CLOCK_REALTIME_COARSE"},        //
+    {CLOCK_MONOTONIC_COARSE_LINUX, "CLOCK_MONOTONIC_COARSE"},      //
+    {CLOCK_BOOTTIME_LINUX, "CLOCK_BOOTTIME"},                      //
+    {CLOCK_REALTIME_ALARM_LINUX, "CLOCK_REALTIME_ALARM"},          //
+    {CLOCK_BOOTTIME_ALARM_LINUX, "CLOCK_BOOTTIME_ALARM"},          //
+    {CLOCK_TAI_LINUX, "CLOCK_TAI"},                                //
+};
+
+static const char *GetMagicNumber(const struct MagicNumber *p, int n, int x) {
+  int i;
   _Thread_local static char ibuf[21];
-  switch (af) {
-    case SOCK_STREAM_LINUX:
-      return "SOCK_STREAM";
-    case SOCK_DGRAM_LINUX:
-      return "SOCK_DGRAM";
-    case SOCK_RAW_LINUX:
-      return "SOCK_RAW";
-    default:
-      FormatInt64(ibuf, af);
-      return ibuf;
+  for (i = 0; i < n; ++i) {
+    if (p[i].x == x) {
+      return p[i].s;
+    }
   }
+  FormatInt64(ibuf, x);
+  return ibuf;
 }
 
 static const char *DescribeSockaddr(const struct sockaddr_storage_linux *ss) {
@@ -237,9 +245,46 @@ static const char *DescribeSockaddr(const struct sockaddr_storage_linux *ss) {
       return sabuf;
     default:
       snprintf(abuf, sizeof(abuf), "{%s}",
-               DescribeSocketFamily(Read16(ss->family)));
+               GetMagicNumber(kSocketFamily, ARRAYLEN(kSocketFamily),
+                              Read16(ss->family)));
       return abuf;
   }
+}
+
+static const char *DescribeBuf(struct Machine *m, i64 arg, u64 len, u64 ax,
+                               bool isentry, bool isout) {
+  _Thread_local static char bp[1 + kStraceBufMax * 3 + 1 + 3 + 2 + 21 + 1];
+  u64 have;
+  const u8 *data;
+  int j, bi, bn, preview;
+  bi = 0;
+  have = len;
+  bn = sizeof(bp);
+  preview = MIN(len, kStraceBufMax);
+  if (isout) {
+    if (!isentry) {
+      have = MIN(len, ax);
+      preview = MIN(preview, ax);
+    } else {
+      preview = -1;
+    }
+  }
+  if (preview > 0 && (data = (const u8 *)SchlepR(m, arg, preview))) {
+    APPEND("\"");
+    for (j = 0; j < preview; ++j) {
+      APPEND("%lc", (wint_t)kCp437[data[j]]);
+    }
+    APPEND("\"");
+    if (j < have) {
+      APPEND("...");
+    }
+  } else if (!preview) {
+    APPEND("\"\"");
+  } else {
+    APPEND("%#" PRIx64, arg);
+  }
+  APPEND(", %" PRId64, len);
+  return bp;
 }
 
 static void DescribeSigset(char *bp, int bn, u64 ss) {
@@ -252,7 +297,7 @@ static void DescribeSigset(char *bp, int bn, u64 ss) {
   for (sig = 1; sig <= 64; ++sig) {
     if (ss & (1ull << (sig - 1))) {
       if (got) {
-        APPEND(",");
+        APPEND(", ");
       } else {
         got = true;
       }
@@ -262,13 +307,16 @@ static void DescribeSigset(char *bp, int bn, u64 ss) {
   APPEND("}");
 }
 
-static void Strace(struct Machine *m, const char *func, const char *fmt,
-                   bool isentry, va_list va) {
+void Strace(struct Machine *m, const char *func, bool isentry, const char *fmt,
+            ...) {
   char *bp;
+  va_list va;
   i64 ax, arg;
+  bool isoutmem;
   int c, i, bi, bn;
   char tmp[kStraceArgMax];
   char buf[7][kStraceArgMax];
+  va_start(va, fmt);
   for (i = 0; i < 7; ++i) {
     buf[i][0] = 0;
   }
@@ -289,10 +337,15 @@ static void Strace(struct Machine *m, const char *func, const char *fmt,
       APPEND("-%s", DescribeHostErrno(errno));
       continue;
     }
-    if (arg && IS_MEM_O(c) && !IS_ADDR(c)) APPEND("[");
+    if ((isoutmem = arg && !isentry &&                //
+                    (IS_MEM_O(c) || IS_MEM_IO(c)) &&  //
+                    !IS_ADDR(c))) {
+      APPEND("[");
+    }
     if (arg == -1) {
       APPEND("-1");
     } else if (c == I64_HEX[0] || (ax == -1 && (IS_MEM_O(c) || IS_MEM_IO(c)))) {
+    JustPrintHex:
       APPEND("%#" PRIx64, arg);
     } else if (c == I64[0]) {
       APPEND("%" PRId64, arg);
@@ -315,40 +368,51 @@ static void Strace(struct Machine *m, const char *func, const char *fmt,
         UNLOCK(&m->system->fds.lock);
       }
     } else if (IS_BUF(c)) {
-      u8 *data;
       u64 len = va_arg(va, i64);
-      unsigned j, preview = MIN(len, kStraceBufMax);
-      if (c == O_BUF[0]) {
-        len = MIN(len, ax);
-        preview = MIN(preview, ax);
-      }
-      // APPEND("%#" PRIx64, arg);
-      if ((data = (u8 *)SchlepR(m, arg, preview))) {
-        APPEND("\"");
-        for (j = 0; j < preview; ++j) {
-          APPEND("%lc", (wint_t)kCp437[data[j]]);
+      APPEND("%s", DescribeBuf(m, arg, len, ax, isentry, c == O_BUF[0]));
+      ++i;
+    } else if (IS_IOVEC(c)) {
+      u64 rem;
+      const struct iovec_linux *iov;
+      int j, iovlen = va_arg(va, i64);
+      if ((iov = (const struct iovec_linux *)SchlepR(
+               m, arg, iovlen * sizeof(struct iovec_linux)))) {
+        rem = ax;
+        APPEND("{");
+        for (j = 0; j < iovlen; ++j) {
+          if (j) APPEND(", ");
+          APPEND("{%s}", DescribeBuf(m, Read64(iov[j].base), Read64(iov[j].len),
+                                     rem, isentry, c == O_IOVEC[0]));
+          rem -= MIN(rem, Read64(iov[j].len));
         }
-        APPEND("\"");
-        if (j < len) {
-          APPEND("...");
-        }
+        APPEND("}");
+      } else {
+        APPEND("%#" PRIx64, arg);
       }
       ++i;
-      snprintf(buf[i], sizeof(buf[i]), ", %#" PRIx64, len);
+      snprintf(buf[i], sizeof(buf[i]), ", %d", iovlen);
     } else if (c == I_STR[0]) {
       const char *str;
       if ((str = LoadStr(m, arg))) {
         APPEND("\"%s\"", str);
       } else {
-        APPEND("%#" PRIx64, arg);
+        goto JustPrintHex;
       }
     } else if (c == I32_SIG[0]) {
       APPEND("%s", DescribeSignal(arg));
+    } else if (c == I32_ACCMODE[0]) {
+      if (!arg) {
+        APPEND("F_OK");
+      } else {
+        DescribeFlags(tmp, sizeof(tmp), kAccessModes, ARRAYLEN(kAccessModes),
+                      "", arg);
+        APPEND("%s", tmp);
+      }
 #ifdef HAVE_FORK
     } else if (c == I32_WAITFLAGS[0]) {
       DescribeFlags(tmp, sizeof(tmp), kWaitFlags, ARRAYLEN(kWaitFlags), "",
                     arg);
-      APPEND("%s", DescribeSignal(arg));
+      APPEND("%s", tmp);
     } else if (c == O_WSTATUS[0]) {
       const u8 *p;
       if ((p = (const u8 *)SchlepR(m, arg, 4))) {
@@ -360,7 +424,7 @@ static void Strace(struct Machine *m, const char *func, const char *fmt,
                  DescribeSignal(WSTOPSIG(s)));
         } else if (WIFSIGNALED(s)) {
           APPEND("{WIFSIGNALED(s) && WTERMSIG(s) == %s}",
-                 DescribeSignal(WSTOPSIG(s)));
+                 DescribeSignal(WTERMSIG(s)));
         } else {
           APPEND("{%#" PRIx32 "}", s);
         }
@@ -379,7 +443,7 @@ static void Strace(struct Machine *m, const char *func, const char *fmt,
                     arg);
       APPEND("%s", tmp);
     } else if (c == I32_OFLAGS[0]) {
-      unsigned arg2 = arg;
+      i32 arg2 = arg;
       if ((arg2 & O_ACCMODE_LINUX) < ARRAYLEN(kOpenAccmode)) {
         APPEND("%s", kOpenAccmode[arg2 & O_ACCMODE_LINUX]);
         arg2 &= ~O_ACCMODE_LINUX;
@@ -408,7 +472,7 @@ static void Strace(struct Machine *m, const char *func, const char *fmt,
         DescribeSigset(tmp, sizeof(tmp), Read64(ss->sigmask));
         APPEND("%s", tmp);
       } else {
-        APPEND("%#" PRIx64, arg);
+        goto JustPrintHex;
       }
 #if defined(HAVE_FORK) || defined(HAVE_THREADS)
     } else if (c == O_PFDS[0]) {
@@ -416,16 +480,83 @@ static void Strace(struct Machine *m, const char *func, const char *fmt,
       if ((pfds = (const u8 *)SchlepR(m, arg, 8))) {
         APPEND("{%" PRId32 ", %" PRId32 "}", Read32(pfds), Read32(pfds + 4));
       } else {
-        APPEND("%#" PRIx64, arg);
+        goto JustPrintHex;
       }
 #endif
-    } else if (IS_TIME(c)) {
+    } else if (c == IO_FDSET[0]) {
+      const u8 *fdset;
+      if ((fdset = (const u8 *)SchlepR(m, arg, FD_SETSIZE_LINUX / 8))) {
+        int fd;
+        bool gotsome = false;
+        APPEND("{");
+        for (fd = 0; fd < FD_SETSIZE_LINUX; ++fd) {
+          if (fdset[fd >> 3] & (1 << (fd & 7))) {
+            if (!gotsome) {
+              gotsome = true;
+            } else {
+              APPEND(",");
+            }
+            APPEND("%d", fd);
+          }
+        }
+        APPEND("}");
+      } else {
+        goto JustPrintHex;
+      }
+    } else if (IS_TIME(c) || c == IO_TIMEV[0]) {
       const struct timespec_linux *ts;
       if ((ts = (const struct timespec_linux *)SchlepR(
                m, arg, sizeof(struct timespec_linux)))) {
         APPEND("{%" PRId64 ", %" PRId64 "}", Read64(ts->sec), Read64(ts->nsec));
       } else {
-        APPEND("%#" PRIx64, arg);
+        goto JustPrintHex;
+      }
+    } else if (c == O_TIME2[0]) {
+      const struct timespec_linux *ts;
+      if ((ts = (const struct timespec_linux *)SchlepR(
+               m, arg, sizeof(struct timespec_linux) * 2))) {
+        APPEND("{.atim = {%" PRId64 ", %" PRId64 "},"
+               " .mtim = {%" PRId64 ", %" PRId64 "}}",
+               Read64(ts[0].sec), Read64(ts[0].nsec), Read64(ts[1].sec),
+               Read64(ts[1].nsec));
+      } else {
+        goto JustPrintHex;
+      }
+    } else if (c == O_STAT[0]) {
+      const struct stat_linux *st;
+      if ((st = (const struct stat_linux *)SchlepR(
+               m, arg, sizeof(struct stat_linux)))) {
+        APPEND("{.st_%s=%" PRId64, "size", Read64(st->size));
+        if (Read64(st->blocks)) {
+          APPEND(", .st_blocks=%" PRIu64 "/512", Read64(st->blocks) * 512);
+        }
+        if (Read32(st->mode)) {
+          APPEND(", .st_mode=%#" PRIo32, Read32(st->mode));
+        }
+        if (Read64(st->nlink) != 1) {
+          APPEND(", .st_nlink=%" PRIu64, Read64(st->nlink));
+        }
+        if (Read32(st->uid)) {
+          APPEND(", .st_uid=%" PRIu32, Read32(st->uid));
+        }
+        if (Read32(st->gid)) {
+          APPEND(", .st_gid=%" PRIu32, Read32(st->gid));
+        }
+        if (Read64(st->dev)) {
+          APPEND(", .st_dev=%" PRIu64, Read64(st->dev));
+        }
+        if (Read64(st->ino)) {
+          APPEND(", .st_ino=%" PRIu64, Read64(st->ino));
+        }
+        if (Read64(st->rdev)) {
+          APPEND(", .st_rdev=%" PRIu64, Read64(st->rdev));
+        }
+        if (Read64(st->blksize) != 4096) {
+          APPEND(", .st_blksize=%" PRIu64, Read64(st->blksize));
+        }
+        APPEND("}");
+      } else {
+        goto JustPrintHex;
       }
     } else if (IS_HAND(c)) {
       const struct sigaction_linux *sa;
@@ -457,15 +588,25 @@ static void Strace(struct Machine *m, const char *func, const char *fmt,
         }
         APPEND("}");
       } else {
-        APPEND("%#" PRIx64, arg);
+        goto JustPrintHex;
       }
     } else if (c == I32_SIGHOW[0]) {
-      APPEND("%s", DescribeSigHow(arg));
-#ifndef DISABLE_SOCKETS
+      APPEND("%s", GetMagicNumber(kSigHow, ARRAYLEN(kSigHow), arg));
     } else if (c == I32_FAMILY[0]) {
-      APPEND("%s", DescribeSocketFamily(arg));
+      APPEND("%s", GetMagicNumber(kSocketFamily, ARRAYLEN(kSocketFamily), arg));
     } else if (c == I32_SOCKTYPE[0]) {
-      APPEND("%s", DescribeSocketType(arg));
+      if (arg & SOCK_NONBLOCK_LINUX) {
+        APPEND("SOCK_NONBLOCK|");
+        arg &= ~SOCK_NONBLOCK_LINUX;
+      }
+      if (arg & SOCK_CLOEXEC_LINUX) {
+        APPEND("SOCK_CLOEXEC|");
+        arg &= ~SOCK_CLOEXEC_LINUX;
+      }
+      APPEND("%s", GetMagicNumber(kSocketType, ARRAYLEN(kSocketType), arg));
+    } else if (c == I32_CLOCK[0]) {
+      APPEND("%s", GetMagicNumber(kClock, ARRAYLEN(kClock), arg));
+#ifndef DISABLE_SOCKETS
     } else if (c == I32_SOCKFLAGS[0]) {
       DescribeFlags(tmp, sizeof(tmp), kSockFlags, ARRAYLEN(kSockFlags), "SOCK_",
                     arg);
@@ -477,7 +618,7 @@ static void Strace(struct Machine *m, const char *func, const char *fmt,
       memset(&ss, 0, sizeof(ss));
       if (c == I_ADDR[0]) len = (u32)len;
       if (c != I_ADDR[0] && !(p = (const u8 *)SchlepR(m, len, 4))) {
-        APPEND("%#" PRIx64 ", %" PRId32, arg, Read32(p));
+        APPEND("%#" PRIx64 ", %" PRIx64, arg, len);
       } else {
         if (c == I_ADDR[0]) {
           len = (u32)len;
@@ -499,39 +640,29 @@ static void Strace(struct Machine *m, const char *func, const char *fmt,
       }
       ++i;
 #endif
+#ifndef DISABLE_NONPOSIX
     } else if (c == I32_RENFLAGS[0]) {
       DescribeFlags(tmp, sizeof(tmp), kRenameFlags, ARRAYLEN(kRenameFlags),
                     "RENAME_", arg);
       APPEND("%s", tmp);
+#endif
     } else {
-      unassert(!"missing strace signature specifier");
-      __builtin_unreachable();
+      LOGF("missing strace signature specifier %#o", c);
+      goto JustPrintHex;
     }
     if (bi + 2 > bn) {
       bi = bn - 5;
       bp[bi++] = '.';
       bp[bi++] = '.';
       bp[bi++] = '.';
-      bp[bi++] = 0;
+      bp[bi] = 0;
     }
-    if (arg && IS_MEM_O(c) && !IS_ADDR(c)) APPEND("]");
+    if (isoutmem) {
+      bp[bi++] = ']';
+      bp[bi] = 0;
+    }
   }
+  va_end(va);
   SYS_LOGF("%s(%s%s%s%s%s%s) -> %s", func, buf[1], buf[2], buf[3], buf[4],
            buf[5], buf[6], buf[0]);
-}
-
-void EnterStrace(struct Machine *m, const char *func, const char *fmt, ...) {
-  va_list va;
-  if (FLAG_strace > 1) {
-    va_start(va, fmt);
-    Strace(m, func, fmt, true, va);
-    va_end(va);
-  }
-}
-
-void LeaveStrace(struct Machine *m, const char *func, const char *fmt, ...) {
-  va_list va;
-  va_start(va, fmt);
-  Strace(m, func, fmt, false, va);
-  va_end(va);
 }

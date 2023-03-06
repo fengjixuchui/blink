@@ -17,34 +17,31 @@
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <errno.h>
-#include <limits.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
 #include "blink/assert.h"
 #include "blink/debug.h"
-#include "blink/endian.h"
+#include "blink/flag.h"
 #include "blink/log.h"
 #include "blink/machine.h"
-#include "blink/macros.h"
 #include "blink/util.h"
 
 void AssertFailed(const char *file, int line, const char *msg) {
   _Thread_local static bool noreentry;
-  char b[512];
-  FLAG_nologstderr = false;
-  snprintf(b, sizeof(b), "%s:%d: assertion failed: %s (%s)\n", file, line, msg,
-           DescribeHostErrno(errno));
-  b[sizeof(b) - 1] = 0;
-  WriteErrorString(b);
-  if (g_machine && !noreentry) {
+  _Thread_local static char bp[20000];
+  WriteErrorString("assertion failed\n");
+  if (!noreentry) {
     noreentry = true;
+    FLAG_nologstderr = false;
     RestoreIp(g_machine);
-    WriteErrorString("\t");
-    WriteErrorString(GetBacktrace(g_machine));
-    WriteErrorString("\n");
+    snprintf(bp, sizeof(bp),
+             "%s:%d:%d assertion failed: %s (%s)\n"
+             "\t%s\n"
+             "\t%s\n",
+             file, line, g_machine ? g_machine->tid : 666, msg,
+             DescribeHostErrno(errno), GetBacktrace(g_machine),
+             GetBlinkBacktrace());
+    WriteErrorString(bp);
   }
-  PrintBacktrace();
   Abort();
 }

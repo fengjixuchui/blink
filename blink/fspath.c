@@ -25,7 +25,7 @@ char *JoinPath(const char *x, const char *y) {
   char *z, *p;
   size_t n, m;
   if (!y || !*y) {
-    return strdup(x);
+    return x ? strdup(x) : 0;
   }
   if (!x || !*x || *y == '/' || (*x == '.' && !x[1])) {
     return strdup(y);
@@ -40,4 +40,13 @@ char *JoinPath(const char *x, const char *y) {
   }
   memcpy(p, y, m + 1);
   return z;
+}
+
+char *ExpandUser(const char *path) {
+  const char *home;
+  if (*path == '~' && (home = getenv("HOME"))) {
+    return JoinPath(home, path);
+  } else {
+    return strdup(path);
+  }
 }

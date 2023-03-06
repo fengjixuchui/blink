@@ -10,7 +10,7 @@ This project contains two programs:
 different operating systems and hardware architectures. It's designed to
 do the same thing as the `qemu-x86_64` command, except that
 
-1. Blink is 200kb in size (126kb with optional features disabled),
+1. Blink is 206kb in size (112kb with optional features disabled),
    whereas qemu-x86_64 is a 4mb binary.
 
 2. Blink will run your Linux binaries on any POSIX system, whereas
@@ -38,7 +38,6 @@ following platforms:
 - macOS (x86, ARM)
 - FreeBSD
 - OpenBSD
-- NetBSD
 - Cygwin
 
 Blink depends on the following libraries:
@@ -827,10 +826,8 @@ reasons of performance is defined to include pushing and popping.
 
 ### Threads
 
-System calls do not explicitly lock the memory pages they're accessing;
-we haven't determined yet if that makes calling munmap() unsafe. Blink
-also lacks support right now for unlocking robust mutexes when a guest
-program crashes; this too is something we'd like to fix.
+Blink doesn't have a working implementation of `set_robust_list()` yet,
+which means robust mutexes might not get unlocked if a process crashes.
 
 ### Coherency
 
