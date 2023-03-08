@@ -230,8 +230,8 @@ compile() {
       ${TARGET_ARCH} \
       "$@" \
       ${LOADLIBES} \
-      ${LDLIBS} \
-      ${EXTRA_LDLIBS}
+      ${EXTRA_LDLIBS} \
+      ${LDLIBS}
 }
 
 config() {
@@ -476,13 +476,7 @@ fi
 # check for the math library
 EXTRA_LDLIBS=-lm
 if config lm "checking for -lm... "; then
-  LDLIBS="${LDLIBS} -lm"
-fi
-
-# check for the posix.1b realtime extensions library
-EXTRA_LDLIBS=-lrt
-if config lrt "checking for -lrt... "; then
-  LDLIBS="${LDLIBS} -lrt"
+  LDLIBS="-lm ${LDLIBS}"
 fi
 
 # check for the posix threads library
@@ -495,15 +489,22 @@ if [ -z "${DISABLE_THREADS}" ]; then
   else
     EXTRA_LDLIBS=-lpthread
     if config pthread "checking for -lpthread... "; then
-      LDLIBS="${LDLIBS} -lpthread"
+      LDLIBS="-lpthread ${LDLIBS}"
     else
       if config pthread "checking for pthreads... "; then
-        LDLIBS="${LDLIBS} -lpthread"
+        LDLIBS="-lpthread ${LDLIBS}"
       else
         uncomment "#define DISABLE_THREADS"
       fi
     fi
   fi
+fi
+
+# check for the posix.1b realtime extensions library
+# note: librt depends on pthreads, on rhel5 at least
+EXTRA_LDLIBS=-lrt
+if config lrt "checking for -lrt... "; then
+  LDLIBS="-lrt ${LDLIBS}"
 fi
 
 # should be the default and macos build fails without it
@@ -534,9 +535,11 @@ if config noop "checking for -fno-stack-protector... "; then
 fi
 
 # avoid creating stack frames in micro-op functions
-EXTRA_CFLAGS=-fomit-frame-pointer
-if config noop "checking for -fomit-frame-pointer... "; then
-  UOPFLAGS="${UOPFLAGS} -fomit-frame-pointer"
+if [ "${MODE}" != "prof" ]; then
+  EXTRA_CFLAGS=-fomit-frame-pointer
+  if config noop "checking for -fomit-frame-pointer... "; then
+    UOPFLAGS="${UOPFLAGS} -fomit-frame-pointer"
+  fi
 fi
 
 # for everything else, stack frames are extremely important
@@ -547,12 +550,53 @@ if [ "${MODE}" != "tiny" ]; then
   fi
 fi
 
+# c11 atomics are no-op'd when both fork and threads are disabled
+# this causes code to break modern compiler strict aliasing rules
+# TODO(jart) is it safe to quash warning w/o -fno-strict-aliasing
+if [ -n "${DISABLE_THREADS}" ] && [ -n "${DISABLE_FORK}" ]; then
+  EXTRA_CFLAGS=-Wno-strict-aliasing
+  if config noop "checking for -Wno-strict-aliasing... "; then
+    CFLAGS="${CFLAGS} -Wno-strict-aliasing"
+  fi
+fi
+
 # this optimization harms our ability to backtrace binaries
 # blink doesn't rely on tail call optimization so we don't need it
 if [ -z "${MODE}" ] && [ -n "${JIT_POSSIBLE}" ] && [ -z "${DISABLE_JIT}" ]; then
   EXTRA_CFLAGS=-fno-optimize-sibling-calls
   if config noop "checking for -fno-optimize-sibling-calls... "; then
     CFLAGS="${CFLAGS} -fno-optimize-sibling-calls"
+  fi
+fi
+
+# use the system zlib if available
+# otherwise, use our vendored copy
+ZLIB_CFLAGS="$(pkg-config --cflags zlib 2>/dev/null)"
+if ! ZLIB_LDLIBS="$(pkg-config --libs zlib 2>/dev/null)"; then
+  ZLIB_LDLIBS="-lz"
+fi
+EXTRA_CFLAGS="${ZLIB_CFLAGS}"
+EXTRA_LDLIBS="${ZLIB_LDLIBS}"
+if config zlib "checking for zlib... "; then
+  CFLAGS="${ZLIB_CFLAGS} ${CFLAGS}"
+  LDLIBS="${ZLIB_LDLIBS} ${LDLIBS}"
+  ZLIB=
+else
+  ZLIB='o/$(MODE)/third_party/libz/zlib.a'
+fi
+
+# try to get blink backtraces if possible
+if [ "${MODE}" != "tiny" ] && [ "${MODE}" != "rel" ]; then
+  UNWIND_CFLAGS="$(pkg-config --cflags libunwind 2>/dev/null)"
+  if ! UNWIND_LDLIBS="$(pkg-config --libs libunwind 2>/dev/null)"; then
+    UNWIND_LDLIBS="-lunwind -llzma"
+  fi
+  EXTRA_CFLAGS="${UNWIND_CFLAGS}"
+  EXTRA_LDLIBS="${UNWIND_LDLIBS}"
+  if config libunwind "checking for libunwind... "; then
+    CFLAGS="${UNWIND_CFLAGS} ${CFLAGS}"
+    LDLIBS="${UNWIND_LDLIBS} ${LDLIBS}"
+    uncomment "#define HAVE_LIBUNWIND"
   fi
 fi
 
@@ -579,6 +623,9 @@ if [ -z "${POSIX}" ]; then
   ( config getdomainname "checking for getdomainname()... " uncomment "#define HAVE_GETDOMAINNAME" ) &
   ( config kern_arnd "checking for sysctl(KERN_ARND)... " uncomment "#define HAVE_KERN_ARND" ) &
   ( config siocgifconf "checking for SIOCGIFCONF... " uncomment "#define HAVE_SIOCGIFCONF" ) &
+  ( config epoll_pwait1 "checking for epoll_pwait()... " uncomment "#define HAVE_EPOLL_PWAIT1" ) &
+  wait
+  ( config epoll_pwait2 "checking for epoll_pwait2()... " uncomment "#define HAVE_EPOLL_PWAIT2" ) &
   ( config map_anonymous "checking for mmap(MAP_ANONYMOUS)... " uncomment "#define HAVE_MAP_ANONYMOUS" ) &
   ( config sched_getaffinity "checking for sched_getaffinity()... " uncomment "#define HAVE_SCHED_GETAFFINITY" ) &
   ( config scm_credentials "checking for SCM_CREDENTIALS... " uncomment "#define HAVE_SCM_CREDENTIALS" ) &
@@ -599,12 +646,14 @@ fi
 ( config memccpy "checking for memccpy()... " uncomment "#define HAVE_MEMCCPY" ) &
 ( config seekdir "checking for seekdir()... " uncomment "#define HAVE_SEEKDIR" ) &
 ( config realpath "checking for realpath()... " uncomment "#define HAVE_REALPATH" ) &
+wait
 ( config setreuid "checking for setreuid()... " uncomment "#define HAVE_SETREUID" ) &
 ( config sendto_zero "checking for sendto(0.0.0.0)... " uncomment "#define HAVE_SENDTO_ZERO" ) &
 ( config struct_timezone "checking for struct timezone... " uncomment "#define HAVE_STRUCT_TIMEZONE" ) &
 ( config sa_len "checking for sockaddr::sa_len... " uncomment "#define HAVE_SA_LEN" ) &
 ( config map_shared "checking for mmap(MAP_SHARED)... " uncomment "#define HAVE_MAP_SHARED" ) &
 ( config sched_yield "checking for sched_yield()... " uncomment "#define HAVE_SCHED_YIELD" ) &
+( config clock_settime "checking for clock_settime()... " uncomment "#define HAVE_CLOCK_SETTIME" ) &
 ( config sched_h "checking for sched.h... " uncomment "#define HAVE_SCHED_H" ) &
 ( config pthread_process_shared "checking for PTHREAD_PROCESS_SHARED... " uncomment "#define HAVE_PTHREAD_PROCESS_SHARED" ) &
 
@@ -654,6 +703,7 @@ CONFIG_HOSTNAME = $(hostname)
 CONFIG_COMMAND = ${CONFIG_COMMAND}
 CONFIG_ARGUMENTS = -DCONFIG_ARGUMENTS="\"$*\""
 BLINK_UNAME_V = -DBLINK_UNAME_V="\"$(echo ${BLINK_UNAME_V})\""
+ZLIB = ${ZLIB}
 EOF
 
 echo "creating config.log" >&2

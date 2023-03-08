@@ -4,6 +4,7 @@
 
 #include "blink/types.h"
 
+extern bool FLAG_zero;
 extern bool FLAG_wantjit;
 extern bool FLAG_nolinear;
 extern bool FLAG_noconnect;
@@ -12,6 +13,8 @@ extern bool FLAG_alsologtostderr;
 
 extern int FLAG_strace;
 extern int FLAG_vabits;
+
+extern long FLAG_pagesize;
 
 extern u64 FLAG_skew;
 extern u64 FLAG_vaspace;

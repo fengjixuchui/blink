@@ -19,6 +19,7 @@
 #include "blink/builtin.h"
 #include "blink/flag.h"
 
+bool FLAG_zero;
 bool FLAG_wantjit;
 bool FLAG_nolinear;
 bool FLAG_noconnect;
@@ -27,6 +28,8 @@ bool FLAG_alsologtostderr;
 
 int FLAG_strace;
 int FLAG_vabits;
+
+long FLAG_pagesize;
 
 u64 FLAG_skew;
 u64 FLAG_vaspace;

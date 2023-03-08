@@ -10,7 +10,7 @@ This project contains two programs:
 different operating systems and hardware architectures. It's designed to
 do the same thing as the `qemu-x86_64` command, except that
 
-1. Blink is 206kb in size (112kb with optional features disabled),
+1. Blink is 213kb in size (112kb with optional features disabled),
    whereas qemu-x86_64 is a 4mb binary.
 
 2. Blink will run your Linux binaries on any POSIX system, whereas
@@ -20,14 +20,15 @@ do the same thing as the `qemu-x86_64` command, except that
    integer / floating point math. Blink is also much faster at running
    ephemeral programs such as compilers.
 
-[`blinkenlights`](https://justine.lol/blinkenlights) is a TUI interface
-that may be used for debugging x86_64-linux programs across platforms.
-Unlike GDB, Blinkenlights focuses on visualizing program execution. It
-uses UNICODE IBM Code Page 437 characters to display binary memory
-panels, which change as you step through your program's assembly code.
-These memory panels may be scrolled and zoomed using your mouse wheel.
-Blinkenlights also permits reverse debugging, where scroll wheeling over
-the assembly display allows the rewinding of execution history.
+[`blinkenlights`](https://justine.lol/blinkenlights) is a terminal user
+interface that may be used for debugging x86_64-linux or i8086 programs
+across platforms. Unlike GDB, Blinkenlights focuses on visualizing
+program execution. It uses UNICODE IBM Code Page 437 characters to
+display binary memory panels, which change as you step through your
+program's assembly code. These memory panels may be scrolled and zoomed
+using your mouse wheel. Blinkenlights also permits reverse debugging,
+where scroll wheeling over the assembly display allows the rewinding of
+execution history.
 
 ## Getting Started
 
@@ -54,14 +55,15 @@ The instructions for compiling Blink are as follows:
 ```sh
 ./configure
 make -j4
-o//blink/blink -h
-Usage: o//blink/blink [-hjms] PROG [ARGS...]
+doas make install  # note: doas is modern sudo
+blink -v
+man blink
 ```
 
 Here's how you can run a simple hello world program with Blink:
 
 ```sh
-o//blink/blink third_party/cosmo/tinyhello.elf
+blink third_party/cosmo/tinyhello.elf
 ```
 
 Blink has a debugger TUI, which works with UTF-8 ANSI terminals. The
@@ -69,7 +71,7 @@ most important keystrokes in this interface are `?` for help, `s` for
 step, `c` for continue, and scroll wheel for reverse debugging.
 
 ```sh
-o//blink/blinkenlights third_party/cosmo/tinyhello.elf
+blinkenlights third_party/cosmo/tinyhello.elf
 ```
 
 ### Alternative Builds
@@ -193,7 +195,9 @@ Where `PROGRAM` is an x86_64-linux binary that may be specified as:
 
 The following `FLAG` arguments are provided:
 
-- `-h` shows this help
+- `-h` shows help on command usage
+
+- `-v` shows version and build configuration details
 
 - `-e` means log to standard error (fd 2) in addition to the log file.
   If logging to *only* standard error is desired, then `-eL/dev/null`
@@ -204,9 +208,7 @@ The following `FLAG` arguments are provided:
 
 - `-m` disables the linear memory optimization. This makes Blink memory
   safe, but comes at the cost of going ~4x slower. On some platforms
-  this can help avoid the possibility of an mmap() crisis. This option
-  is required, if Blink is running inside Blink, in which case only one
-  level of simulation may use the linear memory optimization.
+  this can help avoid the possibility of an mmap() crisis.
 
 - `-0` allows `argv[0]` to be specified on the command line. Under
   normal circumstances, `blink cmd arg1` is equivalent to `execve("cmd",
@@ -221,17 +223,22 @@ The following `FLAG` arguments are provided:
   desired, then `-L /dev/null` may be used. See also the `-e` flag for
   logging to standard error.
 
-- `-S` enables system call logging. This will emit to the log file the
-  names of system calls each time a `SYSCALL` operation in invoked,
-  along with their arguments and results in hexadecimal. Blink currently
-  only displays symbol names for error codes. The x86_64-linux headers
-  and System V ABI may be consulted to determine the meaning of other
-  hex codes. System call logging isn't available in `MODE=rel` and
-  `MODE=tiny` builds, in which case this flag is ignored.
+- `-s` enables system call logging. This will emit to the log file the
+  names of system calls each time a SYSCALL instruction in executed,
+  along with its arguments and result. System calls are logged once
+  they've completed. If this option is specified twice, then system
+  calls which are likely to block (e.g. poll) will be logged at entry
+  too. If this option is specified thrice, then all cancellation points
+  will be logged upon entry. System call logging isn't available in
+  `MODE=rel` and `MODE=tiny` builds, in which case this flag is ignored.
 
-- `-s` will cause internal statistics to be printed to standard error on
+- `-Z` will cause internal statistics to be printed to standard error on
   exit. Stats aren't available in `MODE=rel` and `MODE=tiny` builds, and
   this flag is ignored.
+
+- `-C path` will cause blink to launch the program in a chroot'd
+  environment. This flag is both equivalent to and overrides the
+  `BLINK_OVERLAYS` environment variable.
 
 ### `blinkenlights` Flags
 
@@ -251,9 +258,11 @@ Where `PROGRAM` is an x86_64-linux binary that may be specified as:
 
 The following `FLAG` arguments are provided:
 
-- `-h` shows this help
+- `-h` shows help on command usage
 
-- `-r` puts your virtual machine real mode. This may be used to run
+- `-v` shows version and build configuration details
+
+- `-r` puts your virtual machine in real mode. This may be used to run
   16-bit i8086 programs, such as SectorLISP. It's also used for booting
   programs from Blinkenlights's simulated BIOS.
 
@@ -291,13 +300,6 @@ The following `FLAG` arguments are provided:
   right of the display. Please note this flag has the opposite meaning
   as it does in the `blink` command.
 
-- `-0` allows `argv[0]` to be specified on the command line. Under
-  normal circumstances, `blinkenlights cmd arg1` is equivalent to
-  `execve("cmd", {"cmd", "arg1"})` since that's how most programs are
-  launched. However if you need the full power of execve() process
-  spawning, you can say `blinkenlights -0 cmd arg0 arg1` which is
-  equivalent to `execve("cmd", {"arg0", "arg1"})`.
-
 - `-t` may be used to disable Blinkenlights TUI mode. This makes the
   program behave similarly to the `blink` command, however not as good.
   We're currently using this flag for unit testing real mode programs,
@@ -307,17 +309,27 @@ The following `FLAG` arguments are provided:
 - `-L PATH` specifies the log path. The default log path is
   `$TMPDIR/blink.log` or `/tmp/blink.log` if `$TMPDIR` isn't defined.
 
-- `-S` enables system call logging. This will emit to the log file the
-  names of system calls each time a `SYSCALL` operation in invoked,
-  along with their arguments and results in hexadecimal. Blink currently
-  only displays symbol names for error codes. The x86_64-linux headers
-  and System V ABI may be consulted to determine the meaning of other
-  hex codes. System call logging isn't available in `MODE=rel` and
-  `MODE=tiny` builds, in which case this flag is ignored.
+- `-C path` will cause blink to launch the program in a chroot'd
+  environment. This flag is both equivalent to and overrides the
+  `BLINK_OVERLAYS` environment variable.
 
-- `-s` will cause internal statistics to be printed to standard error on
-  exit. Stats aren't available in `MODE=rel` and `MODE=tiny` builds, and
-  this flag is ignored.
+- `-s` enables system call logging. This will emit to the log file the
+  names of system calls each time a SYSCALL instruction in executed,
+  along with its arguments and result. System calls are logged once
+  they've completed. If this option is specified twice, then system
+  calls which are likely to block (e.g. poll) will be logged at entry
+  too. If this option is specified thrice, then all cancellation points
+  will be logged upon entry. System call logging isn't available in
+  `MODE=rel` and `MODE=tiny` builds, in which case this flag is ignored.
+
+- `-Z` will cause internal statistics to be printed to standard error on
+  exit. Each line will display a monitoring metric. Most metrics will
+  either be integer counters or floating point running averages. Most
+  but not all integer counters are monotonic. In the interest of not
+  negatively impacting Blink's performance, statistics are computed on a
+  best effort basis which currently isn't guaranteed to be atomic in a
+  multi-threaded environment. Stats aren't available in `MODE=rel` and
+  `MODE=tiny` builds, and this flag is ignored.
 
 - `-z` [repeatable] may be specified to zoom the memory panels, so they
   display a larger amount of memory in a smaller space. By default, one
@@ -329,7 +341,7 @@ The following `FLAG` arguments are provided:
   terminal emulators (especially on Windows), do not support this xterm
   feature and as such, this flag is provided as an alternative.
 
-- `-v` [repeatable] increases verbosity
+- `-V` [repeatable] increases verbosity
 
 - `-R` disables reactive error mode
 
@@ -378,9 +390,6 @@ glyphs are defined as follows:
   length of the JIT path. The next assembly line that'll be
   highlighted will be the instruction after where the path ends.
 
-- `G` means that a hook has been explicitly set to `GeneralDispatch`.
-  This setting currently isn't used.
-
 ### Environment Variables
 
 The following environment variables are recognized by both the `blink`
@@ -391,8 +400,8 @@ and `blinkenlights` commands:
   be an absolute path. If logging to standard error is desired, use the
   `blink -e` flag.
 
-- `BLINK_OVERLAYS` specifies root one or more directories to use as the
-  root filesystem. Similar to `$PATH` this is a colon delimited list of
+- `BLINK_OVERLAYS` specifies one or more directories to use as the root
+  filesystem. Similar to `$PATH` this is a colon delimited list of
   pathnames. If relative paths are specified, they'll be resolved to an
   absolute path at startup time. Overlays only apply to IO system calls
   that specify an absolute path. The empty string overlay means use the
@@ -493,7 +502,7 @@ doas mount -t proc none ~/blinkroot/proc
 cd ~/blink
 make -j8
 export BLINK_OVERLAYS=$HOME/blinkroot
-o//blink/blink sh
+blink sh
 uname -a
 Linux hostname 4.5 blink-1.0 x86_64 GNU/Linux
 ```
@@ -712,14 +721,14 @@ JIT currently doesn't understand; so we need to use compiler flags to
 disable that type of magic. In the event other such magic slips through,
 Blink has a runtime check which will catch obvious problems, and then
 gracefully fall back to using a CALL instruction. Since no JIT can be
-fully perfect on all platforms, the `o//blink/blink -j` flag may be
-passed to disable Blink's JIT. Please note that disabling JIT makes
-Blink go 10x slower. With the `o//blink/blinkenlights` command, the `-j`
-flag takes on the opposite meaning, where it instead *enables* JIT. This
-can be useful for troubleshooting the JIT, because the TUI display has a
-feature that lets JIT path formation be visualized. Blink currently only
-enables the JIT for programs running in long mode (64-bit) but we may
-support JITing 16-bit programs in the future.
+fully perfect on all platforms, the `blink -j` flag may be passed to
+disable Blink's JIT. Please note that disabling JIT makes Blink go 10x
+slower. With the `blinkenlights` command, the `-j` flag takes on the
+opposite meaning, where it instead *enables* JIT. This can be useful for
+troubleshooting the JIT, because the TUI display has a feature that lets
+JIT path formation be visualized. Blink currently only enables the JIT
+for programs running in long mode (64-bit) but we may support JITing
+16-bit programs in the future.
 
 ### Virtualization
 
@@ -750,6 +759,98 @@ flag may be passed to disable the linear translation optimization, and
 instead use only the memory safe full virtualization approach of the
 PML4T and TLB.
 
+### Self-Modifying Code
+
+Many CPU architectures require esoteric rituals for flushing CPU caches
+when code modifies itself. That's not the case with x86 archihtecture,
+which takes care of this chore automatically. Blink is able to offer the
+same promises here as Intel and AMD, by abstracting fast and automatic
+invalidation of caches for programs using self-modifying code (SMC).
+
+When Blink's JIT isn't enabled, self-modifying code always causes
+instruction caches to be invalidated immediately, at least within the
+same thread. That's because Blink compares the raw instruction bytes
+with what's in the instruction cache before fetching its decoded value.
+
+When JITing is enabled, Blink will automatically invalidate JIT memory
+associated with code that's been modified. This happens on a 4096-byte
+page granularity. When a function like mprotect() is called that causes
+memory pages to transition from a non-executable to executable state,
+the impacted pages will be invalidated by the JIT. The JIT maintains a
+hash table where the key is the virtual address at which a generated
+function begins (which we call a "path") and the value is a function
+pointer to the generated code. When Blink is generating paths, it is
+careful to ensure that all the guest instructions which are added to a
+page, only exist within the confines of a single 4096-byte page. Thus
+when a page needs to be invalidated, Blink simply deletes any hook for
+each address within the page.
+
+When RWX memory is used, Blink can't rely on mprotect() to communicate
+the intent of the guest program. What Blink will do instead is protect
+any RWX guest memory, so that it's registered as read-only in the host
+operating system. This way, whenever the guest writes to RWX memory, a
+SIGSEGV signal will be delivered to Blink, which then re-enables write
+permissions on the impacted RWX page, flips a bit to the thread in the
+SMC state and then permits execution to resume for at least one opcode
+before the interpreter loop notices the SMC state, invalidates the JIT
+and re-enables the memory protection. This means that:
+
+1. Memory ops in general aren't slowed down by Blink's SMC support
+2. RWX memory can be written-to with some overhead
+3. RWX memory can be read-from with zero overhead
+4. Changes take effect when a JIT path ends
+
+Intel's sixteen thousand page manual lays out the following guidelines
+for conformant self-modifying code:
+
+> To write self-modifying code and ensure that it is compliant with
+> current and future versions of the IA-32 architectures, use one of
+> the following coding options:
+>
+> (* OPTION 1 *)  
+> Store modified code (as data) into code segment;  
+> Jump to new code or an intermediate location;  
+> Execute new code;
+>
+> (* OPTION 2 *)  
+> Store modified code (as data) into code segment;  
+> Execute a serializing instruction; (* For example, CPUID instruction *)  
+> Execute new code;
+>
+> ──Quoth Intel Manual V.3, §8.1.3
+
+Blink implements this behavior because branching instructions always
+cause JIT paths to end, and serializing instructions are never added to
+JIT paths in the first place.
+
+Intel's rules allow Blink some leeway to make writiting to make this RWX
+memory technique go fast without causing signal storms or incurring much
+system call overhead. As an example, consider the internal statistics
+printed by the [`smc2_test.c`](test/func/smc2_test.c) program:
+
+```
+make -j8 o//blink/blink o//test/func/smc2_test.elf
+o//blink/blink -Z o//test/func/smc2_test.elf
+[...]
+icache_resets                    = 1
+jit_blocks                       = 1
+jit_hooks_installed              = 132
+jit_hooks_deleted                = 19
+jit_page_resets                  = 21
+smc_checks                       = 22
+smc_flushes                      = 22
+smc_enqueued                     = 22
+smc_segfaults                    = 22
+[...]
+```
+
+The above program performs 300+ independent write operations to RWX
+memory. However we can see very few of them resulted in segfaults, since
+most of those ops happened in the SlowMemCpy() function which uses a
+tight conditional branch loop rather than a proper jump. This let the
+program get more accomplished, before dropping out of JIT code back into
+the main interpreter loop, which is where Blink resets the SMC state.
+
 ## Pseudoteletypewriter
 
 Blink has an xterm-compatible ANSI pseudoteletypewriter display
@@ -766,11 +867,11 @@ thereby making retro video gaming in the terminal possible.
 ## Real Mode
 
 Blink supports 16-bit BIOS programs, such as SectorLISP. To boot real
-mode programs in Blink, the `o//blink/blinkenlights -r` flag may be
-passed, which puts the virtual machine in i8086 mode. Currently only a
-limited set of BIOS APIs are available. For example, Blink supports IBM
-PC Serial UART, CGA, and MDA. We hope to expand our real mode support in
-the near future, in order to run operating systems like ELKS.
+mode programs in Blink, the `blinkenlights -r` flag may be passed, which
+puts the virtual machine in i8086 mode. Currently only a limited set of
+BIOS APIs are available. For example, Blink supports IBM PC Serial UART,
+CGA, and MDA. We hope to expand our real mode support in the near
+future, in order to run operating systems like ELKS.
 
 Blink supports troubleshooting operating system bootloaders. Blink was
 designed for Cosmopolitan Libc, which embeds an operating system in each
@@ -847,38 +948,24 @@ Blink uses `SIGSYS` to deliver signals internally. This signal is
 precious to Blink. It's currently not possible for guest applications to
 capture it from external processes.
 
-Blink's JIT currently doesn't have true asynchronous signal delivery.
-Right now Blink only checks for signals from its main interpreter loop.
-Under normal circumstances, Blink will drop back into the main
-interpreter loop occasionally, when returning from functions or
-executing system calls. However JIT'd code like the following:
+### Memory Protection
 
-```c
-for (;;) {
-}
-```
+Blink offers guest programs a 48-bit virtual address space with a
+4096-byte page size. When programs are run on (1) host systems that have
+a larger page (e.g. Apple M1, Cygwin), and (2) the linear memory
+optimization is enabled (i.e. you're *not* using `blink -m`) then Blink
+may need to relax memory protections in cases where the memory intervals
+defined by the guest aren't aligned to the host system page size. This
+means that, on system with a larger than 4096 byte page size:
 
-Can form a cycle in the JIT graph that prevents signal delivery and can
-even deadlock shutdown. This is something we plan to fix soon.
+1. Misaligned read-only pages could become writable
+2. JIT hooks might not invalidate automatically on misaligned RWX pages
 
-### Self Modifying Code
-
-Blink supports self-modifying code, with some caveats.
-
-Blink currently only JITs the memory intervals declared by your ELF
-program headers as `PF_X`. If the code stored at these addresses is
-modified, then it must be invalidated by calling `mprotect(PROT_EXEC)`,
-which will atomically reset all JIT hooks if it overlaps an executable
-section. While this takes away some of the flexibility that's normally
-offered by the x86 architecture, the fact is that operating systems like
-OpenBSD already took that capability away. So in many respects, Blink is
-helping your code to be more portable. It's recommended that executables
-only morph themselves a few times during their lifecycle, because doing
-so leaks JIT memory. Blink sets aside only 31mb of .bss memory for JIT.
-Running out of JIT memory is harmless and causes Blink to safely fall
-back into interpreter mode.
-
-Memory that isn't declared by an ELF program header will be interpreted
-when executed. Blink's interpreter mode automatically invalidates any
-instruction caches when memory changes, so that code may modify itself
-freely. This upholds the same guarantees as the x86 architecture.
+It's recommended, when calling functions like mmap() and mprotect(),
+that both `addr` and `addr + size` be aliged to the host page size.
+Blink reports that value to the guest program in `getauxval(AT_PAGESZ)`,
+which should be obtainable via the POSIX API `sysconf(_SC_PAGESIZE)` if
+the C library is implemented correctly. Please note that when Blink is
+running in full virtualization mode (i.e. `blink -m`) this concern no
+longer applies. That's because Blink will allocate a full system page
+for every 4096 byte page that's mapped from a file.

@@ -15,7 +15,7 @@
 #define LINUX_VERSION       MKVERSION(LINUX_MAJOR, LINUX_MINOR, LINUX_PATCH)
 #define BLINK_VERSION       MKVERSION(BLINK_MAJOR, BLINK_MINOR, BLINK_PATCH)
 
-#if CAN_64BIT && defined(__APPLE__)
+#if CAN_64BIT && (defined(__APPLE__) || defined(__COSMOPOLITAN__))
 #define kSkew 0x088800000000
 #else
 #define kSkew 0x000000000000
@@ -39,6 +39,7 @@
 #define kBusRegion    kSemSize  // 16 is sufficient for 8-byte loads/stores
 #define kFutexMax     100
 #define kRedzoneSize  128
+#define kSmcQueueSize 32
 #define kMaxMapSize   (8ULL * 1024 * 1024 * 1024)
 #define kMaxResident  (8ULL * 1024 * 1024 * 1024)
 #define kMaxVirtual   (kMaxResident * 8)

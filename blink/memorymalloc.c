@@ -23,9 +23,13 @@
 
 #include "blink/assert.h"
 #include "blink/atomic.h"
+#include "blink/bitscan.h"
+#include "blink/builtin.h"
 #include "blink/bus.h"
 #include "blink/debug.h"
 #include "blink/errno.h"
+#include "blink/fds.h"
+#include "blink/jit.h"
 #include "blink/linux.h"
 #include "blink/log.h"
 #include "blink/machine.h"
@@ -79,7 +83,7 @@ void FreeAnonymousPage(struct System *s, u8 *page) {
 
 static size_t GetBigSize(size_t n) {
   unassert(n);
-  long z = GetSystemPageSize();
+  long z = FLAG_pagesize;
   return ROUNDUP(n, z);
 }
 
@@ -163,12 +167,20 @@ static void FreeFileMaps(struct System *s) {
 
 void CleanseMemory(struct System *s, size_t size) {
   i64 oldrss;
-  if (s->memchurn >= s->rss / 2) {
+  if (s->memchurn >= (s->rss >> 1)) {
     (void)(oldrss = s->rss);
     FreeEmptyPageTables(s, s->cr3, 1);
     MEM_LOGF("freed %" PRId64 " page tables", oldrss - s->rss);
     s->memchurn = 0;
   }
+}
+
+u64 GetFileDescriptorLimit(struct System *s) {
+  u64 lim;
+  LOCK(&s->mmap_lock);
+  lim = Read64(s->rlim[RLIMIT_NOFILE_LINUX].cur);
+  UNLOCK(&s->mmap_lock);
+  return lim;
 }
 
 long GetMaxVss(struct System *s) {
@@ -199,7 +211,7 @@ struct System *NewSystem(int mode) {
     }
   }
 #ifdef HAVE_JIT
-  InitJit(&s->jit);
+  InitJit(&s->jit, (uintptr_t)JitlessDispatch);
 #endif
   InitFds(&s->fds);
   unassert(!pthread_mutex_init(&s->sig_lock, 0));
@@ -599,7 +611,7 @@ static bool FreePage(struct System *s, i64 virt, u64 entry, u64 size,
     return false;
   } else if ((entry & (PAGE_HOST | PAGE_MAP | PAGE_MUG)) ==
              (PAGE_HOST | PAGE_MAP | PAGE_MUG)) {
-    pagesize = GetSystemPageSize();
+    pagesize = FLAG_pagesize;
     real = entry & PAGE_TA;
     mug = ROUNDDOWN(real, pagesize);
     unassert(!Munmap((void *)mug, real - mug + size));
@@ -727,20 +739,33 @@ static int FailDueToHostAlignment(i64 virt, long pagesize, const char *kind) {
   return einval();
 }
 
+static int DetermineHostProtection(int prot) {
+  int sysprot;
+  // blink never executes guest memory on metal
+  sysprot = prot & ~PROT_EXEC;
+  // when memory is being fully virtualized,
+  // blink will check permissions on its own
+  // note we can't force write permission in
+  // some cases such as shared file mappings
+  if (!HasLinearMapping()) {
+    sysprot |= PROT_READ;
+  }
+  return sysprot;
+}
+
 i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
                    i64 offset, bool shared, bool fixedmap) {
   u8 *mi;
-  int prot;
   int demand;
   int method;
   i64 result;
   bool mutated;
   void *got, *want;
   long i, pagesize;
+  int prot, sysprot;
   long vss_delta, rss_delta;
   i64 ti, pt, end, pages, level, entry;
   struct ContiguousMemoryRanges ranges;
-  MEM_LOGF("ReserveVirtual(%#" PRIx64 ", %#" PRIx64 ")", virt, size);
 
   // we determine these
   unassert(!(flags & PAGE_TA));
@@ -748,6 +773,13 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
   unassert(!(flags & PAGE_HOST));
   unassert(!(flags & PAGE_RSRV));
   unassert(s->mode == XED_MODE_LONG);
+
+  // determine memory protection
+  prot = GetProtection(flags);
+  sysprot = DetermineHostProtection(prot);
+
+  MEM_LOGF("ReserveVirtual(%#" PRIx64 ", %#" PRIx64 ", %s)", virt, size,
+           DescribeProt(prot));
 
   if (!IsValidAddrSize(virt, size)) {
     LOGF("mmap(addr=%#" PRIx64 ", size=%#" PRIx64 ") is not a legal mapping",
@@ -760,14 +792,14 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
     return einval();
   }
 
-  pagesize = GetSystemPageSize();
+  pagesize = FLAG_pagesize;
 
   if (HasLinearMapping()) {
     if (virt & (pagesize - 1)) {
       return FailDueToHostAlignment(virt, pagesize, "address");
     }
     if (offset & (pagesize - 1)) {
-      return FailDueToHostAlignment(virt, pagesize, "file offset");
+      return FailDueToHostAlignment(offset, pagesize, "file offset");
     }
   }
 
@@ -815,9 +847,6 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
     }
   }
 
-  prot = ((flags & PAGE_U ? PROT_READ : 0) |
-          ((flags & PAGE_RW) || fd == -1 ? PROT_WRITE : 0));
-
   if (HasLinearMapping()) {
     // create a linear mapping. doing this runs the risk of destroying
     // things the kernel put into our address space that blink doesn't
@@ -827,7 +856,7 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
     // please note we need to take off the seatbelt after an execve().
     errno = 0;
     want = virt ? ToHost(virt) : 0;
-    if ((got = Mmap(want, size, prot,                       //
+    if ((got = Mmap(want, size, sysprot,                    //
                     (method |                               //
                      (fd == -1 ? MAP_ANONYMOUS_ : 0) |      //
                      (shared ? MAP_SHARED : MAP_PRIVATE)),  //
@@ -910,7 +939,7 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
             }
             mugflags = (shared ? MAP_SHARED : MAP_PRIVATE) |
                        (fd == -1 ? MAP_ANONYMOUS_ : 0);
-            mug = AllocateBig(mugsize, prot, mugflags, fd, mugoff);
+            mug = AllocateBig(mugsize, sysprot, mugflags, fd, mugoff);
             if (!mug) {
               ERRF("mmap(virt=%" PRIx64
                    ", size=%ld, flags=%#x, fd=%d, offset=%#" PRIx64
@@ -941,6 +970,12 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
         if ((virt += 4096) >= end) {
           s->rss += rss_delta;
           s->vss += vss_delta;
+          // TODO(jart): We should call InvalidateSystem appropriately.
+#ifndef DISABLE_JIT
+          if (HasLinearMapping() && !IsJitDisabled(&s->jit)) {
+            result = ProtectRwxMemory(s, result, result, size, pagesize, prot);
+          }
+#endif
           return result;
         }
         if (++ti == 512) break;
@@ -1014,7 +1049,7 @@ int GetProtection(u64 key) {
   int prot = 0;
   if (key & PAGE_U) prot |= PROT_READ;
   if (key & PAGE_RW) prot |= PROT_WRITE;
-  if (~key & PAGE_XD) prot |= PROT_EXEC;
+  if (!(key & PAGE_XD)) prot |= PROT_EXEC;
   return prot;
 }
 
@@ -1073,17 +1108,20 @@ bool IsFullyUnmapped(struct System *s, i64 virt, i64 size) {
   return true;
 }
 
-int ProtectVirtual(struct System *s, i64 virt, i64 size, int prot) {
+int ProtectVirtual(struct System *s, i64 virt, i64 size, int prot,
+                   bool hostonly) {
   int rc;
   int sysprot;
-  u64 pt, key;
   u8 *mi, *real;
+  u64 pt, pt2, key;
   long i, pagesize;
-  i64 ti, end, level, orig_virt;
+  i64 a, b, ti, end, level, orig_virt;
+  bool executable_code_was_made_non_executable;
   struct ContiguousMemoryRanges ranges;
+  MEM_LOGF("protecting virtual [%#" PRIx64 ",%#" PRIx64 ") w/ %s", virt,
+           virt + size, DescribeProt(prot));
   orig_virt = virt;
-  (void)orig_virt;
-  pagesize = GetSystemPageSize();
+  pagesize = FLAG_pagesize;
   if (!IsValidAddrSize(virt, size)) {
     return einval();
   }
@@ -1093,30 +1131,35 @@ int ProtectVirtual(struct System *s, i64 virt, i64 size, int prot) {
     return enomem();
   }
   key = SetProtection(prot);
-  // some operating systems e.g. openbsd and apple M1, have a
-  // W^X invariant. we don't need to execute guest memory so:
-  sysprot = prot & ~PROT_EXEC;
+  sysprot = DetermineHostProtection(prot);
   // in linear mode, the guest might try to do something like
   // set a 4096 byte guard page to PROT_NONE at the bottom of
   // its 64kb stack. if the host operating system has a 64 kb
   // page size, then that would be bad. we can't satisfy prot
   // unless the guest takes the page size into consideration.
   if (HasLinearMapping() &&
-      ((virt & (pagesize - 1)) && (size & (pagesize - 1)))) {
+      (virt - ROUNDDOWN(virt, pagesize) >= 4096 ||
+       ROUNDUP(virt + size, pagesize) - (virt + size) >= 4096)) {
+    unassert(!hostonly);  // caller should know better
     sysprot = PROT_READ | PROT_WRITE;
   }
   memset(&ranges, 0, sizeof(ranges));
+  executable_code_was_made_non_executable = false;
   for (rc = 0, end = virt + size;;) {
     for (pt = s->cr3, level = 39; level >= 12; level -= 9) {
       ti = (virt >> level) & 511;
       mi = GetPageAddress(s, pt, level == 39) + ti * 8;
       pt = LoadPte(mi);
       if (level > 12) {
-        unassert(pt & PAGE_V);
+        if (!(pt & PAGE_V)) {
+          goto MemoryDisappeared;
+        }
         continue;
       }
       for (;;) {
-        unassert(pt & PAGE_V);
+        if (!(pt & PAGE_V)) {
+          goto MemoryDisappeared;
+        }
         if (HasLinearMapping() && (pt & (PAGE_HOST | PAGE_MAP | PAGE_MUG)) ==
                                       (PAGE_HOST | PAGE_MAP)) {
           AddPageToRanges(&ranges, virt, end);
@@ -1130,9 +1173,28 @@ int ProtectVirtual(struct System *s, i64 virt, i64 size, int prot) {
             rc = -1;
           }
         }
-        pt &= ~(PAGE_U | PAGE_RW | PAGE_XD);
-        pt |= key;
-        StorePte(mi, pt);
+        if (!hostonly) {
+          for (;;) {
+            pt2 = (pt & ~(PAGE_U | PAGE_RW | PAGE_XD)) | key;
+            if (CasPte(mi, pt, pt2)) break;
+            pt = LoadPte(mi);
+            if (!(pt & PAGE_V)) {
+              goto MemoryDisappeared;
+            }
+          }
+#ifdef HAVE_JIT
+          if (!(pt & PAGE_XD) && (pt2 & PAGE_XD)) {
+            // exec -> non-exec
+            // avoid clearing instruction cache which is costly
+            executable_code_was_made_non_executable = true;
+          } else if ((pt & PAGE_XD) && !(pt2 & PAGE_XD) &&
+                     !IsJitDisabled(&s->jit)) {
+            // non-exec -> exec
+            // delete jit paths associated with this page
+            ResetJitPage(&s->jit, virt);
+          }
+#endif
+        }
         if ((virt += 4096) >= end) {
           goto FinishedCrawling;
         }
@@ -1144,26 +1206,39 @@ int ProtectVirtual(struct System *s, i64 virt, i64 size, int prot) {
 FinishedCrawling:
   if (HasLinearMapping()) {
     for (i = 0; i < ranges.i; ++i) {
-      if (ranges.p[i].a & (pagesize - 1)) {
+      a = ROUNDDOWN(ranges.p[i].a, pagesize);
+      b = ranges.p[i].b;
+      if (Mprotect(ToHost(a), b - a, sysprot, "linear")) {
         LOGF("failed to %s subrange"
              " [%" PRIx64 ",%" PRIx64 ") within requested range"
              " [%" PRIx64 ",%" PRIx64 "): %s",
-             "mprotect", ranges.p[i].a, ranges.p[i].b, orig_virt,
-             orig_virt + size, "HOST_PAGE_MISALIGN");
-      } else if (Mprotect(ToHost(ranges.p[i].a), ranges.p[i].b - ranges.p[i].a,
-                          sysprot, "linear")) {
-        LOGF("failed to %s subrange"
-             " [%" PRIx64 ",%" PRIx64 ") within requested range"
-             " [%" PRIx64 ",%" PRIx64 "): %s",
-             "mprotect", ranges.p[i].a, ranges.p[i].b, orig_virt,
-             orig_virt + size, DescribeHostErrno(errno));
+             "mprotect", a, b, orig_virt, orig_virt + size,
+             DescribeHostErrno(errno));
         rc = -1;
       }
     }
     free(ranges.p);
   }
-  InvalidateSystem(s, true, false);
+  if (!hostonly) {
+#ifndef DISABLE_JIT
+    if (HasLinearMapping() && !IsJitDisabled(&s->jit)) {
+      ProtectRwxMemory(s, rc, orig_virt, size, pagesize, prot);
+    }
+#endif
+    InvalidateSystem(s, true, executable_code_was_made_non_executable);
+  }
   return rc;
+MemoryDisappeared:
+  // mprotect() doesn't lock pages, so a race condition can
+  // occur if the guest fiendishly munmaps this memory from
+  // a different thread. in that case, the main thing we do
+  // care about is not crashing. therefore it should not be
+  // too concerning that this failure could occur after the
+  // address space has been mutated.
+  if (HasLinearMapping()) {
+    free(ranges.p);
+  }
+  return enomem();
 }
 
 int SyncVirtual(struct System *s, i64 virt, i64 size, int sysflags) {
@@ -1179,7 +1254,7 @@ int SyncVirtual(struct System *s, i64 virt, i64 size, int sysflags) {
   }
   orig_virt = virt;
   (void)orig_virt;
-  pagesize = GetSystemPageSize();
+  pagesize = FLAG_pagesize;
   if (HasLinearMapping() && (skew = virt & (pagesize - 1))) {
     size += skew;
     virt -= skew;
@@ -1196,11 +1271,15 @@ int SyncVirtual(struct System *s, i64 virt, i64 size, int sysflags) {
       mi = GetPageAddress(s, pt, level == 39) + ti * 8;
       pt = LoadPte(mi);
       if (level > 12) {
-        unassert(pt & PAGE_V);
+        if (!(pt & PAGE_V)) {
+          goto MemoryDisappeared;
+        }
         continue;
       }
       for (;;) {
-        unassert(pt & PAGE_V);
+        if (!(pt & PAGE_V)) {
+          goto MemoryDisappeared;
+        }
         if (HasLinearMapping() && (pt & (PAGE_HOST | PAGE_MAP | PAGE_MUG)) ==
                                       (PAGE_HOST | PAGE_MAP)) {
           AddPageToRanges(&ranges, virt, end);
@@ -1241,32 +1320,47 @@ FinishedCrawling:
     free(ranges.p);
   }
   return rc;
+MemoryDisappeared:
+  if (HasLinearMapping()) {
+    free(ranges.p);
+  }
+  return enomem();
 }
 
-static i64 FindGuestAddress(struct System *s, uintptr_t hp, u64 pt, long lvl) {
+static i64 FindGuestAddr(struct System *s, uintptr_t hp, u64 pt, long lvl,
+                         u64 *out_pte) {
   u8 *mi;
   i64 res;
   u64 pte, i;
-  mi = GetPageAddress(s, pt, lvl == 1);
-  for (i = 0; i < 512; ++i) {
-    if ((pte = LoadPte(mi + i * 8)) & PAGE_V) {
-      if (lvl == 4) {
-        if ((pte & PAGE_HOST) && (pte & PAGE_TA) == hp) {
-          return i << 39;
+  if ((mi = GetPageAddress(s, pt, lvl == 1))) {
+    for (i = 0; i < 512; ++i) {
+      if ((pte = LoadPte(mi + i * 8)) & PAGE_V) {
+        if (lvl == 4) {
+          if ((pte & PAGE_HOST) && (pte & PAGE_TA) == hp) {
+            if (out_pte) {
+              *out_pte = pte;
+            }
+            return i << 39;
+          }
+        } else if ((res = FindGuestAddr(s, hp, pte, lvl + 1, out_pte)) != -1) {
+          return i << 39 | res >> 9;
         }
-      } else if ((res = FindGuestAddress(s, hp, pte, lvl + 1)) != -1) {
-        return i << 39 | res >> 9;
       }
     }
   }
   return -1;
 }
 
-i64 ConvertHostToGuestAddress(struct System *s, void *ha) {
+// Reverse maps real host address to virtual guest address if exists.
+// On failure the host address is returned and zero is stored in pte.
+i64 ConvertHostToGuestAddress(struct System *s, void *ha, u64 *out_pte) {
   i64 g48;
+  uintptr_t base;
+  if (out_pte) *out_pte = 0;
   if ((uintptr_t)ha < kNullSize) return (uintptr_t)ha;
-  if (HasLinearMapping()) return ToGuest(ha);
-  if ((g48 = FindGuestAddress(s, (uintptr_t)ha & -4096, s->cr3, 1)) != -1) {
+  if (HasLinearMapping() && !out_pte) return ToGuest(ha);
+  base = (uintptr_t)ha & -4096;
+  if ((g48 = FindGuestAddr(s, base, s->cr3, 1, out_pte)) != -1) {
     return ((i64)((u64)g48 << 16) >> 16) | ((uintptr_t)ha & 4095);
   } else {
     return (uintptr_t)ha;

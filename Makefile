@@ -8,7 +8,7 @@ ARCHITECTURES = x86_64 x86_64-gcc49 i486 aarch64 arm mips s390x mipsel mips64 mi
 .SUFFIXES:
 .DELETE_ON_ERROR:
 .FEATURES: output-sync
-.PHONY: o all clean check check2 test tags
+.PHONY: o all clean check check2 test tags install
 
 ifeq ($(MAKE_VERSION), 3.81)
 $(error please "brew install make" and use the "gmake" command)
@@ -76,21 +76,25 @@ check2:	o/$(MODE)/test/sse			\
 	o/$(MODE)/test/func			\
 	o/$(MODE)/test/asm			\
 	o/$(MODE)/third_party/ltp		\
-	o/$(MODE)/test/asm/emulates		\
-	o/$(MODE)/test/func/emulates
+
+# TODO(jart): upgrade qemu due to its bugs
+#	o/$(MODE)/test/asm/emulates		\
+#	o/$(MODE)/test/func/emulates
 
 emulates:					\
 	o/$(MODE)/test/asm			\
 	o/$(MODE)/test/flat			\
 	o/$(MODE)/test/metal			\
 	o/$(MODE)/third_party/ltp/medium	\
-	o/$(MODE)/third_party/cosmo/emulates
+
+# TODO(jart): upgrade qemu due to its bugs
+#	o/$(MODE)/third_party/cosmo/emulates
 
 tags: TAGS HTAGS
 
 include build/config.mk
 include build/rules.mk
-include third_party/zlib/zlib.mk
+include third_party/libz/zlib.mk
 include blink/blink.mk
 include test/test.mk
 include test/asm/asm.mk
@@ -153,7 +157,7 @@ MAKEFILES =				\
 	build/config.mk			\
 	build/rules.mk			\
 	blink/blink.mk			\
-	third_party/zlib/zlib.mk
+	third_party/libz/zlib.mk
 
 $(OBJS): $(MAKEFILES)
 
@@ -227,9 +231,12 @@ install:
 	mkdir -p $(PREFIX)/bin
 	install -m 0755 o//blink/blink $(PREFIX)/bin/blink
 	install -m 0755 o//blink/blinkenlights $(PREFIX)/bin/blinkenlights
+	mkdir -p $(PREFIX)/share/man/man1
+	install -m 0644 blink/blink.1 $(PREFIX)/share/man/man1/blink.1
+	install -m 0644 blink/blinkenlights.1 $(PREFIX)/share/man/man1/blinkenlights.1
 
 clean:
-	rm -f $(OBJS) o/$(MODE)/blink/blink o/$(MODE)/blink/blinkenlights o/$(MODE)/blink/blink.a o/$(MODE)/third_party/zlib/zlib.a
+	rm -f $(OBJS) o/$(MODE)/blink/blink o/$(MODE)/blink/blinkenlights o/$(MODE)/blink/blink.a o/$(MODE)/third_party/libz/zlib.a
 
 distclean:
 	rm -rf o

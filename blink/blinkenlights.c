@@ -38,6 +38,7 @@
 #include <wctype.h>
 
 #include "blink/assert.h"
+#include "blink/atomic.h"
 #include "blink/bitscan.h"
 #include "blink/breakpoint.h"
 #include "blink/builtin.h"
@@ -172,13 +173,13 @@ C       continue harder           -w ADDR  push watchpoint\n\
 q       quit                      -L PATH  log file location\n\
 f       finish                    -R       deliver crash sigs\n\
 R       restart                   -H       disable highlighting\n\
-x       hex                       -v       blinkenlights version\n\
-?       help                      -j       enables jit\n\
+?       help                      -v       blinkenlights version\n\
+x       sse radix                 -j       enables jit\n\
 t       sse type                  -m       disables memory safety\n\
-w       sse width                 -N       natural scroll wheel\n\
+T       sse size                  -N       natural scroll wheel\n\
 B       pop breakpoint            -s       system call logging\n\
 p       profiling mode            -C PATH  chroot directory\n\
-ctrl-t  turbo                     -?       help\n\
+ctrl-t  turbo                     -h       help\n\
 alt-t   slowmo"
 
 #define FPS        60     // frames per second written to tty
@@ -348,7 +349,6 @@ static int tick;
 static int speed;
 static int vidya;
 static int ttyin;
-static int focus;
 static int ttyout;
 static int opline;
 static int action;
@@ -430,18 +430,18 @@ bad evex ll\0\
 unimplemented\0\
 ";
 
-static struct CHS {
+static const struct Chs {
   ssize_t imagesize;
   int c, h, s;
-} chs[] = {
-  { 163840,  40, 1, 8 },
-  { 184320,  40, 1, 9 },
-  { 327680,  40, 2, 8 },
-  { 368640,  40, 2, 9 },
-  { 737280,  80, 2, 9 },
-  { 1228800, 80, 2, 15 },
-  { 1474560, 80, 2, 18 },
-  { 2949120, 80, 2, 36 }
+} kChs[] = {
+    {163840, 40, 1, 8},    //
+    {184320, 40, 1, 9},    //
+    {327680, 40, 2, 8},    //
+    {368640, 40, 2, 9},    //
+    {737280, 80, 2, 9},    //
+    {1228800, 80, 2, 15},  //
+    {1474560, 80, 2, 18},  //
+    {2949120, 80, 2, 36},  //
 };
 
 static off_t diskimagesize = 0;
@@ -2658,18 +2658,18 @@ static void OnDiskServiceBadCommand(void) {
   SetCarry(true);
 }
 
-static void DetermineCHS(void) {
-  struct stat st;
+static void DetermineChs(void) {
   int i;
+  struct stat st;
   off_t size = diskimagesize;
   if (size) return;  // do nothing if disk geometry already detected
   unassert(!OverlaysStat(AT_FDCWD, m->system->elf.prog, &st, 0));
   diskimagesize = size = st.st_size;
-  for (i = 0; i < ARRAYLEN(chs); ++i) {
-    if (size == chs[i].imagesize) {
-      diskcyls = chs[i].c;
-      diskheads = chs[i].h;
-      disksects = chs[i].s;
+  for (i = 0; i < ARRAYLEN(kChs); ++i) {
+    if (size == kChs[i].imagesize) {
+      diskcyls = kChs[i].c;
+      diskheads = kChs[i].h;
+      disksects = kChs[i].s;
       return;
     }
   }
@@ -2677,16 +2677,16 @@ static void DetermineCHS(void) {
 
 static void OnDiskServiceGetParams(void) {
   size_t lastsector, lastcylinder, lasthead;
-  DetermineCHS();
-  lastcylinder = GetLastIndex(diskimagesize,
-                              512 * disksects * diskheads, 0, 1023);
+  DetermineChs();
+  lastcylinder =
+      GetLastIndex(diskimagesize, 512 * disksects * diskheads, 0, 1023);
   lasthead = GetLastIndex(diskimagesize, 512 * disksects, 0, diskheads - 1);
   lastsector = GetLastIndex(diskimagesize, 512, 1, disksects);
   m->dl = 1;
   m->dh = lasthead;
   m->cl = lastcylinder >> 8 << 6 | lastsector;
   m->ch = lastcylinder;
-  m->bl = 4;        // CMOS drive type: 1.4M floppy
+  m->bl = 4;  // CMOS drive type: 1.4M floppy
   m->ah = 0;
   m->es.sel = m->es.base = 0;
   Put16(m->di, 0);
@@ -2697,15 +2697,15 @@ static void OnDiskServiceReadSectors(void) {
   int fd;
   i64 addr, size;
   i64 sectors, drive, head, cylinder, sector, offset;
-  DetermineCHS();
+  DetermineChs();
   sectors = m->al;
   drive = m->dl;
   head = m->dh;
   cylinder = (m->cl & 192) << 2 | m->ch;
   sector = (m->cl & 63) - 1;
   size = sectors * 512;
-  offset = sector * 512 + head * 512 * disksects
-                        + cylinder * 512 * disksects * diskheads;
+  offset = sector * 512 + head * 512 * disksects +
+           cylinder * 512 * disksects * diskheads;
   (void)drive;
   ELF_LOGF("bios read sectors %" PRId64 " "
            "@ sector %" PRId64 " cylinder %" PRId64 " head %" PRId64
@@ -3062,25 +3062,25 @@ static bool OnHalt(int interrupt) {
       return true;
     case kMachineSegmentationFault:
       OnSegmentationFault();
-      return false;
+      return true;
     case kMachineProtectionFault:
       OnProtectionFault();
-      return false;
+      return true;
     case kMachineSimdException:
       OnSimdException();
-      return false;
+      return true;
     case kMachineUndefinedInstruction:
       OnUndefinedInstruction();
-      return false;
+      return true;
     case kMachineDecodeError:
       OnDecodeError();
-      return false;
+      return true;
     case kMachineDivideError:
       OnDivideError();
-      return false;
+      return true;
     case kMachineFpuException:
       OnFpuException();
-      return false;
+      return true;
     case kMachineExitTrap:
       OnExitTrap();
       return true;
@@ -3173,10 +3173,6 @@ static void OnEnd(void) {
 static void OnEnter(void) {
   dialog = NULL;
   action &= ~MODAL;
-}
-
-static void OnTab(void) {
-  focus = (focus + 1) % ARRAYLEN(pan.p);
 }
 
 static void OnUp(void) {
@@ -3394,7 +3390,6 @@ static void HandleKeyboard(const char *k) {
     CASE('p', showprofile = !showprofile);
     CASE('B', PopBreakpoint(&breakpoints));
     CASE('M', ToggleMouseTracking());
-    CASE('\t', OnTab());
     CASE('\r', OnEnter());
     CASE('\n', OnEnter());
     CASE(Ctrl('C'), OnInt());
@@ -3547,10 +3542,12 @@ static void Execute(void) {
     ++cycle;
     ProfileOp(m, GetPc(m) - m->oplen);
   }
+  if (atomic_load_explicit(&m->attention, memory_order_acquire)) {
+    CheckForSignals(m);
+  }
 }
 
 static void Exec(void) {
-  int sig;
   ssize_t bp;
   int interrupt;
   LOGF("Exec");
@@ -3566,11 +3563,6 @@ static void Exec(void) {
       LoadInstruction(m, GetPc(m));
       if (verbose) LogInstruction();
       Execute();
-      if (m->signals & ~m->sigmask) {
-        if ((sig = ConsumeSignal(m, 0, 0))) {
-          exit(128 + sig);
-        }
-      }
       CheckFramePointer();
     } else if (!(action & CONTINUE) &&
                (bp = IsAtWatchpoint(&watchpoints, m)) != -1) {
@@ -3594,11 +3586,6 @@ static void Exec(void) {
         }
         if (verbose) LogInstruction();
         Execute();
-        if (m->signals & ~m->sigmask) {
-          if ((sig = ConsumeSignal(m, 0, 0))) {
-            exit(128 + sig);
-          }
-        }
       KeepGoing:
         CheckFramePointer();
         if (action & ALARM) {
@@ -3817,8 +3804,11 @@ static void GetOpts(int argc, char *argv[]) {
   FLAG_overlays = getenv("BLINK_OVERLAYS");
   if (!FLAG_overlays) FLAG_overlays = DEFAULT_OVERLAYS;
 #endif
-  while ((opt = GetOpt(argc, argv, "hjmvVtrzRNsZb:Hw:L:C:")) != -1) {
+  while ((opt = GetOpt(argc, argv, "0hjmvVtrzRNsZb:Hw:L:C:")) != -1) {
     switch (opt) {
+      case '0':
+        FLAG_zero = true;
+        break;
       case 'j':
         FLAG_wantjit = true;
         break;
@@ -3888,6 +3878,7 @@ static void GetOpts(int argc, char *argv[]) {
     }
   }
   LogInit(FLAG_logpath);
+  if (wantmetal) wantunsafe = false;
   FLAG_nolinear = !wantunsafe;
 }
 
@@ -3912,7 +3903,7 @@ int VirtualMachine(int argc, char *argv[]) {
   optind_++;
   do {
     action = 0;
-    LoadProgram(m, codepath, codepath, argv + optind_ - 1, environ);
+    LoadProgram(m, codepath, codepath, argv + optind_ - 1 + FLAG_zero, environ);
     if (m->system->codesize) {
       ophits = (unsigned long *)AllocateBig(
           m->system->codesize * sizeof(unsigned long), PROT_READ | PROT_WRITE,
@@ -3987,19 +3978,25 @@ void TerminateSignal(struct Machine *m, int sig) {
 }
 
 static void OnSigSegv(int sig, siginfo_t *si, void *uc) {
+  struct Machine *m = g_machine;
+#ifdef __APPLE__
+  sig = FixXnuSignal(m, sig, si);
+#endif
+#ifndef DISABLE_JIT
+  if (IsSelfModifyingCodeSegfault(m, si)) return;
+#endif
   LOGF("OnSigSegv(%p)", si->si_addr);
-  RestoreIp(g_machine);
+  RestoreIp(m);
   // TODO(jart): Fix address translation in non-linear mode.
-  g_machine->faultaddr =
-      ConvertHostToGuestAddress(g_machine->system, si->si_addr);
-  ERRF("SIGSEGV AT ADDRESS %" PRIx64 " (OR %p) at RIP=%" PRIx64,
-       g_machine->faultaddr, si->si_addr, m->ip);
-  ERRF("BACKTRACE\n\t%s", GetBacktrace(g_machine));
+  m->faultaddr = ConvertHostToGuestAddress(m->system, si->si_addr, 0);
+  ERRF("SIGSEGV AT ADDRESS %" PRIx64 " (OR %p) at RIP=%" PRIx64, m->faultaddr,
+       si->si_addr, m->ip);
+  ERRF("BACKTRACE\n\t%s", GetBacktrace(m));
   if (!react) {
     sig = UnXlatSignal(si->si_signo);
     DeliverSignalToUser(m, sig, UnXlatSiCode(sig, si->si_code));
   }
-  siglongjmp(g_machine->onhalt, kMachineSegmentationFault);
+  siglongjmp(m->onhalt, kMachineSegmentationFault);
 }
 
 int main(int argc, char *argv[]) {
@@ -4020,8 +4017,8 @@ int main(int argc, char *argv[]) {
   react = true;
   tuimode = true;
   WriteErrorInit();
-  GetOpts(argc, argv);
   InitMap();
+  GetOpts(argc, argv);
   InitBus();
 #ifdef HAVE_JIT
   AddPath_StartOp_Hook = AddPath_StartOp_Tui;

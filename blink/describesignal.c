@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "blink/linux.h"
+#include "blink/thread.h"
 #include "blink/util.h"
 
 const char *DescribeSignal(int sig) {
@@ -95,7 +96,9 @@ const char *DescribeSignal(int sig) {
   p = buf;
   if (SIGRTMIN_LINUX <= sig && sig <= SIGRTMAX_LINUX) {
     p = stpcpy(p, "SIGRTMIN+");
+    p = FormatInt64(p, sig - SIGRTMIN_LINUX);
+  } else {
+    p = FormatInt64(p, sig);
   }
-  p = FormatInt64(p, sig);
   return buf;
 }

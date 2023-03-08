@@ -53,9 +53,11 @@
 #include "blink/atomic.h"
 #include "blink/bus.h"
 #include "blink/case.h"
+#include "blink/checked.h"
 #include "blink/debug.h"
 #include "blink/endian.h"
 #include "blink/errno.h"
+#include "blink/flag.h"
 #include "blink/iovs.h"
 #include "blink/limits.h"
 #include "blink/linux.h"
@@ -93,6 +95,10 @@
 
 #ifdef HAVE_SCHED_H
 #include <sched.h>
+#endif
+
+#ifdef HAVE_EPOLL_PWAIT1
+#include <sys/epoll.h>
 #endif
 
 #ifdef DISABLE_OVERLAYS
@@ -489,7 +495,7 @@ static void *OnSpawn(void *arg) {
     m->canhalt = true;
     unassert(!pthread_sigmask(SIG_SETMASK, &m->spawn_sigmask, 0));
   } else if (rc == kMachineFatalSystemSignal) {
-    HandleFatalSystemSignal(m);
+    HandleFatalSystemSignal(m, &g_siginfo);
   }
   Blink(m);
 }
@@ -990,9 +996,19 @@ static int SysPrctl(struct Machine *m, int op, i64 arg2, i64 arg3, i64 arg4,
       return SysPrctlGetTsc(m, arg2);
     case PR_SET_TSC_LINUX:
       return SysPrctlSetTsc(m, arg2);
+#ifdef PR_CAPBSET_DROP
+    case PR_CAPBSET_DROP_LINUX:
+      return prctl(PR_CAPBSET_DROP, arg2, arg3, arg4, arg5);
+#else
+    case PR_CAPBSET_DROP_LINUX:
+      return einval();
+#endif
 #ifdef PR_SET_NO_NEW_PRIVS
     case PR_SET_NO_NEW_PRIVS_LINUX:
       return prctl(PR_SET_NO_NEW_PRIVS, arg2, arg3, arg4, arg5);
+#else
+    case PR_SET_NO_NEW_PRIVS_LINUX:
+      return einval();
 #endif
     case PR_GET_SECCOMP_LINUX:
     case PR_SET_SECCOMP_LINUX:
@@ -1059,17 +1075,10 @@ static int SysMprotect(struct Machine *m, i64 addr, u64 size, int prot) {
   }
   BEGIN_NO_PAGE_FAULTS;
   LOCK(&m->system->mmap_lock);
-  rc = ProtectVirtual(m->system, addr, size, prot);
-#ifdef HAVE_JIT
-  if (rc != -1 && (prot & PROT_EXEC)) {
-    LOGF("resetting jit hooks");
-    ClearJitHooks(&m->system->jit);
-  }
-#endif
+  rc = ProtectVirtual(m->system, addr, size, prot, false);
   unassert(CheckMemoryInvariants(m->system));
   UNLOCK(&m->system->mmap_lock);
   END_NO_PAGE_FAULTS;
-  InvalidateSystem(m->system, false, true);
   return rc;
 }
 
@@ -1083,7 +1092,7 @@ static i64 SysBrk(struct Machine *m, i64 addr) {
   BEGIN_NO_PAGE_FAULTS;
   LOCK(&m->system->mmap_lock);
   MEM_LOGF("brk(%#" PRIx64 ") currently %#" PRIx64, addr, m->system->brk);
-  pagesize = GetSystemPageSize();
+  pagesize = FLAG_pagesize;
   addr = ROUNDUP(addr, pagesize);
   if (addr >= kNullSize) {
     if (addr > m->system->brk) {
@@ -1217,7 +1226,7 @@ static i64 SysMmapImpl(struct Machine *m, i64 virt, u64 size, int prot,
     if ((virt = FindVirtual(m->system, m->system->automap, size)) == -1) {
       goto Finished;
     }
-    newautomap = ROUNDUP(virt + size, GetSystemPageSize());
+    newautomap = ROUNDUP(virt + size, FLAG_pagesize);
     if (newautomap >= FLAG_automapend) {
       newautomap = FLAG_automapstart;
     }
@@ -1293,11 +1302,17 @@ static int SysMsync(struct Machine *m, i64 virt, u64 size, int flags) {
 }
 
 static int SysDup1(struct Machine *m, i32 fildes) {
+  u64 lim;
   int oflags;
   int newfildes;
   struct Fd *fd;
   if (fildes < 0) return ebadf();
+  if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
   if ((newfildes = dup(fildes)) != -1) {
+    if (newfildes >= lim) {
+      close(newfildes);
+      return emfile();
+    }
     LOCK(&m->system->fds.lock);
     unassert(fd = GetFd(&m->system->fds, fildes));
     oflags = fd->oflags & ~O_CLOEXEC;
@@ -1326,8 +1341,7 @@ static int Dup3(struct Machine *m, int fildes, int newfildes, int flags) {
 #endif
 
 static int SysDup2(struct Machine *m, i32 fildes, i32 newfildes) {
-  int rc;
-  int oflags;
+  int rc, oflags;
   struct Fd *fd;
   if (newfildes < 0) {
     LOGF("dup2() ebadf");
@@ -1342,6 +1356,8 @@ static int SysDup2(struct Machine *m, i32 fildes, i32 newfildes) {
       rc = -1;
     }
     UNLOCK(&m->system->fds.lock);
+  } else if (newfildes >= GetFileDescriptorLimit(m->system)) {
+    return ebadf();
   } else if ((rc = Dup2(m, fildes, newfildes)) != -1) {
     LOCK(&m->system->fds.lock);
     if ((fd = GetFd(&m->system->fds, newfildes))) {
@@ -1363,6 +1379,7 @@ static int SysDup3(struct Machine *m, i32 fildes, i32 newfildes, i32 flags) {
   if (newfildes < 0) return ebadf();
   if (fildes == newfildes) return einval();
   if (flags & ~O_CLOEXEC_LINUX) return einval();
+  if (newfildes >= GetFileDescriptorLimit(m->system)) return ebadf();
 #ifdef HAVE_DUP3
   if ((rc = Dup3(m, fildes, newfildes, XlatOpenFlags(flags))) != -1) {
 #else
@@ -1388,10 +1405,15 @@ static int SysDup3(struct Machine *m, i32 fildes, i32 newfildes, i32 flags) {
 }
 
 static int SysDupf(struct Machine *m, i32 fildes, i32 minfildes, int cmd) {
-  int oflags;
-  int newfildes;
+  u64 lim;
   struct Fd *fd;
+  int oflags, newfildes;
+  if (minfildes >= (lim = GetFileDescriptorLimit(m->system))) return emfile();
   if ((newfildes = fcntl(fildes, cmd, minfildes)) != -1) {
+    if (newfildes >= lim) {
+      close(newfildes);
+      return emfile();
+    }
     LOCK(&m->system->fds.lock);
     unassert(fd = GetFd(&m->system->fds, fildes));
     oflags = fd->oflags & ~O_CLOEXEC;
@@ -1453,11 +1475,13 @@ static int SysUname(struct Machine *m, i64 utsaddr) {
 #ifdef HAVE_GETDOMAINNAME
   getdomainname(u.domain, sizeof(u.domain) - 1);
 #endif
+  if (!*u.domain) strcpy(u.domain, "(none)");
   strcpy(uts.domainname, u.domain);
   return CopyToUser(m, utsaddr, &uts, sizeof(uts));
 }
 
 static int SysSocket(struct Machine *m, i32 family, i32 type, i32 protocol) {
+  u64 lim;
   struct Fd *fd;
   int flags, fildes;
   flags = type & (SOCK_NONBLOCK_LINUX | SOCK_CLOEXEC_LINUX);
@@ -1465,15 +1489,21 @@ static int SysSocket(struct Machine *m, i32 family, i32 type, i32 protocol) {
   if ((type = XlatSocketType(type)) == -1) return -1;
   if ((family = XlatSocketFamily(family)) == -1) return -1;
   if ((protocol = XlatSocketProtocol(protocol)) == -1) return -1;
+  if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
   if (flags) LOCK(&m->system->exec_lock);
   if ((fildes = socket(family, type, protocol)) != -1) {
-    FixupSock(fildes, flags);
-    LOCK(&m->system->fds.lock);
-    fd = AddFd(&m->system->fds, fildes,
-               O_RDWR | (flags & SOCK_CLOEXEC_LINUX ? O_CLOEXEC : 0) |
-                   (flags & SOCK_NONBLOCK_LINUX ? O_NDELAY : 0));
-    fd->socktype = type;
-    UNLOCK(&m->system->fds.lock);
+    if (fildes >= lim) {
+      close(fildes);
+      fildes = emfile();
+    } else {
+      FixupSock(fildes, flags);
+      LOCK(&m->system->fds.lock);
+      fd = AddFd(&m->system->fds, fildes,
+                 O_RDWR | (flags & SOCK_CLOEXEC_LINUX ? O_CLOEXEC : 0) |
+                     (flags & SOCK_NONBLOCK_LINUX ? O_NDELAY : 0));
+      fd->socktype = type;
+      UNLOCK(&m->system->fds.lock);
+    }
   }
   if (flags) UNLOCK(&m->system->exec_lock);
   return fildes;
@@ -1481,6 +1511,7 @@ static int SysSocket(struct Machine *m, i32 family, i32 type, i32 protocol) {
 
 static int SysSocketpair(struct Machine *m, i32 family, i32 type, i32 protocol,
                          i64 pipefds_addr) {
+  u64 lim;
   struct Fd *fd;
   u8 fds_linux[2][4];
   int rc, flags, sysflags, fds[2];
@@ -1490,22 +1521,29 @@ static int SysSocketpair(struct Machine *m, i32 family, i32 type, i32 protocol,
   if ((family = XlatSocketFamily(family)) == -1) return -1;
   if ((protocol = XlatSocketProtocol(protocol)) == -1) return -1;
   if (!IsValidMemory(m, pipefds_addr, sizeof(fds_linux), PROT_WRITE)) return -1;
+  if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
   if (flags) LOCK(&m->system->exec_lock);
   if ((rc = socketpair(family, type, protocol, fds)) != -1) {
-    FixupSock(fds[0], flags);
-    FixupSock(fds[1], flags);
-    LOCK(&m->system->fds.lock);
-    sysflags = O_RDWR;
-    if (flags & SOCK_CLOEXEC_LINUX) sysflags |= O_CLOEXEC;
-    if (flags & SOCK_NONBLOCK_LINUX) sysflags |= O_NDELAY;
-    unassert(fd = AddFd(&m->system->fds, fds[0], sysflags));
-    fd->socktype = type;
-    unassert(fd = AddFd(&m->system->fds, fds[1], sysflags));
-    fd->socktype = type;
-    UNLOCK(&m->system->fds.lock);
-    Write32(fds_linux[0], fds[0]);
-    Write32(fds_linux[1], fds[1]);
-    unassert(!CopyToUserWrite(m, pipefds_addr, fds_linux, sizeof(fds_linux)));
+    if (fds[0] >= lim || fds[1] >= lim) {
+      close(fds[0]);
+      close(fds[1]);
+      rc = emfile();
+    } else {
+      FixupSock(fds[0], flags);
+      FixupSock(fds[1], flags);
+      LOCK(&m->system->fds.lock);
+      sysflags = O_RDWR;
+      if (flags & SOCK_CLOEXEC_LINUX) sysflags |= O_CLOEXEC;
+      if (flags & SOCK_NONBLOCK_LINUX) sysflags |= O_NDELAY;
+      unassert(fd = AddFd(&m->system->fds, fds[0], sysflags));
+      fd->socktype = type;
+      unassert(fd = AddFd(&m->system->fds, fds[1], sysflags));
+      fd->socktype = type;
+      UNLOCK(&m->system->fds.lock);
+      Write32(fds_linux[0], fds[0]);
+      Write32(fds_linux[1], fds[1]);
+      unassert(!CopyToUserWrite(m, pipefds_addr, fds_linux, sizeof(fds_linux)));
+    }
   }
   if (flags) UNLOCK(&m->system->exec_lock);
   return rc;
@@ -1599,6 +1637,7 @@ static int GetNoRestart(struct Machine *m, int fildes, bool *norestart) {
 
 static int SysAccept4(struct Machine *m, i32 fildes, i64 sockaddr_addr,
                       i64 sockaddr_size_addr, i32 flags) {
+  u64 lim;
   struct Fd *fd;
   socklen_t addrlen;
   int newfd, socktype;
@@ -1624,23 +1663,29 @@ static int SysAccept4(struct Machine *m, i32 fildes, i64 sockaddr_addr,
     // but FreeBSD incorrectly returns EINVAL.
     return eopnotsupp();
   }
+  if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
   addrlen = sizeof(addr);
   INTERRUPTIBLE(restartable,
                 newfd = accept(fildes, (struct sockaddr *)&addr, &addrlen));
   if (newfd != -1) {
-    FixupSock(newfd, flags);
-    LOCK(&m->system->fds.lock);
-    if (!(fd = GetFd(&m->system->fds, fildes)) ||
-        !ForkFd(&m->system->fds, fd, newfd,
-                O_RDWR | (flags & SOCK_CLOEXEC_LINUX ? O_CLOEXEC : 0) |
-                    (flags & SOCK_NONBLOCK_LINUX ? O_NDELAY : 0))) {
+    if (newfd >= lim) {
       close(newfd);
-      newfd = -1;
-    }
-    UNLOCK(&m->system->fds.lock);
-    if (newfd != -1) {
-      StoreSockaddr(m, sockaddr_addr, sockaddr_size_addr,
-                    (struct sockaddr *)&addr, addrlen);
+      newfd = emfile();
+    } else {
+      FixupSock(newfd, flags);
+      LOCK(&m->system->fds.lock);
+      if (!(fd = GetFd(&m->system->fds, fildes)) ||
+          !ForkFd(&m->system->fds, fd, newfd,
+                  O_RDWR | (flags & SOCK_CLOEXEC_LINUX ? O_CLOEXEC : 0) |
+                      (flags & SOCK_NONBLOCK_LINUX ? O_NDELAY : 0))) {
+        close(newfd);
+        newfd = -1;
+      }
+      UNLOCK(&m->system->fds.lock);
+      if (newfd != -1) {
+        StoreSockaddr(m, sockaddr_addr, sockaddr_size_addr,
+                      (struct sockaddr *)&addr, addrlen);
+      }
     }
   }
   return newfd;
@@ -3583,15 +3628,21 @@ static int SysGetrusage(struct Machine *m, i32 resource, i64 rusageaddr) {
   return rc;
 }
 
-static void GetMemLimit(struct Machine *m, int resource,
-                        struct rlimit_linux *lux) {
+static bool IsSupportedResourceLimit(int resource) {
+  return resource == RLIMIT_AS_LINUX ||    //
+         resource == RLIMIT_DATA_LINUX ||  //
+         resource == RLIMIT_NOFILE_LINUX;
+}
+
+static void GetResourceLimit_(struct Machine *m, int resource,
+                              struct rlimit_linux *lux) {
   LOCK(&m->system->mmap_lock);
   memcpy(lux, m->system->rlim + resource, sizeof(*lux));
   UNLOCK(&m->system->mmap_lock);
 }
 
-static int SetMemLimit(struct Machine *m, int resource,
-                       const struct rlimit_linux *lux) {
+static int SetResourceLimit(struct Machine *m, int resource,
+                            const struct rlimit_linux *lux) {
   int rc;
   LOCK(&m->system->mmap_lock);
   if (Read64(lux->cur) <= Read64(m->system->rlim[resource].max) &&
@@ -3609,8 +3660,8 @@ static int SysGetrlimit(struct Machine *m, i32 resource, i64 rlimitaddr) {
   int rc;
   struct rlimit rlim;
   struct rlimit_linux lux;
-  if (resource == RLIMIT_AS_LINUX || resource == RLIMIT_DATA_LINUX) {
-    GetMemLimit(m, resource, &lux);
+  if (IsSupportedResourceLimit(resource)) {
+    GetResourceLimit_(m, resource, &lux);
     return CopyToUserWrite(m, rlimitaddr, &lux, sizeof(lux));
   }
   if ((rc = getrlimit(XlatResource(resource), &rlim)) != -1) {
@@ -3628,8 +3679,8 @@ static int SysSetrlimit(struct Machine *m, i32 resource, i64 rlimitaddr) {
                                                    sizeof(*lux)))) {
     return -1;
   }
-  if (resource == RLIMIT_DATA_LINUX || resource == RLIMIT_AS_LINUX) {
-    return SetMemLimit(m, resource, lux);
+  if (IsSupportedResourceLimit(resource)) {
+    return SetResourceLimit(m, resource, lux);
   }
   if ((sysresource = XlatResource(resource)) == -1) return -1;
   XlatLinuxToRlimit(sysresource, &rlim, lux);
@@ -3709,6 +3760,7 @@ static ssize_t SysGetrandom(struct Machine *m, i64 a, size_t n, int f) {
 }
 
 void OnSignal(int sig, siginfo_t *si, void *uc) {
+  SIG_LOGF("OnSignal(%s)", DescribeSignal(UnXlatSignal(sig)));
   EnqueueSignal(g_machine, UnXlatSignal(sig));
 }
 
@@ -4017,7 +4069,7 @@ static int SysSigaltstack(struct Machine *m, i64 newaddr, i64 oldaddr) {
       return -1;
     }
     if ((unsupported = Read32(ss->flags) & ~supported)) {
-      LOGF("unsupported sigaltstack flags: %#x", unsupported);
+      LOGF("unsupported %s flags: %#x", "sigaltstack", unsupported);
       return einval();
     }
     if (~Read32(ss->flags) & SS_DISABLE_LINUX) {
@@ -4066,6 +4118,7 @@ static int SysClockGettime(struct Machine *m, int clock, i64 ts) {
   return rc;
 }
 
+#ifdef HAVE_CLOCK_SETTIME
 static int SysClockSettime(struct Machine *m, int clock, i64 ts) {
   clock_t sysclock;
   struct timespec ht;
@@ -4077,6 +4130,7 @@ static int SysClockSettime(struct Machine *m, int clock, i64 ts) {
   }
   return clock_settime(sysclock, &ht);
 }
+#endif
 
 static int SysClockGetres(struct Machine *m, int clock, i64 ts) {
   int rc;
@@ -4556,7 +4610,7 @@ static int Poll(struct Machine *m, i64 fdsaddr, u64 nfds,
   struct pollfd_linux *gfds;
   struct timespec now, wait, remain;
   int (*poll_impl)(struct pollfd *, nfds_t, int);
-  if (!Mul(nfds, sizeof(struct pollfd_linux), &gfdssize) &&
+  if (!CheckedMul(nfds, sizeof(struct pollfd_linux), &gfdssize) &&
       gfdssize <= 0x7ffff000) {
     if ((gfds = (struct pollfd_linux *)AddToFreeList(m, malloc(gfdssize)))) {
       rc = 0;
@@ -5171,6 +5225,174 @@ static int SysPipe(struct Machine *m, i64 pipefds_addr) {
   return SysPipe2(m, pipefds_addr, 0);
 }
 
+#ifdef HAVE_EPOLL_PWAIT1
+
+static i32 SysEpollCreate1(struct Machine *m, i32 flags) {
+  u64 lim;
+  int fildes, oflags, sysflags;
+  oflags = 0;
+  sysflags = 0;
+  if (flags & EPOLL_CLOEXEC_LINUX) {
+    oflags |= O_CLOEXEC;
+    sysflags |= EPOLL_CLOEXEC;
+    flags &= ~EPOLL_CLOEXEC_LINUX;
+  }
+  if (flags) {
+    LOGF("unsupported %s flags: %#x", "epoll_create1", flags);
+    return einval();
+  }
+  if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
+  if ((fildes = epoll_create1(sysflags)) != -1) {
+    if (fildes >= lim) {
+      close(fildes);
+      fildes = emfile();
+    } else {
+      LOCK(&m->system->fds.lock);
+      unassert(AddFd(&m->system->fds, fildes, oflags));
+      UNLOCK(&m->system->fds.lock);
+    }
+  }
+  return fildes;
+}
+
+static i32 SysEpollCreate(struct Machine *m, i32 size) {
+  if (size <= 0) return einval();
+  return SysEpollCreate1(m, 0);
+}
+
+static i32 SysEpollCtl(struct Machine *m, i32 epfd, i32 op, i32 fd,
+                       i64 eventaddr) {
+  struct epoll_event epe, *pepe;
+  const struct epoll_event_linux *gepe;
+  switch (op) {
+    case EPOLL_CTL_DEL_LINUX:
+      pepe = 0;
+      break;
+    case EPOLL_CTL_ADD_LINUX:
+    case EPOLL_CTL_MOD_LINUX:
+      if (!(gepe = (const struct epoll_event_linux *)SchlepR(m, eventaddr,
+                                                             sizeof(*gepe)))) {
+        return -1;
+      }
+      epe.events = Read32(gepe->events);
+      epe.data.u64 = Read64(gepe->data);
+      pepe = &epe;
+      break;
+    default:
+      return einval();
+  }
+  return epoll_ctl(epfd, op, fd, pepe);
+}
+
+static i32 EpollPwait(struct Machine *m, i32 epfd, i64 eventsaddr,
+                      i32 maxevents, struct timespec deadline, i64 sigmaskaddr,
+                      u64 sigsetsize) {
+  i32 i, rc;
+  u64 oldmask_guest = 0;
+  sigset_t block, oldmask;
+  struct epoll_event *events;
+  struct timespec now, waitfor;
+  struct epoll_event_linux *gevents;
+  const struct sigset_linux *sigmaskp_guest = 0;
+  if (maxevents <= 0) return einval();
+  if (sigmaskaddr) {
+    if (sigsetsize != 8) return einval();
+    if (!(sigmaskp_guest = (const struct sigset_linux *)SchlepR(
+              m, sigmaskaddr, sizeof(*sigmaskp_guest)))) {
+      return -1;
+    }
+  }
+  if (!IsValidMemory(m, eventsaddr,
+                     maxevents * sizeof(struct epoll_event_linux),
+                     PROT_WRITE) ||
+      !(events = (struct epoll_event *)AddToFreeList(
+            m, calloc(maxevents, sizeof(struct epoll_event)))) ||
+      !(gevents = (struct epoll_event_linux *)AddToFreeList(
+            m, calloc(maxevents, sizeof(struct epoll_event_linux))))) {
+    return -1;
+  }
+  unassert(!sigfillset(&block));
+  unassert(!pthread_sigmask(SIG_BLOCK, &block, &oldmask));
+  if (sigmaskp_guest) {
+    oldmask_guest = m->sigmask;
+    m->sigmask = Read64(sigmaskp_guest->sigmask);
+    SIG_LOGF("sigmask push %" PRIx64, m->sigmask);
+  }
+  if (!CheckInterrupt(m, false)) {
+    do {
+      now = GetTime();
+      if (CompareTime(now, deadline) < 0) {
+        waitfor = SubtractTime(deadline, now);
+      } else {
+        waitfor = GetZeroTime();
+      }
+#ifdef HAVE_EPOLL_PWAIT2
+      rc = epoll_pwait2(epfd, events, maxevents, &waitfor, &oldmask);
+#else
+      rc = epoll_pwait(epfd, events, maxevents,
+                       ConvertTimeToInt(ToMilliseconds(waitfor)), &oldmask);
+#endif
+      if (rc == -1 && errno == EINTR) {
+        if (CheckInterrupt(m, false)) {
+          break;
+        }
+      } else {
+        break;
+      }
+    } while (1);
+  } else {
+    rc = -1;
+  }
+  if (sigmaskp_guest) {
+    m->sigmask = oldmask_guest;
+    SIG_LOGF("sigmask pop %" PRIx64, m->sigmask);
+  }
+  unassert(!pthread_sigmask(SIG_SETMASK, &oldmask, 0));
+  if (rc != -1) {
+    for (i = 0; i < rc; ++i) {
+      Write32(gevents[i].events, events[i].events);
+      Write64(gevents[i].data, events[i].data.u64);
+    }
+    unassert(!CopyToUserWrite(m, eventsaddr, gevents,
+                              rc * sizeof(struct epoll_event_linux)));
+  }
+  return rc;
+}
+
+static i32 SysEpollPwait(struct Machine *m, i32 epfd, i64 eventsaddr,
+                         i32 maxevents, i32 timeout, i64 sigmaskaddr,
+                         u64 sigsetsize) {
+  struct timespec deadline;
+  if (timeout >= 0) {
+    deadline = AddTime(GetTime(), FromMilliseconds(timeout));
+  } else {
+    deadline = GetMaxTime();
+  }
+  return EpollPwait(m, epfd, eventsaddr, maxevents, deadline, sigmaskaddr,
+                    sigsetsize);
+}
+
+static i32 SysEpollPwait2(struct Machine *m, i32 epfd, i64 eventsaddr,
+                          i32 maxevents, i64 timeoutaddr, i64 sigmaskaddr,
+                          u64 sigsetsize) {
+  struct timespec ts, deadline;
+  if (timeoutaddr) {
+    if (LoadTimespecR(m, timeoutaddr, &ts) == -1) return -1;
+    deadline = AddTime(GetTime(), ts);
+  } else {
+    deadline = GetMaxTime();
+  }
+  return EpollPwait(m, epfd, eventsaddr, maxevents, deadline, sigmaskaddr,
+                    sigsetsize);
+}
+
+static int SysEpollWait(struct Machine *m, i32 epfd, i64 eventsaddr,
+                        i32 maxevents, i32 timeout) {
+  return SysEpollPwait(m, epfd, eventsaddr, maxevents, timeout, 0, 8);
+}
+
+#endif /* HAVE_EPOLL_PWAIT1 */
+
 void OpSyscall(P) {
   size_t mark;
   u64 ax, di, si, dx, r0, r8, r9;
@@ -5270,7 +5492,7 @@ void OpSyscall(P) {
     SYSCALL(5, 0x104, "fchownat", SysFchownat, STRACE_CHOWNAT);
     SYSCALL(1, 0x05F, "umask", SysUmask, STRACE_UMASK);
     SYSCALL(2, 0x060, "gettimeofday", SysGettimeofday, STRACE_2);
-    SYSCALL(2, 0x061, "getrlimit", SysGetrlimit, STRACE_2);
+    SYSCALL(2, 0x061, "getrlimit", SysGetrlimit, STRACE_GETRLIMIT);
     SYSCALL(2, 0x062, "getrusage", SysGetrusage, STRACE_2);
     SYSCALL(1, 0x064, "times", SysTimes, STRACE_1);
     SYSCALL(0, 0x06F, "getpgrp", SysGetpgrp, STRACE_GETPGRP);
@@ -5295,12 +5517,14 @@ void OpSyscall(P) {
     SYSCALL(2, 0x083, "sigaltstack", SysSigaltstack, STRACE_2);
     SYSCALL(3, 0x085, "mknod", SysMknod, STRACE_3);
     SYSCALL(2, 0x09E, "arch_prctl", SysArchPrctl, STRACE_2);
-    SYSCALL(2, 0x0A0, "setrlimit", SysSetrlimit, STRACE_2);
+    SYSCALL(2, 0x0A0, "setrlimit", SysSetrlimit, STRACE_SETRLIMIT);
     SYSCALL(0, 0x0A2, "sync", SysSync, STRACE_SYNC);
     SYSCALL(3, 0x0D9, "getdents", SysGetdents, STRACE_3);
     SYSCALL(1, 0x0DA, "set_tid_address", SysSetTidAddress, STRACE_1);
     SYSCALL(4, 0x0DD, "fadvise", SysFadvise, STRACE_4);
+#ifdef HAVE_CLOCK_SETTIME
     SYSCALL(2, 0x0E3, "clock_settime", SysClockSettime, STRACE_2);
+#endif
     SYSCALL(2, 0x0E5, "clock_getres", SysClockGetres, STRACE_2);
     SYSCALL(4, 0x0E6, "clock_nanosleep", SysClockNanosleep, STRACE_CLOCK_SLEEP);
     SYSCALL(2, 0x084, "utime", SysUtime, STRACE_2);
@@ -5392,13 +5616,21 @@ void OpSyscall(P) {
     SYSCALL(4, 0x103, "mknodat", SysMknodat, STRACE_4);
     SYSCALL(4, 0x127, "preadv", SysPreadv, STRACE_PREADV);
     SYSCALL(4, 0x128, "pwritev", SysPwritev, STRACE_PWRITEV);
-    SYSCALL(4, 0x12E, "prlimit", SysPrlimit, STRACE_4);
+    SYSCALL(4, 0x12E, "prlimit", SysPrlimit, STRACE_PRLIMIT);
     SYSCALL(5, 0x10F, "ppoll", SysPpoll, STRACE_5);
     SYSCALL(5, 0x13C, "renameat2", SysRenameat2, STRACE_RENAMEAT2);
     SYSCALL(3, 0x13E, "getrandom", SysGetrandom, STRACE_GETRANDOM);
     SYSCALL(5, 0x147, "preadv2", SysPreadv2, STRACE_PREADV2);
     SYSCALL(5, 0x148, "pwritev2", SysPwritev2, STRACE_PWRITEV2);
     SYSCALL(3, 0x1B4, "close_range", SysCloseRange, STRACE_3);
+#ifdef HAVE_EPOLL_PWAIT1
+    SYSCALL(1, 0x0D5, "epoll_create", SysEpollCreate, STRACE_1);
+    SYSCALL(1, 0x123, "epoll_create1", SysEpollCreate1, STRACE_1);
+    SYSCALL(4, 0x0E9, "epoll_ctl", SysEpollCtl, STRACE_4);
+    SYSCALL(4, 0x0E8, "epoll_wait", SysEpollWait, STRACE_4);
+    SYSCALL(6, 0x119, "epoll_pwait", SysEpollPwait, STRACE_6);
+    SYSCALL(6, 0x1B9, "epoll_pwait2", SysEpollPwait2, STRACE_6);
+#endif /* HAVE_EPOLL_PWAIT1 */
 #endif /* DISABLE_NONPOSIX */
     case 0x3C:
       SYS_LOGF("%s(%#" PRIx64 ")", "exit", di);

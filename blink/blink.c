@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include "blink/assert.h"
@@ -120,12 +121,12 @@ _Alignas(1) static const char USAGE[] =
     "  $BLINK_OVERLAYS      file system roots [default \":o\"]\n"
 #endif
 #ifndef NDEBUG
+
     "  $BLINK_LOG_FILENAME  log filename (same as -L flag)\n"
 #endif
     ;
 
 extern char **environ;
-static bool FLAG_zero;
 static bool FLAG_nojit;
 static char g_pathbuf[PATH_MAX];
 
@@ -167,10 +168,26 @@ void TerminateSignal(struct Machine *m, int sig) {
 }
 
 static void OnFatalSystemSignal(int sig, siginfo_t *si, void *ptr) {
+  struct Machine *m = g_machine;
+#ifdef __APPLE__
+  sig = FixXnuSignal(m, sig, si);
+#endif
+  SIG_LOGF("OnFatalSystemSignal(%s, %p)", DescribeSignal(UnXlatSignal(sig)),
+           si->si_addr);
+#ifndef DISABLE_JIT
+  if (IsSelfModifyingCodeSegfault(m, si)) return;
+#endif
   g_siginfo = *si;
-  unassert(g_machine);
-  unassert(g_machine->canhalt);
-  siglongjmp(g_machine->onhalt, kMachineFatalSystemSignal);
+  unassert(m);
+  unassert(m->canhalt);
+  siglongjmp(m->onhalt, kMachineFatalSystemSignal);
+}
+
+static void ProgramLimit(struct System *s, int hresource, int gresource) {
+  struct rlimit rlim;
+  if (!getrlimit(hresource, &rlim)) {
+    XlatRlimitToLinux(s->rlim + gresource, &rlim);
+  }
 }
 
 static int Exec(char *execfn, char *prog, char **argv, char **envp) {
@@ -190,6 +207,7 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
     for (i = 0; i < 10; ++i) {
       AddStdFd(&m->system->fds, i);
     }
+    ProgramLimit(m->system, RLIMIT_NOFILE, RLIMIT_NOFILE_LINUX);
   } else {
     unassert(!m->sysdepth);
     unassert(!m->pagelocks.i);
@@ -336,8 +354,8 @@ int main(int argc, char *argv[]) {
 #endif
   g_blink_path = argc > 0 ? argv[0] : 0;
   WriteErrorInit();
-  GetOpts(argc, argv);
   InitMap();
+  GetOpts(argc, argv);
   if (optind_ == argc) {
     PrintUsage(argc, argv, 48, 2);
   }

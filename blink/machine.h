@@ -22,9 +22,10 @@
 #define kArgUimm0 3
 #define kArgArg   4
 
-#define kOpNormal    0
-#define kOpBranching 1
-#define kOpPrecious  2
+#define kOpNormal      0
+#define kOpBranching   1
+#define kOpPrecious    2
+#define kOpSerializing kOpPrecious
 
 #define kMaxThreadIds 32768
 #define kMinThreadId  262144
@@ -79,21 +80,21 @@
   ││  ││     │││ Phys. Addr. 1GB   │        │        ││ ││││││││││
   ││  ││     │││                   │        │        ││ ││││││││││
   ───────────────────────────────────────────────────────────────*/
-#define PAGE_V     0x0000000000000001ull  // valid
-#define PAGE_RW    0x0000000000000002ull  // writeable
-#define PAGE_U     0x0000000000000004ull  // permit ring3 access or read protect
-#define PAGE_PS    0x0000000000000080ull  // IsPage (PDPTE/PDE) or PAT (PT)
-#define PAGE_G     0x0000000000000100ull  // global
-#define PAGE_RSRV  0x0000000000000200ull  // PAGE_TA bits havent been chosen yet
-#define PAGE_HOST  0x0000000000000400ull  // PAGE_TA bits point to system memory
-#define PAGE_MAP   0x0000000000000800ull  // PAGE_TA bits are a linear host mmap
-#define PAGE_TA    0x0000fffffffff000ull  // bits used for host, or real address
-#define PAGE_GROW  0x0010000000000000ull  // for future support of MAP_GROWSDOWN
-#define PAGE_MUG   0x0020000000000000ull  // host page magic mapped individually
-#define PAGE_FILE  0x0040000000000000ull  // page has tracking bit in s->filemap
-#define PAGE_LOCK  0x0080000000000000ull  // a bit used to increment lock counts
-#define PAGE_LOCKS 0x7f80000000000000ull  // a page can be locked by 255 threads
-#define PAGE_XD    0x8000000000000000ull  // disable executing memory if bit set
+#define PAGE_V     0x0000000000000001  // valid
+#define PAGE_RW    0x0000000000000002  // writeable
+#define PAGE_U     0x0000000000000004  // permit ring3 access or read protect
+#define PAGE_PS    0x0000000000000080  // IsPage (PDPTE/PDE) or PAT (PT)
+#define PAGE_G     0x0000000000000100  // global
+#define PAGE_RSRV  0x0000000000000200  // PAGE_TA bits havent been chosen yet
+#define PAGE_HOST  0x0000000000000400  // PAGE_TA bits point to system memory
+#define PAGE_MAP   0x0000000000000800  // PAGE_TA bits are a linear host mmap
+#define PAGE_TA    0x0000fffffffff000  // bits used for host, or real address
+#define PAGE_GROW  0x0010000000000000  // for future support of MAP_GROWSDOWN
+#define PAGE_MUG   0x0020000000000000  // host page magic mapped individually
+#define PAGE_FILE  0x0040000000000000  // page has tracking bit in s->filemap
+#define PAGE_LOCK  0x0080000000000000  // a bit used to increment lock counts
+#define PAGE_LOCKS 0x7f80000000000000  // a page can be locked by 255 threads
+#define PAGE_XD    0x8000000000000000  // disable executing memory if bit set
 
 #define SREG_ES 0
 #define SREG_CS 1
@@ -111,7 +112,7 @@
 #define HOSTPAGE_CONTAINER(e) DLL_CONTAINER(struct HostPage, elem, e)
 
 #if defined(NOLINEAR) || defined(__SANITIZE_THREAD__) || \
-    defined(__CYGWIN__) || defined(__NetBSD__)
+    defined(__CYGWIN__) || defined(__NetBSD__) || defined(__COSMOPOLITAN__)
 #define CanHaveLinearMemory() false
 #else
 #define CanHaveLinearMemory() CAN_64BIT
@@ -158,6 +159,10 @@ struct PageLock {
   i64 page;
   u8 *pslot;
   int sysdepth;
+};
+
+struct SmcQueue {
+  i64 p[kSmcQueueSize];
 };
 
 struct PageLocks {
@@ -248,6 +253,7 @@ struct System {
   bool dlab;
   bool isfork;
   bool exited;
+  bool loaded;
   bool iscosmo;
   bool trapexit;
   bool brkchanged;
@@ -406,6 +412,7 @@ struct Machine {                           //
   int sysdepth;                            //
   _Atomic(bool) killed;                    // [attention] slay this thread
   bool restored;                           // [attention] rt_sigreturn()'d
+  bool selfmodifying;                      // [attention] need usmc restore
   bool reserving;                          //
   bool insyscall;                          //
   bool nofault;                            //
@@ -415,7 +422,9 @@ struct Machine {                           //
   bool issigsuspend;                       //
   bool traprdtsc;                          //
   bool trapcpuid;                          //
+  bool boop;                               //
   i8 trapno;                               //
+  i8 segvcode;                             //
   sigjmp_buf onhalt;                       //
   struct sigaltstack_linux sigaltstack;    //
   i64 robust_list;                         //
@@ -423,6 +432,7 @@ struct Machine {                           //
   int tid;                                 //
   sigset_t spawn_sigmask;                  //
   struct Dll elem;                         //
+  struct SmcQueue smcqueue;                //
   struct OpCache opcache[1];               //
 };                                         //
 
@@ -436,7 +446,6 @@ void FreeSystem(struct System *);
 void SignalActor(struct Machine *);
 void SetMachineMode(struct Machine *, int);
 struct Machine *NewMachine(struct System *, struct Machine *);
-void HandleFatalSystemSignal(struct Machine *);
 i64 AreAllPagesUnlocked(struct System *) nosideeffect;
 bool IsOrphan(struct Machine *) nosideeffect;
 _Noreturn void Blink(struct Machine *);
@@ -489,13 +498,14 @@ void *SchlepW(struct Machine *, i64, size_t);
 void *SchlepRW(struct Machine *, i64, size_t);
 bool IsValidMemory(struct Machine *, i64, i64, int);
 int RegisterMemory(struct Machine *, i64, void *, size_t);
-i64 ConvertHostToGuestAddress(struct System *, void *);
+i64 ConvertHostToGuestAddress(struct System *, void *, u64 *);
 u8 *GetPageAddress(struct System *, u64, bool);
 u8 *GetHostAddress(struct Machine *, u64, long);
 u8 *AccessRam(struct Machine *, i64, size_t, void *[2], u8 *, bool);
 u8 *BeginLoadStore(struct Machine *, i64, size_t, void *[2], u8 *);
 u8 *BeginStore(struct Machine *, i64, size_t, void *[2], u8 *);
 u8 *BeginStoreNp(struct Machine *, i64, size_t, void *[2], u8 *);
+u64 GetFileDescriptorLimit(struct System *);
 bool HasPageLock(const struct Machine *, i64) nosideeffect;
 void CollectPageLocks(struct Machine *);
 u8 *LookupAddress(struct Machine *, i64);
@@ -518,7 +528,7 @@ void ResetRam(struct Machine *);
 void SetReadAddr(struct Machine *, i64, u32);
 void SetWriteAddr(struct Machine *, i64, u32);
 int SyncVirtual(struct System *, i64, i64, int);
-int ProtectVirtual(struct System *, i64, i64, int);
+int ProtectVirtual(struct System *, i64, i64, int, bool);
 bool IsFullyMapped(struct System *, i64, i64);
 bool IsFullyUnmapped(struct System *, i64, i64);
 int GetProtection(u64);
@@ -527,6 +537,14 @@ int ClassifyOp(u64) pureconst;
 void Terminate(P, void (*)(struct Machine *, u64));
 long GetMaxRss(struct System *);
 long GetMaxVss(struct System *);
+
+void FlushSmcQueue(struct Machine *);
+bool IsPageInSmcQueue(struct Machine *, i64);
+void AddPageToSmcQueue(struct Machine *, i64);
+int FixXnuSignal(struct Machine *, int, siginfo_t *);
+i64 ProtectRwxMemory(struct System *, i64, i64, i64, long, int);
+void HandleFatalSystemSignal(struct Machine *, const siginfo_t *);
+bool IsSelfModifyingCodeSegfault(struct Machine *, const siginfo_t *);
 
 void CountOp(long *);
 void FastPush(struct Machine *, long);

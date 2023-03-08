@@ -52,6 +52,7 @@ LTP_TESTS =								\
 	o/$(MODE)/third_party/ltp/bin/1/creat03.elf.ok			\
 	o/$(MODE)/third_party/ltp/bin/1/dup01.elf.ok			\
 	o/$(MODE)/third_party/ltp/bin/1/dup02.elf.ok			\
+	o/$(MODE)/third_party/ltp/bin/2/dup03.elf.ok			\
 	o/$(MODE)/third_party/ltp/bin/1/dup04.elf.ok			\
 	o/$(MODE)/third_party/ltp/bin/1/dup05.elf.ok			\
 	o/$(MODE)/third_party/ltp/bin/1/dup07.elf.ok			\
@@ -317,14 +318,14 @@ LTP_TESTS =								\
 	o/$(MODE)/third_party/ltp/bin/2/futimesat01.elf.ok		\
 	o/$(MODE)/third_party/ltp/bin/2/unlink07.elf.ok			\
 	o/$(MODE)/third_party/ltp/bin/2/send01.elf.ok			\
-	o/$(MODE)/third_party/ltp/bin/2/sendmsg01.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/sendmsg01.elf.ok		\
 	o/$(MODE)/third_party/ltp/bin/2/sched_yield01.elf.ok		\
 	o/$(MODE)/third_party/ltp/bin/2/readlinkat01.elf.ok		\
 	o/$(MODE)/third_party/ltp/bin/2/readlinkat02.elf.ok		\
 	o/$(MODE)/third_party/ltp/bin/2/readv02.elf.ok			\
 	o/$(MODE)/third_party/ltp/bin/2/realpath01.elf.ok		\
 	o/$(MODE)/third_party/ltp/bin/2/openat01.elf.ok			\
-	o/$(MODE)/third_party/ltp/bin/2/recvmmsg01.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/recvmmsg01.elf.ok		\
 	o/$(MODE)/third_party/ltp/bin/2/sendmmsg01.elf.ok		\
 	o/$(MODE)/third_party/ltp/bin/2/sendmmsg02.elf.ok		\
 	o/$(MODE)/third_party/ltp/bin/2/recvfrom01.elf.ok		\
@@ -335,7 +336,27 @@ LTP_TESTS =								\
 	o/$(MODE)/third_party/ltp/bin/2/sendfile06.elf.ok		\
 	o/$(MODE)/third_party/ltp/bin/2/sendfile07.elf.ok		\
 	o/$(MODE)/third_party/ltp/bin/2/sendfile08.elf.ok		\
-	o/$(MODE)/third_party/ltp/bin/2/sendfile09.elf.ok
+	o/$(MODE)/third_party/ltp/bin/2/sendfile09.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/2/openfile.elf.ok			\
+	o/$(MODE)/third_party/ltp/bin/2/connect01.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/2/chdir04.elf.ok			\
+	o/$(MODE)/third_party/ltp/bin/3/epoll-ltp.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_create01.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_create02.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_create1_01.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_create1_02.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_ctl01.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_ctl02.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_ctl03.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_ctl04.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_ctl05.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_pwait01.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_pwait02.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_pwait04.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_pwait05.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_wait01.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_wait03.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_wait04.elf.ok
 
 ifneq ($(HOST_SYSTEM), FreeBSD)
 # These tests make the system get wrekt.
@@ -435,7 +456,10 @@ LTP_TESTS +=								\
 	o/$(MODE)/third_party/ltp/bin/1/stat01_64.elf.ok		\
 	o/$(MODE)/third_party/ltp/bin/1/futex_wait05.elf.ok		\
 	o/$(MODE)/third_party/ltp/bin/1/poll02.elf.ok			\
-	o/$(MODE)/third_party/ltp/bin/1/unlink08.elf.ok
+	o/$(MODE)/third_party/ltp/bin/1/unlink08.elf.ok			\
+	o/$(MODE)/third_party/ltp/bin/2/bind02.elf.ok			\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_pwait03.elf.ok		\
+	o/$(MODE)/third_party/ltp/bin/3/epoll_wait02.elf.ok
 endif
 
 # TODO: Cygwin doesn't properly raise an EACCES errno.
