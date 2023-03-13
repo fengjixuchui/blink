@@ -18,6 +18,7 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include "blink/machine.h"
 
+// @asyncsignalsafe
 int FixXnuSignal(struct Machine *m, int sig, siginfo_t *si) {
   u64 pte;
   // The fruit platform will raise SIGBUS on writes to anon mappings

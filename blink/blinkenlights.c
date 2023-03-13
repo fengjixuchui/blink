@@ -76,16 +76,11 @@
 #include "blink/tsan.h"
 #include "blink/types.h"
 #include "blink/util.h"
+#include "blink/vfs.h"
 #include "blink/watch.h"
 #include "blink/web.h"
 #include "blink/xlat.h"
 #include "blink/xmmtype.h"
-
-#ifdef DISABLE_OVERLAYS
-#define OverlaysOpen   openat
-#define OverlaysStat   fstatat
-#define OverlaysAccess faccessat
-#endif
 
 #ifndef BUILD_TIMESTAMP
 #define BUILD_TIMESTAMP __TIMESTAMP__
@@ -717,7 +712,7 @@ static void ScrollOp(struct Panel *p, i64 op) {
 }
 
 static int TtyWriteString(const char *s) {
-  return write(ttyout, s, strlen(s));
+  return VfsWrite(ttyout, s, strlen(s));
 }
 
 static void OnFeed(void) {
@@ -766,7 +761,7 @@ static void GetTtySize(int fd) {
   struct winsize wsize;
   wsize.ws_row = tyn;
   wsize.ws_col = txn;
-  ioctl(fd, TIOCGWINSZ, &wsize);
+  VfsIoctl(fd, TIOCGWINSZ, &wsize);
   tyn = wsize.ws_row;
   txn = wsize.ws_col;
 }
@@ -799,7 +794,7 @@ static void TuiRejuvinate(void) {
 #ifdef IUTF8
   term.c_iflag |= IUTF8;
 #endif
-  tcsetattr(ttyout, TCSANOW, &term);
+  VfsTcsetattr(ttyout, TCSANOW, &term);
   memset(&sa, 0, sizeof(sa));
   sa.sa_handler = OnSigBusted;
   sa.sa_flags = SA_NODEFER;
@@ -837,7 +832,7 @@ static void TtyRestore(void) {
   TtyWriteString("\033[0m");
   DisableMouseTracking();
   ShowCursor();
-  tcsetattr(ttyout, TCSANOW, &oldterm);
+  VfsTcsetattr(ttyout, TCSANOW, &oldterm);
 }
 
 static void TuiCleanup(void) {
@@ -899,9 +894,9 @@ static int DrainInput(int fd) {
 #ifdef __COSMOPOLITAN__
     if (!IsWindows())
 #endif
-      if (poll(fds, ARRAYLEN(fds), 0) == -1) return -1;
+      if (VfsPoll(fds, ARRAYLEN(fds), 0) == -1) return -1;
     if (!(fds[0].revents & POLLIN)) break;
-    if (read(fd, buf, sizeof(buf)) == -1) return -1;
+    if (VfsRead(fd, buf, sizeof(buf)) == -1) return -1;
   }
   return 0;
 }
@@ -958,7 +953,7 @@ void TuiSetup(void) {
   if (!once) {
     LOGF("loaded program %s\n%s", codepath, FormatPml4t(m));
     CommonSetup();
-    tcgetattr(ttyout, &oldterm);
+    VfsTcgetattr(ttyout, &oldterm);
     atexit(TtyRestore);
     once = true;
     report = true;
@@ -1573,7 +1568,7 @@ static void DrawSse(struct Panel *p) {
 
 static void ScrollMemoryView(struct Panel *p, struct MemoryView *v, i64 a) {
   i64 i, n, w;
-  w = DUMPWIDTH * (1ull << v->zoom);
+  w = DUMPWIDTH * ((u64)1 << v->zoom);
   n = p->bottom - p->top;
   i = a / w;
   if (!(v->start <= i && i < v->start + n)) {
@@ -1619,8 +1614,8 @@ static void DrawMemoryZoomed(struct Panel *p, struct MemoryView *view,
   u8 *canvas, *chunk, *invalid;
   i64 a, b, c, d, n, i, j, k, size;
   struct ContiguousMemoryRanges ranges;
-  a = view->start * DUMPWIDTH * (1ull << view->zoom);
-  b = (view->start + (p->bottom - p->top)) * DUMPWIDTH * (1ull << view->zoom);
+  a = view->start * DUMPWIDTH * ((u64)1 << view->zoom);
+  b = (view->start + (p->bottom - p->top)) * DUMPWIDTH * ((u64)1 << view->zoom);
   size = (p->bottom - p->top) * DUMPWIDTH;
   canvas = (u8 *)calloc(1, size);
   invalid = (u8 *)calloc(1, size);
@@ -1632,7 +1627,7 @@ static void DrawMemoryZoomed(struct Panel *p, struct MemoryView *view,
         (a < ranges.p[i].a && b >= ranges.p[i].b)) {
       c = MAX(a, ranges.p[i].a);
       d = MIN(b, ranges.p[i].b);
-      n = ROUNDUP(d - c, 1ull << view->zoom);
+      n = ROUNDUP(d - c, (u64)1 << view->zoom);
       chunk = (u8 *)malloc(n);
       CopyFromUser(m, chunk, c, d - c);
       memset(chunk + (d - c), 0, n - (d - c));
@@ -1640,7 +1635,7 @@ static void DrawMemoryZoomed(struct Panel *p, struct MemoryView *view,
         Magikarp(chunk, n);
         n >>= 1;
       }
-      j = (c - a) / (1ull << view->zoom);
+      j = (c - a) / ((u64)1 << view->zoom);
       memset(invalid + k, -1, j - k);
       memcpy(canvas + j, chunk, MIN(n, size - j));
       k = j + MIN(n, size - j);
@@ -1655,8 +1650,8 @@ static void DrawMemoryZoomed(struct Panel *p, struct MemoryView *view,
               ((view->start + i) * DUMPWIDTH * ((u64)1 << view->zoom)) &
                   0x0000ffffffffffff);
     for (j = 0; j < DUMPWIDTH; ++j, ++c) {
-      a = ((view->start + i) * DUMPWIDTH + j + 0) * (1ull << view->zoom);
-      b = ((view->start + i) * DUMPWIDTH + j + 1) * (1ull << view->zoom);
+      a = ((view->start + i) * DUMPWIDTH + j + 0) * ((u64)1 << view->zoom);
+      b = ((view->start + i) * DUMPWIDTH + j + 1) * ((u64)1 << view->zoom);
       changed = ((histart >= a && hiend < b) ||
                  (histart && hiend && histart >= a && hiend < b));
       if (changed && !high) {
@@ -2261,7 +2256,7 @@ static void HandleAppReadInterrupt(void) {
 }
 
 static int OnPtyFdClose(int fd) {
-  return close(fd);
+  return VfsClose(fd);
 }
 
 static bool HasPendingInput(int fd) {
@@ -2272,7 +2267,7 @@ static bool HasPendingInput(int fd) {
 #ifdef __COSMOPOLITAN__
   if (!IsWindows())
 #endif
-    poll(fds, ARRAYLEN(fds), 0);
+    VfsPoll(fds, ARRAYLEN(fds), 0);
   return fds[0].revents & (POLLIN | POLLERR);
 }
 
@@ -2284,7 +2279,7 @@ static struct Panel *LocatePanel(int y, int x) {
       return &pan.p[i];
     }
   }
-  return NULL;
+  return 0;
 }
 
 static struct Mouse ParseMouse(char *p) {
@@ -2385,8 +2380,9 @@ static ssize_t OnPtyFdReadv(int fd, const struct iovec *iov, int iovlen) {
 }
 
 static int OnPtyFdPoll(struct pollfd *fds, nfds_t nfds, int ms) {
+  nfds_t i;
+  int t, re;
   bool once;
-  int i, t, re;
   struct pollfd p2;
   ms &= INT_MAX;
   ptyisenabled = true;
@@ -2403,7 +2399,7 @@ static int OnPtyFdPoll(struct pollfd *fds, nfds_t nfds, int ms) {
         }
         p2.fd = fds[i].fd;
         p2.events = fds[i].events;
-        switch (poll(&p2, 1, ms)) {
+        switch (VfsPoll(&p2, 1, ms)) {
           case -1:
             re = POLLERR;
             ++t;
@@ -2447,7 +2443,7 @@ static void DrawDisplayOnly(struct Panel *p) {
     }
     AppendStr(&b, "\033[0m\033[K");
   }
-  write(ttyout, b.p, b.i);
+  VfsWrite(ttyout, b.p, b.i);
   free(b.p);
 }
 
@@ -2663,7 +2659,7 @@ static void DetermineChs(void) {
   struct stat st;
   off_t size = diskimagesize;
   if (size) return;  // do nothing if disk geometry already detected
-  unassert(!OverlaysStat(AT_FDCWD, m->system->elf.prog, &st, 0));
+  unassert(!VfsStat(AT_FDCWD, m->system->elf.prog, &st, 0));
   diskimagesize = size = st.st_size;
   for (i = 0; i < ARRAYLEN(kChs); ++i) {
     if (size == kChs[i].imagesize) {
@@ -2720,8 +2716,8 @@ static void OnDiskServiceReadSectors(void) {
     return;
   }
   errno = 0;
-  if ((fd = OverlaysOpen(AT_FDCWD, m->system->elf.prog, O_RDONLY, 0)) != -1 &&
-      pread(fd, m->system->real + addr, size, offset) == size) {
+  if ((fd = VfsOpen(AT_FDCWD, m->system->elf.prog, O_RDONLY, 0)) != -1 &&
+      VfsPread(fd, m->system->real + addr, size, offset) == size) {
     SetWriteAddr(m, addr, size);
     m->ah = 0x00;  // success
     SetCarry(false);
@@ -2731,7 +2727,7 @@ static void OnDiskServiceReadSectors(void) {
     m->ah = 0x0d;  // invalid number of sector
     SetCarry(true);
   }
-  close(fd);
+  VfsClose(fd);
 }
 
 static void OnDiskServiceProbeExtended(void) {
@@ -2786,8 +2782,8 @@ static void OnDiskServiceReadSectorsExtended(void) {
       return;
     }
     errno = 0;
-    if ((fd = OverlaysOpen(AT_FDCWD, m->system->elf.prog, O_RDONLY, 0)) != -1 &&
-        pread(fd, m->system->real + addr, size, offset) == size) {
+    if ((fd = VfsOpen(AT_FDCWD, m->system->elf.prog, O_RDONLY, 0)) != -1 &&
+        VfsPread(fd, m->system->real + addr, size, offset) == size) {
       SetWriteAddr(m, addr, size);
       m->ah = 0x00;  // success
       SetCarry(false);
@@ -2798,7 +2794,7 @@ static void OnDiskServiceReadSectorsExtended(void) {
       m->ah = 0x0d;  // invalid number of sectors
       SetCarry(true);
     }
-    close(fd);
+    VfsClose(fd);
   }
 }
 
@@ -3173,6 +3169,7 @@ static void OnEnd(void) {
 static void OnEnter(void) {
   dialog = NULL;
   action &= ~MODAL;
+  m->faultaddr = 0;
 }
 
 static void OnUp(void) {
@@ -3265,7 +3262,7 @@ static void Sleep(int ms) {
 #ifdef __COSMOPOLITAN__
   if (!IsWindows())
 #endif
-    poll((struct pollfd[]){{ttyin, POLLIN}}, 1, ms);
+    VfsPoll((struct pollfd[]){{ttyin, POLLIN}}, 1, ms);
 }
 
 static void OnMouseWheelUp(struct Panel *p, int y, int x) {
@@ -3518,7 +3515,7 @@ static void EnterWatchpoint(long bp) {
   tuimode = true;
 }
 
-static void ProfileOp(struct Machine *m, u64 pc) {
+static void ProfileOp(struct Machine *m, i64 pc) {
   if (ophits &&                      //
       pc >= m->system->codestart &&  //
       pc < m->system->codestart + m->system->codesize) {
@@ -3657,7 +3654,7 @@ static void Tui(void) {
         m->xedd->length = 1;
         m->xedd->bytes[0] = 0xCC;
         m->xedd->op.rde &= ~00000077760000000000000;
-        m->xedd->op.rde &= 0xCCull << 40;  // sets mopcode to int3
+        m->xedd->op.rde &= (u64)0xCC << 40;  // sets mopcode to int3
       }
       if (action & WINCHED) {
         HandleTerminalResize();
@@ -3695,7 +3692,7 @@ static void Tui(void) {
         if (action & (CONTINUE | NEXT | FINISH)) {
           action &= ~(CONTINUE | NEXT | FINISH | STEP);
           ReactiveDraw();
-        } else if ((~m->sigmask & (1ull << (SIGINT_LINUX - 1))) &&
+        } else if ((~m->sigmask & ((u64)1 << (SIGINT_LINUX - 1))) &&
                    Read64(m->system->hands[SIGINT_LINUX - 1].handler) !=
                        SIG_DFL_LINUX &&
                    Read64(m->system->hands[SIGINT_LINUX - 1].handler) !=
@@ -3804,6 +3801,9 @@ static void GetOpts(int argc, char *argv[]) {
   FLAG_overlays = getenv("BLINK_OVERLAYS");
   if (!FLAG_overlays) FLAG_overlays = DEFAULT_OVERLAYS;
 #endif
+#ifndef DISABLE_VFS
+  FLAG_prefix = getenv("BLINK_PREFIX");
+#endif
   while ((opt = GetOpt(argc, argv, "0hjmvVtrzRNsZb:Hw:L:C:")) != -1) {
     switch (opt) {
       case '0':
@@ -3859,8 +3859,10 @@ static void GetOpts(int argc, char *argv[]) {
         FLAG_logpath = optarg_;
         break;
       case 'C':
-#ifndef DISABLE_OVERLAYS
+#if !defined(DISABLE_OVERLAYS)
         FLAG_overlays = optarg_;
+#elif !defined(DISABLE_VFS)
+        FLAG_prefix = optarg_;
 #else
         WriteErrorString("error: overlays support was disabled\n");
 #endif
@@ -3887,7 +3889,7 @@ static void AddPath_StartOp_Tui(P) {
 }
 
 static bool FileExists(const char *path) {
-  return !OverlaysAccess(AT_FDCWD, path, F_OK, 0);
+  return !VfsAccess(AT_FDCWD, path, F_OK, 0);
 }
 
 int VirtualMachine(int argc, char *argv[]) {
@@ -3920,10 +3922,10 @@ int VirtualMachine(int argc, char *argv[]) {
       } else if (isatty(1)) {
         tty = 1;
       } else {
-        tty = open("/dev/tty", O_RDWR | O_NOCTTY);
+        tty = VfsOpen(AT_FDCWD, "/dev/tty", O_RDWR | O_NOCTTY, 0);
       }
       if (tty != -1) {
-        tty = fcntl(tty, F_DUPFD_CLOEXEC, kMinBlinkFd);
+        tty = VfsFcntl(tty, F_DUPFD_CLOEXEC, kMinBlinkFd);
       }
       if (tty == -1) {
         WriteErrorString("failed to open /dev/tty\n");
@@ -3968,9 +3970,9 @@ void FreePanels(void) {
   }
 }
 
-void TerminateSignal(struct Machine *m, int sig) {
+void TerminateSignal(struct Machine *m, int sig, int code) {
   if (!react) {
-    LOGF("terminating due to signal %s", DescribeSignal(sig));
+    LOGF("terminating due to signal %s code=%d", DescribeSignal(sig), code);
     WriteErrorString("\r\033[K\033[J"
                      "terminating due to signal; see log\n");
     exit(128 + sig);
@@ -3989,7 +3991,7 @@ static void OnSigSegv(int sig, siginfo_t *si, void *uc) {
   RestoreIp(m);
   // TODO(jart): Fix address translation in non-linear mode.
   m->faultaddr = ConvertHostToGuestAddress(m->system, si->si_addr, 0);
-  ERRF("SIGSEGV AT ADDRESS %" PRIx64 " (OR %p) at RIP=%" PRIx64, m->faultaddr,
+  ERRF("SIGSEGV AT ADDRESS %#" PRIx64 " (OR %p) at RIP=%#" PRIx64, m->faultaddr,
        si->si_addr, m->ip);
   ERRF("BACKTRACE\n\t%s", GetBacktrace(m));
   if (!react) {
@@ -4046,6 +4048,12 @@ int main(int argc, char *argv[]) {
     exit(1);
   }
 #endif
+#ifndef DISABLE_VFS
+  if (VfsInit(FLAG_prefix)) {
+    WriteErrorString("error: vfs initialization failed\n");
+    exit(1);
+  }
+#endif
   signal(SIGPIPE, SIG_IGN);
   sigfillset(&sa.sa_mask);
   sa.sa_flags = 0;
@@ -4063,9 +4071,9 @@ int main(int argc, char *argv[]) {
   unassert(!sigaction(SIGBUS, &sa, 0));
   unassert(!sigaction(SIGSEGV, &sa, 0));
 #endif
-  m->system->blinksigs |= 1ull << (SIGINT_LINUX - 1) |   //
-                          1ull << (SIGALRM_LINUX - 1) |  //
-                          1ull << (SIGWINCH_LINUX - 1);  //
+  m->system->blinksigs |= (u64)1 << (SIGINT_LINUX - 1) |   //
+                          (u64)1 << (SIGALRM_LINUX - 1) |  //
+                          (u64)1 << (SIGWINCH_LINUX - 1);  //
   if (optind_ == argc) PrintUsage(48, stderr);
   rc = VirtualMachine(argc, argv);
   FreeBig(ophits, m->system->codesize * sizeof(unsigned long));

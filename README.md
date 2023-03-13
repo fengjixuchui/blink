@@ -162,16 +162,15 @@ make emulates
 ### Production Worthiness
 
 Blink passes 194 test suites from the Cosmopolitan Libc project (see
-[third_party/cosmo](third_party/cosmo). Blink passes 350 test suites
+[third_party/cosmo](third_party/cosmo)). Blink passes 350 test suites
 from the [Linux Test Project](https://github.com/linux-test-project/ltp)
-(see [third_party/ltp](third_party/ltp). Blink passes 108 of [Musl
+(see [third_party/ltp](third_party/ltp)). Blink passes 108 of [Musl
 Libc's unit test suite](https://github.com/jart/libc-test) (see
 [third_party/libc-test](third_party/libc-test)). The tests we haven't
-included are usually due to (1) floating ULP rounding errors (Blink aims
-to be fast and tiny, so we're on the fence about floating point
-emulation), and (2) APIs that can't or won't be supported, e.g. System V
-message queues. Blink runs the precompiled Linux test binaries above on
-other operating systems too, e.g. Apple M1, FreeBSD, Cygwin.
+included are because either (1) it wanted x87 long double to have 80-bit
+precision, or (2) it used Linux APIs we can't or won't support, e.g.
+System V message queues. Blink runs the precompiled Linux test binaries
+above on other operating systems too, e.g. Apple M1, FreeBSD, Cygwin.
 
 ## Reference
 
@@ -730,6 +729,33 @@ JIT path formation be visualized. Blink currently only enables the JIT
 for programs running in long mode (64-bit) but we may support JITing
 16-bit programs in the future.
 
+Blink stores generated functions by virtual address in a multithreaded
+lockless hash table. The hottest operation in the codebase is reading
+from this hash table, using a function called `GetJitHook`. Since it'd
+slow Blink down by more than 33% if a mutex were used here, Blink will
+synchronize reads optimistically using only carefully ordered load
+instructions, three of which have acquire semantics. This hash table
+starts off at a reasonable size and grows gradually with the memory
+requirements. This design is the primary reason Blink usually uses 40%
+less peak resident memory than Qemu.
+
+The amount of JIT memory Blink can use is currently limited by the ISA
+displacement. On Aaarch64 that's roughly ~22mb of JIT memory. Blink is
+able to tell when JIT memory is running out (>90% usage) and reacts by
+forcing the oldest blocks of generated code to retire. Retired blocks
+have all their hash entrypoints removed, but they can't be unmapped
+since other threads might still be executing on them. Blink handles this
+using a circular queue that reuses the least-recently retired blocks.
+
+Blink doesn't use indirect branches in generated JIT code and instead
+favors the use of near branches. Since generated JIT code will usually
+call statically compiled functions, we need to ensure that that JIT
+memory and Blink's executable image both reside at a closeby location in
+the host virtual address space. Blink accomplishes that by defining a
+gigantic static array that's part of the executable's `.bss` section.
+This ensures Blink will always have access to JIT memory, and that it
+won't interfere with any system's dynamic linker.
+
 ### Virtualization
 
 Blink virtualizes memory using the same PML4T approach as the hardware
@@ -781,7 +807,7 @@ hash table where the key is the virtual address at which a generated
 function begins (which we call a "path") and the value is a function
 pointer to the generated code. When Blink is generating paths, it is
 careful to ensure that all the guest instructions which are added to a
-page, only exist within the confines of a single 4096-byte page. Thus
+path, only exist within the confines of a single 4096-byte page. Thus
 when a page needs to be invalidated, Blink simply deletes any hook for
 each address within the page.
 
@@ -819,14 +845,14 @@ for conformant self-modifying code:
 >
 > ──Quoth Intel Manual V.3, §8.1.3
 
-Blink implements this behavior because branching instructions always
-cause JIT paths to end, and serializing instructions are never added to
-JIT paths in the first place.
+Blink implements this behavior because branching instructions cause JIT
+paths to end, paths only jump into one another selectively , and lastly
+serializing instructions are never added to paths in the first place.
 
-Intel's rules allow Blink some leeway to make writiting to make this RWX
-memory technique go fast without causing signal storms or incurring much
-system call overhead. As an example, consider the internal statistics
-printed by the [`smc2_test.c`](test/func/smc2_test.c) program:
+Intel's rules allow Blink some leeway to make writing to RWX memory go
+fast, without causing any signal storms, or incurring too much system
+call overhead. As an example, consider the internal statistics printed
+by the [`smc2_test.c`](test/func/smc2_test.c) program:
 
 ```
 make -j8 o//blink/blink o//test/func/smc2_test.elf
@@ -849,7 +875,8 @@ memory. However we can see very few of them resulted in segfaults, since
 most of those ops happened in the SlowMemCpy() function which uses a
 tight conditional branch loop rather than a proper jump. This let the
 program get more accomplished, before dropping out of JIT code back into
-the main interpreter loop, which is where Blink resets the SMC state.
+the main interpreter loop, which is where Blink checks the SMC state in
+order to flush the caches reapply any missing write protection.
 
 ## Pseudoteletypewriter
 

@@ -63,7 +63,6 @@ bool IsSignalSerious(int sig) {
 void DeliverSignal(struct Machine *m, int sig, int code) {
   u64 sp;
   struct SignalFrame sf;
-  SYS_LOGF("delivering %s", DescribeSignal(sig));
   if (IsMakingPath(g_machine)) AbandonPath(g_machine);
   memset(&sf, 0, sizeof(sf));
   // capture the current state of the machine
@@ -75,9 +74,13 @@ void DeliverSignal(struct Machine *m, int sig, int code) {
       sig == SIGBUS_LINUX ||   //
       sig == SIGTRAP_LINUX) {
     Write64(sf.si.addr, m->faultaddr);
-  }
-  if (sig == SIGTRAP_LINUX) {
-    Write64(sf.uc.trapno, m->trapno);
+    SYS_LOGF("delivering %s {.si_code = %d, .si_addr = %#" PRIx64 "}",
+             DescribeSignal(sig), code, m->faultaddr);
+  } else {
+    SYS_LOGF("delivering %s, {.si_code = %d}", DescribeSignal(sig), code);
+    if (sig == SIGTRAP_LINUX) {
+      Write64(sf.uc.trapno, m->trapno);
+    }
   }
   Write64(sf.uc.sigmask, m->sigmask);
   memcpy(sf.uc.r8, m->r8, 8);
@@ -118,7 +121,7 @@ void DeliverSignal(struct Machine *m, int sig, int code) {
   // within the mask unless the guest program specifies SA_NODEFER
   m->sigmask |= Read64(m->system->hands[sig - 1].mask);
   if (~Read64(m->system->hands[sig - 1].flags) & SA_NODEFER_LINUX) {
-    m->sigmask |= 1ull << (sig - 1);
+    m->sigmask |= (u64)1 << (sig - 1);
   }
   SIG_LOGF("sigmask deliver %" PRIx64, m->sigmask);
   // if the guest setup a sigaltstack() and the signal handler used
@@ -151,7 +154,7 @@ void DeliverSignal(struct Machine *m, int sig, int code) {
   SIG_LOGF("delivering signal @ %" PRIx64, sp);
   if (CopyToUserWrite(m, sp, &sf, sizeof(sf)) == -1) {
     LOGF("stack overflow delivering signal");
-    TerminateSignal(m, SIGSEGV_LINUX);
+    TerminateSignal(m, SIGSEGV_LINUX, m->segvcode);
   }
   // finally, call the signal handler using the sigaction arguments
   Put64(m->sp, sp);
@@ -223,7 +226,7 @@ static int ConsumeSignalImpl(struct Machine *m, int *delivered, bool *restart) {
   // look for a pending signal that isn't currently masked
   while ((signals = m->signals & ~m->sigmask)) {
     sig = bsr(signals) + 1;
-    m->signals &= ~(1ull << (sig - 1));
+    m->signals &= ~((u64)1 << (sig - 1));
     handler = Read64(m->system->hands[sig - 1].handler);
     if (handler == SIG_DFL_LINUX) {
       if (IsSignalIgnoredByDefault(sig)) {
@@ -278,7 +281,7 @@ void CheckForSignals(struct Machine *m) {
 #endif
   } else if (m->signals & ~m->sigmask) {
     if ((sig = ConsumeSignal(m, 0, 0))) {
-      TerminateSignal(m, sig);
+      TerminateSignal(m, sig, 0);
     }
   } else {
     atomic_store_explicit(&m->attention, false, memory_order_relaxed);

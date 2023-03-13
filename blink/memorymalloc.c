@@ -45,7 +45,6 @@
 
 struct Allocator {
   pthread_mutex_t_ lock;
-  long count;
   struct HostPage *pages GUARDED_BY(lock);
 } g_allocator = {
     PTHREAD_MUTEX_INITIALIZER_,
@@ -66,7 +65,6 @@ static struct HostPage *NewHostPage(void) {
 }
 
 static void FreeHostPage(struct HostPage *hp) {
-  --g_allocator.count;
   free(hp);
 }
 
@@ -74,7 +72,6 @@ void FreeAnonymousPage(struct System *s, u8 *page) {
   struct HostPage *h;
   unassert((h = NewHostPage()));
   LOCK(&g_allocator.lock);
-  ++g_allocator.count;
   h->page = page;
   h->next = g_allocator.pages;
   g_allocator.pages = h;
@@ -175,11 +172,12 @@ void CleanseMemory(struct System *s, size_t size) {
   }
 }
 
-u64 GetFileDescriptorLimit(struct System *s) {
+int GetFileDescriptorLimit(struct System *s) {
   u64 lim;
   LOCK(&s->mmap_lock);
   lim = Read64(s->rlim[RLIMIT_NOFILE_LINUX].cur);
   UNLOCK(&s->mmap_lock);
+  if (lim > INT_MAX) lim = INT_MAX;
   return lim;
 }
 
@@ -221,13 +219,13 @@ struct System *NewSystem(int mode) {
   unassert(!pthread_mutex_init(&s->machines_lock, 0));
   unassert(!pthread_cond_init(&s->pagelocks_cond, 0));
   unassert(!pthread_mutex_init(&s->pagelocks_lock, 0));
-  s->blinksigs = 1ull << (SIGSYS_LINUX - 1) |   //
-                 1ull << (SIGILL_LINUX - 1) |   //
-                 1ull << (SIGFPE_LINUX - 1) |   //
-                 1ull << (SIGSEGV_LINUX - 1) |  //
-                 1ull << (SIGBUS_LINUX - 1) |   //
-                 1ull << (SIGPIPE_LINUX - 1) |  //
-                 1ull << (SIGTRAP_LINUX - 1);
+  s->blinksigs = (u64)1 << (SIGSYS_LINUX - 1) |   //
+                 (u64)1 << (SIGILL_LINUX - 1) |   //
+                 (u64)1 << (SIGFPE_LINUX - 1) |   //
+                 (u64)1 << (SIGSEGV_LINUX - 1) |  //
+                 (u64)1 << (SIGBUS_LINUX - 1) |   //
+                 (u64)1 << (SIGPIPE_LINUX - 1) |  //
+                 (u64)1 << (SIGTRAP_LINUX - 1);
   for (i = 0; i < RLIM_NLIMITS_LINUX; ++i) {
     Write64(s->rlim[i].cur, RLIM_INFINITY_LINUX);
     Write64(s->rlim[i].max, RLIM_INFINITY_LINUX);
@@ -442,7 +440,6 @@ u64 AllocateAnonymousPage(struct System *s) {
                            MAP_ANONYMOUS_ | MAP_PRIVATE, -1, 0);
   if (!page) return -1;
   LOCK(&g_allocator.lock);
-  g_allocator.count += n - 1;
   for (i = n; i-- > 1;) {
     unassert((h = NewHostPage()));
     h->page = page + i * 4096;
@@ -480,18 +477,20 @@ void InvalidateSystem(struct System *s, bool tlb, bool icache) {
 #ifdef HAVE_THREADS
   struct Dll *e;
   struct Machine *m;
-  LOCK(&s->machines_lock);
-  for (e = dll_first(s->machines); e; e = dll_next(s->machines, e)) {
-    m = MACHINE_CONTAINER(e);
-    if (tlb) {
-      atomic_store_explicit(&m->invalidated, true, memory_order_release);
+  if (tlb || icache) {
+    LOCK(&s->machines_lock);
+    for (e = dll_first(s->machines); e; e = dll_next(s->machines, e)) {
+      m = MACHINE_CONTAINER(e);
+      if (tlb) {
+        atomic_store_explicit(&m->invalidated, true, memory_order_release);
+      }
+      if (icache) {
+        atomic_store_explicit(&m->opcache->invalidated, true,
+                              memory_order_release);
+      }
     }
-    if (icache) {
-      atomic_store_explicit(&m->opcache->invalidated, true,
-                            memory_order_release);
-    }
+    UNLOCK(&s->machines_lock);
   }
-  UNLOCK(&s->machines_lock);
 #endif
 }
 
@@ -509,7 +508,9 @@ struct FileMap *AddFileMap(struct System *s, i64 virt, i64 size,
     words = ROUNDUP(pages, 64) / 64;
     if (fm->path && (fm->present = (u64 *)malloc(words * sizeof(u64)))) {
       memset(fm->present, -1, pages / 64 * sizeof(u64));
-      if (pages % 64) fm->present[pages / 64] = (1ull << (pages % 64)) - 1;
+      if (pages % 64) {
+        fm->present[pages / 64] = ((u64)1 << (pages % 64)) - 1;
+      }
       fm->pages = pages;
       dll_init(&fm->elem);
       dll_make_first(&s->filemaps, &fm->elem);
@@ -546,7 +547,7 @@ struct FileMap *GetFileMap(struct System *s, i64 virt) {
     if (virt >= fm->virt && virt < fm->virt + fm->size) {
       i = virt - fm->virt;
       i /= 4096;
-      if (fm->present[i / 64] & (1ull << (i % 64))) {
+      if (fm->present[i / 64] & ((u64)1 << (i % 64))) {
         return fm;
       }
     }
@@ -566,8 +567,8 @@ static void UnmarkFilePage(struct System *s, i64 virt) {
       unassert(fm->pages);
       i = virt - fm->virt;
       i /= 4096;
-      if (fm->present[i / 64] & (1ull << (i % 64))) {
-        fm->present[i / 64] &= ~(1ull << (i % 64));
+      if (fm->present[i / 64] & ((u64)1 << (i % 64))) {
+        fm->present[i / 64] &= ~((u64)1 << (i % 64));
         if (!--fm->pages) {
           dll_remove(&s->filemaps, e);
           FreeFileMap(fm);
@@ -596,12 +597,21 @@ static void WaitForPageToNotBeLocked(struct System *s, i64 virt, u8 *pte) {
 }
 
 static bool FreePage(struct System *s, i64 virt, u64 entry, u64 size,
+                     bool *executable_code_was_made_non_executable,
                      long *rss_delta) {
   u8 *page;
   long pagesize;
   uintptr_t real, mug;
   unassert(entry & PAGE_V);
   if (entry & PAGE_FILE) UnmarkFilePage(s, virt);
+  if (!(entry & PAGE_XD) && !(entry & PAGE_RSRV)) {
+    *executable_code_was_made_non_executable = true;
+#ifndef DISABLE_JIT
+    if (!IsJitDisabled(&s->jit)) {
+      ResetJitPage(&s->jit, virt);
+    }
+#endif
+  }
   if ((entry & (PAGE_HOST | PAGE_MAP | PAGE_MUG)) == PAGE_HOST) {
     unassert(~entry & PAGE_RSRV);
     s->memstat.committed -= 1;
@@ -660,6 +670,7 @@ static void AddPageToRanges(struct ContiguousMemoryRanges *ranges, i64 virt,
 // ranges data structure; the caller is responsible for freeing those.
 static void RemoveVirtual(struct System *s, i64 virt, i64 size,
                           struct ContiguousMemoryRanges *ranges,
+                          bool *executable_code_was_made_non_executable,
                           bool *address_space_was_mutated,  //
                           long *vss_delta, long *rss_delta) {
   i64 end;
@@ -668,7 +679,7 @@ static void RemoveVirtual(struct System *s, i64 virt, i64 size,
   unsigned pi, p1;
   unassert(!(virt & 4095));
   MEM_LOGF("RemoveVirtual(%#" PRIx64 ", %#" PRIx64 ")", virt, size);
-  for (pde = 0, end = virt + size; virt < end; virt += 1ull << i) {
+  for (pde = 0, end = virt + size; virt < end; virt += (u64)1 << i) {
     for (pt = s->cr3, i = 39;; i -= 9) {
       pi = p1 = (virt >> i) & 511;
       pp = GetPageAddress(s, pt, i == 39) + pi * 8;
@@ -687,7 +698,8 @@ static void RemoveVirtual(struct System *s, i64 virt, i64 size,
           pt = LoadPte(pp);
           unassert(pt & PAGE_V);
         }
-        if (FreePage(s, virt, pt, MIN(4096, end - virt), rss_delta) &&
+        if (FreePage(s, virt, pt, MIN(4096, end - virt),
+                     executable_code_was_made_non_executable, rss_delta) &&
             HasLinearMapping()) {
           AddPageToRanges(ranges, virt, end);
         }
@@ -765,6 +777,7 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
   int prot, sysprot;
   long vss_delta, rss_delta;
   i64 ti, pt, end, pages, level, entry;
+  bool executable_code_was_made_non_executable;
   struct ContiguousMemoryRanges ranges;
 
   // we determine these
@@ -807,6 +820,7 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
   vss_delta = 0;
   rss_delta = 0;
   mutated = false;
+  executable_code_was_made_non_executable = false;
   pages = ROUNDUP(size, 4096) / 4096;
   if (HasLinearMapping() && FLAG_vabits <= 47) {
     if (fixedmap) {
@@ -823,7 +837,9 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
       demand = MAP_FIXED;
     }
     memset(&ranges, 0, sizeof(ranges));
-    RemoveVirtual(s, virt, size, &ranges, &mutated, &vss_delta, &rss_delta);
+    RemoveVirtual(s, virt, size, &ranges,
+                  &executable_code_was_made_non_executable, &mutated,
+                  &vss_delta, &rss_delta);
     if (ranges.i) {
       // linear mappings exist within the requested interval
       if (ranges.i == 1 &&          //
@@ -967,15 +983,20 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
             break;
           }
         }
+        if (pt & PAGE_V) {
+          FreePage(s, virt, pt, 4096, &executable_code_was_made_non_executable,
+                   &rss_delta);
+        }
         if ((virt += 4096) >= end) {
           s->rss += rss_delta;
           s->vss += vss_delta;
-          // TODO(jart): We should call InvalidateSystem appropriately.
 #ifndef DISABLE_JIT
           if (HasLinearMapping() && !IsJitDisabled(&s->jit)) {
             result = ProtectRwxMemory(s, result, result, size, pagesize, prot);
           }
 #endif
+          InvalidateSystem(s, !!rss_delta,
+                           executable_code_was_made_non_executable);
           return result;
         }
         if (++ti == 512) break;
@@ -1002,7 +1023,7 @@ StartOver:
                    (((virt + got) >> i) & 511) * 8);
       if (i == 12 || !(pt & PAGE_V)) break;
     }
-    got += 1ull << i;
+    got += (u64)1 << i;
     if ((pt & PAGE_V)) {
       virt += got;
       goto StartOver;
@@ -1016,6 +1037,7 @@ int FreeVirtual(struct System *s, i64 virt, i64 size) {
   long i;
   bool mutated;
   long vss_delta, rss_delta;
+  bool executable_code_was_made_non_executable;
   struct ContiguousMemoryRanges ranges;
   MEM_LOGF("freeing virtual [%#" PRIx64 ",%#" PRIx64 ") w/ %" PRId64 " kb",
            virt, virt + size, size / 1024);
@@ -1026,7 +1048,10 @@ int FreeVirtual(struct System *s, i64 virt, i64 size) {
   vss_delta = 0;
   rss_delta = 0;
   memset(&ranges, 0, sizeof(ranges));
-  RemoveVirtual(s, virt, size, &ranges, &mutated, &vss_delta, &rss_delta);
+  executable_code_was_made_non_executable = false;
+  RemoveVirtual(s, virt, size, &ranges,
+                &executable_code_was_made_non_executable, &mutated, &vss_delta,
+                &rss_delta);
   for (rc = i = 0; i < ranges.i; ++i) {
     if (Munmap(ToHost(ranges.p[i].a), ranges.p[i].b - ranges.p[i].a)) {
       LOGF("failed to %s subrange"
@@ -1041,7 +1066,7 @@ int FreeVirtual(struct System *s, i64 virt, i64 size) {
   s->vss += vss_delta;
   s->rss += rss_delta;
   s->memchurn -= vss_delta;
-  InvalidateSystem(s, true, false);
+  InvalidateSystem(s, !!rss_delta, executable_code_was_made_non_executable);
   return rc;
 }
 
@@ -1094,7 +1119,7 @@ bool IsFullyUnmapped(struct System *s, i64 virt, i64 size) {
   u8 *mi;
   i64 end;
   u64 i, pt;
-  for (end = virt + size; virt < end; virt += 1ull << i) {
+  for (end = virt + size; virt < end; virt += (u64)1 << i) {
     for (pt = s->cr3, i = 39;; i -= 9) {
       mi = GetPageAddress(s, pt, i == 39) + ((virt >> i) & 511) * 8;
       pt = LoadPte(mi);
@@ -1182,18 +1207,15 @@ int ProtectVirtual(struct System *s, i64 virt, i64 size, int prot,
               goto MemoryDisappeared;
             }
           }
-#ifdef HAVE_JIT
-          if (!(pt & PAGE_XD) && (pt2 & PAGE_XD)) {
-            // exec -> non-exec
-            // avoid clearing instruction cache which is costly
+          // check for exec -> non-exec
+          if (!(pt & PAGE_XD) && (pt2 & PAGE_XD) && !(pt & PAGE_RSRV)) {
             executable_code_was_made_non_executable = true;
-          } else if ((pt & PAGE_XD) && !(pt2 & PAGE_XD) &&
-                     !IsJitDisabled(&s->jit)) {
-            // non-exec -> exec
-            // delete jit paths associated with this page
-            ResetJitPage(&s->jit, virt);
-          }
+#ifdef HAVE_JIT
+            if (!IsJitDisabled(&s->jit)) {
+              ResetJitPage(&s->jit, virt);
+            }
 #endif
+          }
         }
         if ((virt += 4096) >= end) {
           goto FinishedCrawling;
@@ -1327,6 +1349,7 @@ MemoryDisappeared:
   return enomem();
 }
 
+// @asyncsignalsafe
 static i64 FindGuestAddr(struct System *s, uintptr_t hp, u64 pt, long lvl,
                          u64 *out_pte) {
   u8 *mi;
@@ -1353,6 +1376,7 @@ static i64 FindGuestAddr(struct System *s, uintptr_t hp, u64 pt, long lvl,
 
 // Reverse maps real host address to virtual guest address if exists.
 // On failure the host address is returned and zero is stored in pte.
+// @asyncsignalsafe
 i64 ConvertHostToGuestAddress(struct System *s, void *ha, u64 *out_pte) {
   i64 g48;
   uintptr_t base;

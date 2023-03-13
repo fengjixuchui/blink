@@ -446,15 +446,14 @@ static void OpMovslGdqpEd(P) {
 void Connect(P, u64 pc, bool avoid_cycles) {
 #ifdef HAVE_JIT
   void *jump;
-  nexgen32e_f f;
+  uintptr_t f;
   // 1. branchless cyclic paths block sigs and deadlock shutdown
   // 2. we don't want to stitch together paths on separate pages
   if (!(avoid_cycles && pc == m->path.start) &&
       (pc & -4096) == (m->path.start & -4096)) {
     // is a preexisting jit path installed at destination?
-    f = (nexgen32e_f)GetJitHook(&m->system->jit, pc,
-                                (uintptr_t)GeneralDispatch);
-    if (f != JitlessDispatch && f != GeneralDispatch) {
+    f = GetJitHook(&m->system->jit, pc, (uintptr_t)GeneralDispatch);
+    if (f != (uintptr_t)JitlessDispatch && f != (uintptr_t)GeneralDispatch) {
       // tail call into the other generated jit path function
       jump = (u8 *)f + GetPrologueSize();
     } else {
@@ -2011,7 +2010,7 @@ static bool CanJit(struct Machine *m) {
 void JitlessDispatch(P) {
   ASM_LOGF("decoding [%s] at address %" PRIx64, DescribeOp(m, GetPc(m)),
            GetPc(m));
-  STATISTIC(++instructions_dispatched);
+  COSTLY_STATISTIC(++instructions_dispatched);
   LoadInstruction(m, GetPc(m));
   rde = m->xedd->op.rde;
   disp = m->xedd->op.disp;
@@ -2058,7 +2057,7 @@ void GeneralDispatch(P) {
     STATISTIC(++path_elements);
     AddPath_StartOp(A);
     jitpc = GetJitPc(m->path.jb);
-    JIT_LOGF("adding [%s] from address %" PRIx64
+    JIP_LOGF("adding [%s] from address %" PRIx64
              " to path starting at %" PRIx64,
              DescribeOp(m, GetPc(m)), GetPc(m), m->path.start);
   }
@@ -2102,19 +2101,20 @@ static void ExploreInstruction(struct Machine *m, nexgen32e_f func) {
              " due to running into staged path",
              m->path.start);
     AbandonPath(m);
-    STATISTIC(++instructions_dispatched);
+    COSTLY_STATISTIC(++instructions_dispatched);
     func(DISPATCH_NOTHING);
     return;
-  } else if (func != GeneralDispatch) {
-    JIT_LOGF("splicing path starting at %" PRIx64
-             " into previously created function %p",
-             m->path.start, func);
+  } else if (func != GeneralDispatch &&
+             (m->path.start & -4096) == (m->ip & -4096)) {
+    JIT_LOGF("splicing path starting at %#" PRIx64
+             " into previously created function %p at %#" PRIx64,
+             m->path.start, func, m->ip);
     STATISTIC(++path_spliced);
     FlushSkew(DISPATCH_NOTHING);
     AppendJitSetReg(m->path.jb, kJitArg0, kJitSav0);
-    AppendJitJump(m->path.jb, (u8 *)func + GetPrologueSize());
+    AppendJitJump(m->path.jb, (u8 *)(uintptr_t)func + GetPrologueSize());
     FinishPath(m);
-    STATISTIC(++instructions_dispatched);
+    COSTLY_STATISTIC(++instructions_dispatched);
     func(DISPATCH_NOTHING);
     return;
   } else {
@@ -2133,7 +2133,8 @@ void ExecuteInstruction(struct Machine *m) {
     func = (nexgen32e_f)GetJitHook(&m->system->jit, m->ip,
                                    (uintptr_t)GeneralDispatch);
     if (!IsMakingPath(m)) {
-      STATISTIC(++instructions_dispatched);
+      // this increment can cause a >3% overall slowdown
+      COSTLY_STATISTIC(++instructions_dispatched);
       func(DISPATCH_NOTHING);
     } else {
       ExploreInstruction(m, func);
@@ -2157,8 +2158,9 @@ void Actor(struct Machine *mm) {
 #ifndef __CYGWIN__
     STATISTIC(++interps);
 #endif
-    ExecuteInstruction(m);
-    if (atomic_load_explicit(&m->attention, memory_order_acquire)) {
+    if (!atomic_load_explicit(&m->attention, memory_order_acquire)) {
+      ExecuteInstruction(m);
+    } else {
       CheckForSignals(m);
     }
   }

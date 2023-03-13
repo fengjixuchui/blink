@@ -21,11 +21,12 @@ extern u64 FLAG_vaspace;
 extern u64 FLAG_stacktop;
 extern u64 FLAG_aslrmask;
 extern u64 FLAG_imagestart;
-extern u64 FLAG_automapend;
-extern u64 FLAG_automapstart;
+extern i64 FLAG_automapend;
+extern i64 FLAG_automapstart;
 extern u64 FLAG_dyninterpaddr;
 
 extern const char *FLAG_logpath;
 extern const char *FLAG_overlays;
+extern const char *FLAG_prefix;
 
 #endif /* BLINK_FLAG_H_ */

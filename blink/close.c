@@ -31,12 +31,13 @@
 #include "blink/machine.h"
 #include "blink/syscall.h"
 #include "blink/thread.h"
+#include "blink/vfs.h"
 
 static int CloseFd(struct Fd *fd) {
   int rc;
   unassert(fd->cb);
   if (fd->dirstream) {
-    rc = closedir(fd->dirstream);
+    rc = VfsClosedir(fd->dirstream);
   } else {
     rc = fd->cb->close(fd->fildes);
   }
@@ -96,10 +97,10 @@ static int SysCloseRangeCloexec(struct Machine *m, u32 first, u32 last) {
   for (e = dll_first(m->system->fds.list); e;
        e = dll_next(m->system->fds.list, e)) {
     fd = FD_CONTAINER(e);
-    if (first <= fd->fildes && fd->fildes <= last) {
+    if (first <= (u32)fd->fildes && (u32)fd->fildes <= last) {
       if (~fd->oflags & O_CLOEXEC) {
         fd->oflags |= O_CLOEXEC;
-        fcntl(fd->fildes, F_SETFD, FD_CLOEXEC);
+        VfsFcntl(fd->fildes, F_SETFD, FD_CLOEXEC);
       }
     }
   }
@@ -122,7 +123,7 @@ int SysCloseRange(struct Machine *m, u32 first, u32 last, u32 flags) {
   for (fds = 0, e = dll_first(m->system->fds.list); e; e = e2) {
     fd = FD_CONTAINER(e);
     e2 = dll_next(m->system->fds.list, e);
-    if (first <= fd->fildes && fd->fildes <= last) {
+    if (first <= (u32)fd->fildes && (u32)fd->fildes <= last) {
       dll_remove(&m->system->fds.list, e);
       dll_make_last(&fds, e);
     }

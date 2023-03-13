@@ -43,6 +43,7 @@
 #include "blink/log.h"
 #include "blink/macros.h"
 #include "blink/map.h"
+#include "blink/ndelay.h"
 #include "blink/sigwinch.h"
 #include "blink/util.h"
 #include "blink/xlat.h"
@@ -619,11 +620,21 @@ int XlatSocketOptname(int level, int optname) {
 #ifndef DISABLE_NONPOSIX
     case SOL_IP_LINUX:
       switch (optname) {
+#ifdef IP_TOS
         XLAT(IP_TOS_LINUX, IP_TOS);
+#endif
+#ifdef IP_TTL
         XLAT(IP_TTL_LINUX, IP_TTL);
+#endif
+#ifdef IP_HDRINCL
         XLAT(IP_HDRINCL_LINUX, IP_HDRINCL);
+#endif
+#ifdef IP_OPTIONS
         XLAT(IP_OPTIONS_LINUX, IP_OPTIONS);
+#endif
+#ifdef IP_RECVTTL
         XLAT(IP_RECVTTL_LINUX, IP_RECVTTL);
+#endif
 #ifdef IP_RECVERR
         XLAT(IP_RECVERR_LINUX, IP_RECVERR);
 #endif
@@ -1244,7 +1255,7 @@ void XlatSigsetToLinux(u8 dst[8], const sigset_t *src) {
   for (syssig = 1; syssig <= MIN(64, TOPSIG); ++syssig) {
     if (sigismember(src, syssig) == 1 &&
         (linuxsig = UnXlatSignal(syssig)) != -1) {
-      set |= 1ull << (linuxsig - 1);
+      set |= (u64)1 << (linuxsig - 1);
     }
   }
   Write64(dst, set);
@@ -1254,7 +1265,7 @@ void XlatLinuxToSigset(sigset_t *dst, u64 set) {
   int syssig, linuxsig;
   sigemptyset(dst);
   for (linuxsig = 1; linuxsig <= MIN(64, TOPSIG); ++linuxsig) {
-    if (((1ull << (linuxsig - 1)) & set) &&
+    if ((((u64)1 << (linuxsig - 1)) & set) &&
         (syssig = XlatSignal(linuxsig)) != -1) {
       sigaddset(dst, syssig);
     }

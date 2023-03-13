@@ -275,11 +275,11 @@ struct System {
   i64 automap;
   i64 memchurn;
   i64 codestart;
+  long codesize;
   _Atomic(long) rss;
   _Atomic(long) vss;
   struct Dis *dis;
   struct Dll *filemaps;
-  unsigned long codesize;
   struct MachineMemstat memstat;
   struct Dll *machines;
   uintptr_t ender;
@@ -505,7 +505,7 @@ u8 *AccessRam(struct Machine *, i64, size_t, void *[2], u8 *, bool);
 u8 *BeginLoadStore(struct Machine *, i64, size_t, void *[2], u8 *);
 u8 *BeginStore(struct Machine *, i64, size_t, void *[2], u8 *);
 u8 *BeginStoreNp(struct Machine *, i64, size_t, void *[2], u8 *);
-u64 GetFileDescriptorLimit(struct System *);
+int GetFileDescriptorLimit(struct System *);
 bool HasPageLock(const struct Machine *, i64) nosideeffect;
 void CollectPageLocks(struct Machine *);
 u8 *LookupAddress(struct Machine *, i64);
@@ -541,10 +541,12 @@ long GetMaxVss(struct System *);
 void FlushSmcQueue(struct Machine *);
 bool IsPageInSmcQueue(struct Machine *, i64);
 void AddPageToSmcQueue(struct Machine *, i64);
-int FixXnuSignal(struct Machine *, int, siginfo_t *);
 i64 ProtectRwxMemory(struct System *, i64, i64, i64, long, int);
 void HandleFatalSystemSignal(struct Machine *, const siginfo_t *);
 bool IsSelfModifyingCodeSegfault(struct Machine *, const siginfo_t *);
+
+int FixXnuSignal(struct Machine *, int, siginfo_t *);
+int FixPpcSignal(struct Machine *, int, siginfo_t *);
 
 void CountOp(long *);
 void FastPush(struct Machine *, long);

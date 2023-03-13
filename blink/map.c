@@ -33,6 +33,7 @@
 #include "blink/tunables.h"
 #include "blink/types.h"
 #include "blink/util.h"
+#include "blink/vfs.h"
 
 static long GetSystemPageSize(void) {
 #ifdef __EMSCRIPTEN__
@@ -55,7 +56,7 @@ static void *PortableMmap(void *addr,     //
                           off_t offset) {
   void *res;
 #ifdef HAVE_MAP_ANONYMOUS
-  res = mmap(addr, length, prot, flags, fd, offset);
+  res = VfsMmap(addr, length, prot, flags, fd, offset);
 #else
   // MAP_ANONYMOUS isn't defined by POSIX.1
   // they do however define the unlink hack
@@ -65,7 +66,7 @@ static void *PortableMmap(void *addr,     //
   int tfd;
   char path[] = "/tmp/blink.dat.XXXXXX";
   if (~flags & MAP_ANONYMOUS_) {
-    res = mmap(addr, length, prot, flags, fd, offset);
+    res = VfsMmap(addr, length, prot, flags, fd, offset);
   } else if ((tfd = mkstemp(path)) != -1) {
     unlink(path);
     if (!ftruncate(tfd, length)) {
@@ -81,9 +82,9 @@ static void *PortableMmap(void *addr,     //
 #ifdef MAP_FIXED_NOREPLACE
   if ((flags & MAP_FIXED_NOREPLACE) && res == MAP_FAILED &&
       errno == EOPNOTSUPP) {
-    res = mmap(addr, length, prot, flags & ~MAP_FIXED_NOREPLACE, fd, offset);
+    res = VfsMmap(addr, length, prot, flags & ~MAP_FIXED_NOREPLACE, fd, offset);
     if (res != addr) {
-      munmap(res, length);
+      VfsMunmap(res, length);
       res = MAP_FAILED;
       errno = EEXIST;
     }
@@ -97,12 +98,12 @@ static int GetBitsInAddressSpace(void) {
   void *ptr;
   uint64_t want;
   for (i = 16; i < 40; ++i) {
-    want = 0x8123000000000000ull >> i;
+    want = UINT64_C(0x8123000000000000) >> i;
     if (want > UINTPTR_MAX) continue;
     ptr = PortableMmap((void *)(uintptr_t)want, 1, PROT_READ,
                        MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS_, -1, 0);
     if (ptr != MAP_FAILED) {
-      munmap(ptr, 1);
+      VfsMunmap(ptr, 1);
       return 64 - i;
     }
   }
@@ -111,9 +112,9 @@ static int GetBitsInAddressSpace(void) {
 
 static u64 GetVirtualAddressSpace(int vabits, long pagesize) {
   u64 vaspace;
-  vaspace = 1ull << (vabits - 1);  // 0000400000000000
-  vaspace |= vaspace - 1;          // 00007fffffffffff
-  vaspace &= ~(pagesize - 1);      // 00007ffffffff000
+  vaspace = (u64)1 << (vabits - 1);  // 0000400000000000
+  vaspace |= vaspace - 1;            // 00007fffffffffff
+  vaspace &= ~(pagesize - 1);        // 00007ffffffff000
   return vaspace;
 }
 
@@ -175,7 +176,7 @@ void *Mmap(void *addr,     //
 
 int Munmap(void *addr, size_t length) {
   int rc;
-  rc = munmap(addr, length);
+  rc = VfsMunmap(addr, length);
 #if LOG_MEM
   char szbuf[16];
   FormatSize(szbuf, length, 1024);
@@ -193,7 +194,7 @@ int Mprotect(void *addr,     //
              size_t length,  //
              int prot,       //
              const char *owner) {
-  int res = mprotect(addr, length, prot);
+  int res = VfsMprotect(addr, length, prot);
 #if LOG_MEM
   char szbuf[16];
   FormatSize(szbuf, length, 1024);
@@ -213,7 +214,7 @@ int Msync(void *addr,     //
           size_t length,  //
           int flags,      //
           const char *owner) {
-  int res = msync(addr, length, flags);
+  int res = VfsMsync(addr, length, flags);
 #if LOG_MEM
   char szbuf[16];
   FormatSize(szbuf, length, 1024);

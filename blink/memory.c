@@ -145,6 +145,7 @@ static bool RecordPageLock(struct Machine *m, i64 page, u8 *pslot) {
   m->pagelocks.p[m->pagelocks.i].pslot = pslot;
   m->pagelocks.p[m->pagelocks.i].sysdepth = m->sysdepth;
   ++m->pagelocks.i;
+  STATISTIC(++page_locks);
   return true;
 }
 
@@ -217,7 +218,7 @@ TryAgain:
       // TODO: if partial TLB flushes are implemented in the future, we will
       // also need to somehow record the original huge page size in the TLB,
       // so we can correctly invalidate all TLB entries for the huge page
-      u64 submask = (1ULL << level) - 4096;
+      u64 submask = ((u64)1 << level) - 4096;
       entry &= ~submask;
       entry |= page & submask;
       break;

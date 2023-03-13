@@ -18,12 +18,18 @@
 #define STATISTIC(x) (void)0
 #endif
 
+#ifdef DEBUG
+#define COSTLY_STATISTIC(x) STATISTIC(x)
+#else
+#define COSTLY_STATISTIC(x) (void)0
+#endif
+
 #define AVERAGE(S, x) S.a += ((x)-S.a) / ++S.i
 
 #ifndef NDEBUG
 #ifdef __GNUC__
 #define GET_COUNTER(S)    \
-  ({                      \
+  __extension__({         \
     IGNORE_RACES_START(); \
     long S_ = S;          \
     IGNORE_RACES_END();   \

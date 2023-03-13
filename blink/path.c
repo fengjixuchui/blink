@@ -35,10 +35,7 @@
 #include "blink/overlays.h"
 #include "blink/rde.h"
 #include "blink/stats.h"
-
-#ifdef DISABLE_OVERLAYS
-#define OverlaysOpen openat
-#endif
+#include "blink/vfs.h"
 
 #define APPEND(...) o += snprintf(b + o, n - o, __VA_ARGS__)
 
@@ -157,9 +154,9 @@ void(SetupCod)(struct Machine *m) {
   m->system->dis = &g_dis;
   LoadDebugSymbols(m->system);
   DisLoadElf(&g_dis, &m->system->elf);
-  g_cod = OverlaysOpen(AT_FDCWD_LINUX, "/tmp/blink.s",
-                       O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-  g_cod = fcntl(g_cod, F_DUPFD_CLOEXEC, kMinBlinkFd);
+  g_cod = VfsOpen(AT_FDCWD_LINUX, "/tmp/blink.s",
+                    O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  g_cod = VfsFcntl(g_cod, F_DUPFD_CLOEXEC, kMinBlinkFd);
 #endif
 }
 
@@ -531,7 +528,7 @@ static void InitPaths(struct System *s) {
 #ifdef HAVE_JIT
   struct JitBlock *jb;
   if (!s->ender) {
-    unassert((jb = StartJit(&s->jit)));
+    unassert((jb = StartJit(&s->jit, 0)));
     WriteCod("\nJit_%p:\n", jb->addr + jb->index);
     s->ender = GetJitPc(jb);
 #if LOG_JIX
@@ -541,7 +538,7 @@ static void InitPaths(struct System *s) {
     AppendJit(jb, kLeave, sizeof(kLeave));
     AppendJitRet(jb);
     FlushCod(jb);
-    unassert(FinishJit(&s->jit, jb, 0));
+    unassert(FinishJit(&s->jit, jb));
   }
 #endif
 }
@@ -557,8 +554,8 @@ bool CreatePath(P) {
     return false;
   }
   if ((pc = GetPc(m))) {
-    if ((m->path.jb = StartJit(&m->system->jit))) {
-      JIT_LOGF("starting new path jit_pc:%" PRIxPTR " at pc:%" PRIx64,
+    if ((m->path.jb = StartJit(&m->system->jit, pc))) {
+      JIP_LOGF("starting new path jit_pc:%" PRIxPTR " at pc:%" PRIx64,
                GetJitPc(m->path.jb), pc);
       FlushCod(m->path.jb);
       jpc = (uintptr_t)m->path.jb->addr + m->path.jb->index;
@@ -576,7 +573,6 @@ bool CreatePath(P) {
       FlushCod(m->path.jb);
       m->path.start = pc;
       m->path.elements = 0;
-      SetJitHook(&m->system->jit, pc, (uintptr_t)JitlessDispatch);
       res = true;
     } else {
       res = false;
@@ -605,13 +601,12 @@ void FinishPath(struct Machine *m) {
   STATISTIC(path_longest = MAX(path_longest, m->path.elements));
   STATISTIC(AVERAGE(path_average_elements, m->path.elements));
   STATISTIC(AVERAGE(path_average_bytes, m->path.jb->index - m->path.jb->start));
-  if (FinishJit(&m->system->jit, m->path.jb, m->path.start)) {
+  if (FinishJit(&m->system->jit, m->path.jb)) {
     STATISTIC(++path_count);
-    JIT_LOGF("staged path to %" PRIx64, m->path.start);
+    JIP_LOGF("staged path to %" PRIx64, m->path.start);
   } else {
-    STATISTIC(++path_ooms);
-    JIT_LOGF("path starting at %" PRIx64 " ran out of space", m->path.start);
-    SetJitHook(&m->system->jit, m->path.start, 0);
+    JIP_LOGF("path starting at %" PRIx64 " couldn't be installed",
+             m->path.start);
   }
   m->path.jb = 0;
 }
@@ -620,10 +615,9 @@ void AbandonPath(struct Machine *m) {
   WriteCod("/\tABANDONED\n");
   unassert(IsMakingPath(m));
   STATISTIC(++path_abandoned);
-  JIT_LOGF("abandoning path jit_pc:%" PRIxPTR " which started at pc:%" PRIx64,
+  JIP_LOGF("abandoning path jit_pc:%" PRIxPTR " which started at pc:%" PRIx64,
            GetJitPc(m->path.jb), m->path.start);
   AbandonJit(&m->system->jit, m->path.jb);
-  SetJitHook(&m->system->jit, m->path.start, 0);
   m->path.skew = 0;
   m->path.jb = 0;
 }
@@ -631,7 +625,7 @@ void AbandonPath(struct Machine *m) {
 void FlushSkew(P) {
   unassert(IsMakingPath(m));
   if (m->path.skew) {
-    JIT_LOGF("adding %" PRId64 " to ip", m->path.skew);
+    JIP_LOGF("adding %" PRId64 " to ip", m->path.skew);
     Jitter(A,
            "a1i"  // arg1 = skew
            "q"    // arg0 = machine
@@ -673,14 +667,14 @@ void AddPath_StartOp(P) {
 #endif
   if (MustUpdateIp(A)) {
     if (!m->path.skew) {
-      JIT_LOGF("adding %" PRId64 " to ip", Oplength(rde));
+      JIP_LOGF("adding %" PRId64 " to ip", Oplength(rde));
       Jitter(A,
              "a1i"  // arg1 = Oplength(rde)
              "q"    // arg0 = machine
              "m",   // call micro-op (AddIp)
              Oplength(rde), AddIp);
     } else {
-      JIT_LOGF("adding %" PRId64 "+%" PRId64 " to ip", m->path.skew,
+      JIP_LOGF("adding %" PRId64 "+%" PRId64 " to ip", m->path.skew,
                Oplength(rde));
       Jitter(A,
              "a2i"  // arg1 = program counter delta
@@ -718,7 +712,7 @@ void AddPath_EndOp(P) {
         0x05,
     };
     AppendJit(m->path.jb, code, sizeof(code));
-    AppendJitCall(m->path.jb, (void *)CommitStash);
+    AppendJitCall(m->path.jb, (void *)(uintptr_t)CommitStash);
   }
 #elif !LOG_JIX && defined(__aarch64__)
   if (m->reserving) {
@@ -729,7 +723,7 @@ void AddPath_EndOp(P) {
         0xb4000001 | 2 << 5,          // cbz x1, +2
     };
     AppendJit(m->path.jb, code, sizeof(code));
-    AppendJitCall(m->path.jb, (void *)CommitStash);
+    AppendJitCall(m->path.jb, (void *)(uintptr_t)CommitStash);
   }
 #else
   Jitter(A,

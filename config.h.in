@@ -6,6 +6,7 @@
 // #define DISABLE_THREADS
 // #define DISABLE_SOCKETS
 // #define DISABLE_OVERLAYS
+#define DISABLE_VFS
 // #define DISABLE_NONPOSIX
 // #define DISABLE_ANCILLARY
 // #define DISABLE_DISASSEMBLER
@@ -27,6 +28,7 @@
 // #define HAVE_PREADV
 // #define HAVE_WCWIDTH
 // #define HAVE_SYSINFO
+// #define HAVE_FEXECVE
 // #define HAVE_SCHED_H
 // #define HAVE_MEMCCPY
 // #define HAVE_SEEKDIR
