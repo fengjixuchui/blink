@@ -2,6 +2,7 @@
 #define BLINK_VFS_H_
 #include <dirent.h>
 #include <poll.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -44,6 +45,7 @@ struct VfsOps {
               struct VfsMount **);
   int (*Freeinfo)(void *);
   int (*Freedevice)(void *);
+  int (*Readmountentry)(struct VfsDevice *, char **, char **, char **);
   int (*Finddir)(struct VfsInfo *, const char *, struct VfsInfo **);
   int (*Traverse)(struct VfsInfo **, const char **, struct VfsInfo *);
   ssize_t (*Readlink)(struct VfsInfo *, char **);
@@ -134,10 +136,13 @@ struct VfsOps {
   int (*Fexecve)(struct VfsInfo *, char *const *, char *const *);
 };
 
+#define VFS_SYSTEM_NAME_MAX 8
+
 struct VfsSystem {
-  const char *name;
   struct Dll elem;
   struct VfsOps ops;
+  char name[VFS_SYSTEM_NAME_MAX];
+  bool nodev;
 };
 
 struct VfsMount {
@@ -169,6 +174,11 @@ struct VfsInfo {
   u32 mode;
   _Atomic(u32) refcount;
 };
+
+extern struct Vfs g_vfs;
+extern struct VfsInfo *g_cwdinfo;
+extern struct VfsInfo *g_rootinfo;
+extern struct VfsInfo *g_actualrootinfo;
 
 #define VFS_SYSTEM_CONTAINER(e) DLL_CONTAINER(struct VfsSystem, elem, (e))
 #define VFS_MOUNT_CONTAINER(e)  DLL_CONTAINER(struct VfsMount, elem, (e))
@@ -403,6 +413,7 @@ ssize_t VfsPathBuild(struct VfsInfo *, struct VfsInfo *, bool,
 #define VfsReaddir     readdir
 #define VfsRewinddir   rewinddir
 #define VfsClosedir    closedir
+#define VfsPipe        pipe
 #define VfsPipe2       pipe2
 #define VfsSocket      socket
 #define VfsSocketpair  socketpair

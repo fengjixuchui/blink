@@ -40,6 +40,7 @@
 #include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/map.h"
+#include "blink/modrm.h"
 #include "blink/random.h"
 #include "blink/signal.h"
 #include "blink/sse.h"
@@ -115,6 +116,72 @@ static void OpLeaGvqpM(P) {
   }
 }
 
+static void OpMovEvqpGvqp(P) {
+  WriteRegisterOrMemory(rde, GetModrmRegisterWordPointerWriteOszRexw(A),
+                        ReadRegister(rde, RegRexrReg(m, rde)));
+  if (IsMakingPath(m)) {
+    Jitter(A, "A"      // res0 = GetReg(RexrReg)
+              "r0D");  // PutRegOrMem(RexbRm, res0)
+  }
+}
+
+static void OpMovGvqpEvqp(P) {
+  WriteRegister(rde, RegRexrReg(m, rde),
+                ReadMemory(rde, GetModrmRegisterWordPointerReadOszRexw(A)));
+  if (IsMakingPath(m)) {
+    Jitter(A, "B"      // res0 = GetRegOrMem(RexbRm)
+              "r0C");  // PutReg(RexrReg, res0)
+  }
+}
+
+static void OpMovzbGvqpEb(P) {
+  WriteRegister(rde, RegRexrReg(m, rde),
+                Load8(GetModrmRegisterBytePointerRead1(A)));
+  if (IsMakingPath(m)) {
+    Jitter(A, "B"       // res0 = GetRegOrMem(RexbRm)
+              "r0wC");  // PutReg[force16/32/64bit](RexrReg, res0)
+  }
+}
+
+static void OpMovzwGvqpEw(P) {
+  WriteRegister(rde, RegRexrReg(m, rde),
+                Load16(GetModrmRegisterWordPointerRead2(A)));
+  if (IsMakingPath(m)) {
+    Jitter(A, "z1B"    // res0 = GetRegOrMem[force16bit](RexbRm)
+              "r0C");  // PutReg(RexrReg, res0)
+  }
+}
+
+static void OpMovsbGvqpEb(P) {
+  WriteRegister(rde, RegRexrReg(m, rde),
+                (i8)Load8(GetModrmRegisterBytePointerRead1(A)));
+  if (IsMakingPath(m)) {
+    Jitter(A, "B"       // res0 = GetRegOrMem(RexbRm)
+              "r0x"     // res0 = SignExtend(res0)
+              "r0wC");  // PutReg[force16/32/64bit](RexrReg, res0)
+  }
+}
+
+static void OpMovswGvqpEw(P) {
+  WriteRegister(rde, RegRexrReg(m, rde),
+                (i16)Load16(GetModrmRegisterWordPointerRead2(A)));
+  if (IsMakingPath(m)) {
+    Jitter(A, "z1B"    // res0 = GetRegOrMem[force16bit](RexbRm)
+              "r0z1x"  // res0 = SignExtend[force16bit](res0)
+              "r0C");  // PutReg(RexrReg, res0)
+  }
+}
+
+static void OpMovslGdqpEd(P) {
+  WriteRegister(rde, RegRexrReg(m, rde),
+                (i32)Load32(GetModrmRegisterWordPointerRead4(A)));
+  if (IsMakingPath(m)) {
+    Jitter(A, "z2B"    // res0 = GetRegOrMem[force32bit](RexbRm)
+              "r0z2x"  // res0 = SignExtend[force32bit](res0)
+              "r0C");  // PutReg(RexrReg, res0)
+  }
+}
+
 static relegated u64 GetDescriptorLimit(u64 d) {
   u64 lim = (d & 0x000f000000000000) >> 32 | (d & 0xffff);
   if ((d & 0x0080000000000000) != 0) lim = (lim << 12) | 0xfff;
@@ -168,10 +235,59 @@ static void OpXchgZvqp(P) {
   WriteRegister(rde, RegRexbSrm(m, rde), x);
 }
 
+static void OpCmpxchg8b(P) {
+  uint8_t *p;
+  uint32_t d, a;
+  p = GetModrmRegisterXmmPointerRead8(A);
+  if (Lock(rde)) LockBus(p);
+  a = Read32(p + 0);
+  d = Read32(p + 4);
+  if (a == Read32(m->ax) && d == Read32(m->dx)) {
+    m->flags = SetFlag(m->flags, FLAGS_ZF, true);
+    memcpy(p + 0, m->bx, 4);
+    memcpy(p + 4, m->cx, 4);
+  } else {
+    m->flags = SetFlag(m->flags, FLAGS_ZF, false);
+    Write32(m->ax, a);
+    Write32(m->dx, d);
+  }
+  if (Lock(rde)) UnlockBus(p);
+}
+
+static void OpCmpxchg16b(P) {
+  uint8_t *p;
+  uint64_t d, a;
+  p = GetModrmRegisterXmmPointerRead16(A);
+  if (Lock(rde)) LockBus(p);
+  a = Read64(p + 0);
+  d = Read64(p + 8);
+  if (a == Read64(m->ax) && d == Read64(m->dx)) {
+    m->flags = SetFlag(m->flags, FLAGS_ZF, true);
+    memcpy(p + 0, m->bx, 8);
+    memcpy(p + 8, m->cx, 8);
+  } else {
+    m->flags = SetFlag(m->flags, FLAGS_ZF, false);
+    Write64(m->ax, a);
+    Write64(m->dx, d);
+  }
+  if (Lock(rde)) UnlockBus(p);
+}
+
 static void Op1c7(P) {
   bool ismem;
   ismem = !IsModrmRegister(rde);
   switch (ModrmReg(rde)) {
+    case 1:
+      if (ismem) {
+        if (Rexw(rde)) {
+          OpCmpxchg16b(A);
+        } else {
+          OpCmpxchg8b(A);
+        }
+      } else {
+        OpUdImpl(m);
+      }
+      break;
     case 6:
       if (!ismem) {
         OpRdrand(A);
@@ -193,71 +309,6 @@ static void Op1c7(P) {
     default:
       OpUdImpl(m);
   }
-}
-
-static u64 Bts(u64 x, u64 y) {
-  return x | y;
-}
-
-static u64 Btr(u64 x, u64 y) {
-  return x & ~y;
-}
-
-static u64 Btc(u64 x, u64 y) {
-  return (x & ~y) | (~x & y);
-}
-
-static void OpBit(P) {
-  u8 *p;
-  int op;
-  i64 bitdisp;
-  unsigned bit;
-  u64 v, x, y, z;
-  u8 w, W[2][2] = {{2, 3}, {1, 3}};
-  w = W[Osz(rde)][Rexw(rde)];
-  if (Opcode(rde) == 0xBA) {
-    op = ModrmReg(rde);
-    bit = uimm0 & ((8 << w) - 1);
-    bitdisp = 0;
-  } else {
-    op = (Opcode(rde) & 070) >> 3;
-    bitdisp = ReadRegisterSigned(rde, RegRexrReg(m, rde));
-    bit = bitdisp & ((8 << w) - 1);
-    bitdisp &= -(8 << w);
-    bitdisp >>= 3;
-  }
-  if (IsModrmRegister(rde)) {
-    p = RegRexbRm(m, rde);
-  } else {
-    v = MaskAddress(Eamode(rde), ComputeAddress(A) + bitdisp);
-    p = ReserveAddress(m, v, 1 << w, op != 4);
-  }
-  if (Lock(rde)) LockBus(p);
-  y = 1;
-  y <<= bit;
-  if (Lock(rde)) {
-    x = ReadMemoryUnlocked(rde, p);
-  } else {
-    x = ReadMemory(rde, p);
-  }
-  m->flags = SetFlag(m->flags, FLAGS_CF, !!(y & x));
-  switch (op) {
-    case 4:
-      return;
-    case 5:
-      z = Bts(x, y);
-      break;
-    case 6:
-      z = Btr(x, y);
-      break;
-    case 7:
-      z = Btc(x, y);
-      break;
-    default:
-      OpUdImpl(m);
-  }
-  WriteRegisterOrMemory(rde, p, z);
-  if (Lock(rde)) UnlockBus(p);
 }
 
 static void TripleOp(P, const nexgen32e_f ops[3]) {
@@ -375,88 +426,25 @@ static void OpMovImm(P) {
   }
 }
 
-static void OpMovEvqpGvqp(P) {
-  WriteRegisterOrMemory(rde, GetModrmRegisterWordPointerWriteOszRexw(A),
-                        ReadRegister(rde, RegRexrReg(m, rde)));
-  if (IsMakingPath(m)) {
-    Jitter(A, "A"      // res0 = GetReg(RexrReg)
-              "r0D");  // PutRegOrMem(RexbRm, res0)
-  }
-}
-
-static void OpMovGvqpEvqp(P) {
-  WriteRegister(rde, RegRexrReg(m, rde),
-                ReadMemory(rde, GetModrmRegisterWordPointerReadOszRexw(A)));
-  if (IsMakingPath(m)) {
-    Jitter(A, "B"      // res0 = GetRegOrMem(RexbRm)
-              "r0C");  // PutReg(RexrReg, res0)
-  }
-}
-
-static void OpMovzbGvqpEb(P) {
-  WriteRegister(rde, RegRexrReg(m, rde),
-                Load8(GetModrmRegisterBytePointerRead1(A)));
-  if (IsMakingPath(m)) {
-    Jitter(A, "B"       // res0 = GetRegOrMem(RexbRm)
-              "r0wC");  // PutReg[force16/32/64bit](RexrReg, res0)
-  }
-}
-
-static void OpMovzwGvqpEw(P) {
-  WriteRegister(rde, RegRexrReg(m, rde),
-                Load16(GetModrmRegisterWordPointerRead2(A)));
-  if (IsMakingPath(m)) {
-    Jitter(A, "z1B"    // res0 = GetRegOrMem[force16bit](RexbRm)
-              "r0C");  // PutReg(RexrReg, res0)
-  }
-}
-
-static void OpMovsbGvqpEb(P) {
-  WriteRegister(rde, RegRexrReg(m, rde),
-                (i8)Load8(GetModrmRegisterBytePointerRead1(A)));
-  if (IsMakingPath(m)) {
-    Jitter(A, "B"       // res0 = GetRegOrMem(RexbRm)
-              "r0x"     // res0 = SignExtend(res0)
-              "r0wC");  // PutReg[force16/32/64bit](RexrReg, res0)
-  }
-}
-
-static void OpMovswGvqpEw(P) {
-  WriteRegister(rde, RegRexrReg(m, rde),
-                (i16)Load16(GetModrmRegisterWordPointerRead2(A)));
-  if (IsMakingPath(m)) {
-    Jitter(A, "z1B"    // res0 = GetRegOrMem[force16bit](RexbRm)
-              "r0z1x"  // res0 = SignExtend[force16bit](res0)
-              "r0C");  // PutReg(RexrReg, res0)
-  }
-}
-
-static void OpMovslGdqpEd(P) {
-  WriteRegister(rde, RegRexrReg(m, rde),
-                (i32)Load32(GetModrmRegisterWordPointerRead4(A)));
-  if (IsMakingPath(m)) {
-    Jitter(A, "z2B"    // res0 = GetRegOrMem[force32bit](RexbRm)
-              "r0z2x"  // res0 = SignExtend[force32bit](res0)
-              "r0C");  // PutReg(RexrReg, res0)
-  }
-}
-
 // we want to have independent jit paths jump directly into one another
 // to avoid having control flow drop back to the main interpreter loop.
 void Connect(P, u64 pc, bool avoid_cycles) {
 #ifdef HAVE_JIT
   void *jump;
   uintptr_t f;
-  // 1. branchless cyclic paths block sigs and deadlock shutdown
+  STATISTIC(++path_connected_total);
+  // 1. cyclic paths can block asynchronous sigs & deadlock exit
   // 2. we don't want to stitch together paths on separate pages
-  if (!(avoid_cycles && pc == m->path.start) &&
-      (pc & -4096) == (m->path.start & -4096)) {
+  if ((!avoid_cycles && m->path.start == pc) ||
+      RecordJitEdge(&m->system->jit, m->path.start, pc)) {
     // is a preexisting jit path installed at destination?
-    f = GetJitHook(&m->system->jit, pc, (uintptr_t)GeneralDispatch);
-    if (f != (uintptr_t)JitlessDispatch && f != (uintptr_t)GeneralDispatch) {
+    if ((f = GetJitHook(&m->system->jit, pc)) &&
+        f != (uintptr_t)JitlessDispatch) {
       // tail call into the other generated jit path function
       jump = (u8 *)f + GetPrologueSize();
+      STATISTIC(++path_connected_directly);
     } else {
+      STATISTIC(++path_connected_lazily);
       // generate assembly to drop back into main interpreter
       // then apply an smc fixup later on, if dest is created
       if (!FLAG_noconnect) {
@@ -466,6 +454,7 @@ void Connect(P, u64 pc, bool avoid_cycles) {
     }
   } else {
     // generate assembly to drop back into main interpreter
+    STATISTIC(++path_connected_interpreter);
     jump = (void *)m->system->ender;
   }
   AppendJitJump(m->path.jb, jump);
@@ -829,7 +818,7 @@ static void OpInterrupt3(P) {
 void Terminate(P, void uop(struct Machine *, u64)) {
   if (IsMakingPath(m)) {
     Jitter(A,
-           "a1i"  //
+           "a1i"  // arg1 = disp
            "m"    // call micro-op
            "q",   // arg0 = sav0 (machine)
            disp, uop);
@@ -875,7 +864,7 @@ static void OpJcc(P) {
     };
 #endif
     AppendJit(m->path.jb, code, sizeof(code));
-    Connect(A, m->ip, false);
+    Connect(A, m->ip, true);
     Jitter(A,
            "a1i"  // arg1 = disp
            "m"    // call micro-op
@@ -1134,13 +1123,18 @@ static void Op0f7(P) {
   kOp0f7[ModrmReg(rde)](A);
 }
 
+#ifdef DISABLE_METAL
+#define OpCallfEq OpUd
+#define OpJmpfEq  OpUd
+#endif
+
 static const nexgen32e_f kOp0ff[] = {
     OpIncEvqp,  //
     OpDecEvqp,  //
     OpCallEq,   //
-    OpUd,       //
+    OpCallfEq,  //
     OpJmpEq,    //
-    OpUd,       //
+    OpJmpfEq,   //
     OpPushEvq,  //
     OpUd,       //
 };
@@ -1360,46 +1354,6 @@ static void OpNop(P) {
   }
 }
 
-static relegated void OpMovRqCq(P) {
-  switch (ModrmReg(rde)) {
-    case 0:
-      Put64(RegRexbRm(m, rde), m->system->cr0);
-      break;
-    case 2:
-      Put64(RegRexbRm(m, rde), m->system->cr2);
-      break;
-    case 3:
-      Put64(RegRexbRm(m, rde), m->system->cr3);
-      break;
-    case 4:
-      Put64(RegRexbRm(m, rde), m->system->cr4);
-      break;
-    default:
-      OpUdImpl(m);
-  }
-}
-
-static relegated void OpMovCqRq(P) {
-  switch (ModrmReg(rde)) {
-    case 0:
-      m->system->cr0 = Get64(RegRexbRm(m, rde));
-      break;
-    case 2:
-      m->system->cr2 = Get64(RegRexbRm(m, rde));
-      break;
-    case 3:
-      m->system->cr3 = Get64(RegRexbRm(m, rde));
-      ResetTlb(m);
-      break;
-    case 4:
-      m->system->cr4 = Get64(RegRexbRm(m, rde));
-      ResetTlb(m);
-      break;
-    default:
-      OpUdImpl(m);
-  }
-}
-
 static void OpEmms(P) {
 #ifndef DISABLE_X87
   m->fpu.tw = -1;
@@ -1417,7 +1371,9 @@ static void OpEmms(P) {
 #define OpJmpf      OpUd
 #define OpLds       OpUd
 #define OpLes       OpUd
+#define OpMovCqRq   OpUd
 #define OpMovEvqpSw OpUd
+#define OpMovRqCq   OpUd
 #define OpMovSwEvqp OpUd
 #define OpOutDxAl   OpUd
 #define OpOutDxAx   OpUd
@@ -2022,7 +1978,7 @@ void JitlessDispatch(P) {
   m->oplen = 0;
 }
 
-void GeneralDispatch(P) {
+static void GeneralDispatch(P) {
 #ifdef HAVE_JIT
   int opclass;
   uintptr_t jitpc = 0;
@@ -2094,51 +2050,47 @@ void GeneralDispatch(P) {
 #endif
 }
 
-static void ExploreInstruction(struct Machine *m, nexgen32e_f func) {
-#ifdef HAVE_JIT
-  if (func == JitlessDispatch) {
-    JIT_LOGF("abandoning path starting at %" PRIx64
-             " due to running into staged path",
-             m->path.start);
-    AbandonPath(m);
-    COSTLY_STATISTIC(++instructions_dispatched);
-    func(DISPATCH_NOTHING);
-    return;
-  } else if (func != GeneralDispatch &&
-             (m->path.start & -4096) == (m->ip & -4096)) {
-    JIT_LOGF("splicing path starting at %#" PRIx64
-             " into previously created function %p at %#" PRIx64,
-             m->path.start, func, m->ip);
-    STATISTIC(++path_spliced);
-    FlushSkew(DISPATCH_NOTHING);
-    AppendJitSetReg(m->path.jb, kJitArg0, kJitSav0);
-    AppendJitJump(m->path.jb, (u8 *)(uintptr_t)func + GetPrologueSize());
-    FinishPath(m);
-    COSTLY_STATISTIC(++instructions_dispatched);
-    func(DISPATCH_NOTHING);
-    return;
-  } else {
-    GeneralDispatch(DISPATCH_NOTHING);
-  }
-#endif
-}
-
 void ExecuteInstruction(struct Machine *m) {
 #if LOG_CPU
   LogCpu(m);
 #endif
 #ifdef HAVE_JIT
+  u8 *dst;
   nexgen32e_f func;
+  unassert(m->canhalt);
   if (CanJit(m)) {
-    func = (nexgen32e_f)GetJitHook(&m->system->jit, m->ip,
-                                   (uintptr_t)GeneralDispatch);
-    if (!IsMakingPath(m)) {
-      // this increment can cause a >3% overall slowdown
-      COSTLY_STATISTIC(++instructions_dispatched);
-      func(DISPATCH_NOTHING);
-    } else {
-      ExploreInstruction(m, func);
+    if ((func = (nexgen32e_f)GetJitHook(&m->system->jit, m->ip))) {
+      if (!IsMakingPath(m)) {
+        func(DISPATCH_NOTHING);
+        return;
+      } else if (func == JitlessDispatch) {
+        JIT_LOGF("abandoning path starting at %" PRIx64
+                 " due to running into staged path",
+                 m->path.start);
+        AbandonPath(m);
+        func(DISPATCH_NOTHING);
+        return;
+      } else {
+        JIT_LOGF("splicing path starting at %#" PRIx64
+                 " into previously created function %p at %#" PRIx64,
+                 m->path.start, func, m->ip);
+        FlushSkew(DISPATCH_NOTHING);
+        AppendJitSetReg(m->path.jb, kJitArg0, kJitSav0);
+        STATISTIC(++path_spliced);
+        if (RecordJitEdge(&m->system->jit, m->path.start, m->ip)) {
+          dst = (u8 *)(uintptr_t)func + GetPrologueSize();
+          STATISTIC(++path_connected_directly);
+        } else {
+          STATISTIC(++path_connected_interpreter);
+          dst = (u8 *)m->system->ender;
+        }
+        AppendJitJump(m->path.jb, dst);
+        FinishPath(m);
+        func(DISPATCH_NOTHING);
+        return;
+      }
     }
+    GeneralDispatch(DISPATCH_NOTHING);
   } else {
     JitlessDispatch(DISPATCH_NOTHING);
   }
@@ -2158,6 +2110,7 @@ void Actor(struct Machine *mm) {
 #ifndef __CYGWIN__
     STATISTIC(++interps);
 #endif
+    JIX_LOGF("INTERPRETER");
     if (!atomic_load_explicit(&m->attention, memory_order_acquire)) {
       ExecuteInstruction(m);
     } else {

@@ -150,6 +150,10 @@ void TerminateSignal(struct Machine *m, int sig, int code) {
   int syssig;
   struct sigaction sa;
   unassert(!IsSignalIgnoredByDefault(sig));
+  KillOtherThreads(m->system);
+#ifdef HAVE_JIT
+  DisableJit(&m->system->jit);  // unmapping exec pages is slow
+#endif
   if (IsSignalSerious(sig)) {
     ERRF("terminating due to %s ("
          "rip=%#" PRIx64 " "
@@ -159,7 +163,6 @@ void TerminateSignal(struct Machine *m, int sig, int code) {
     PrintDiagnostics(m);
   }
   if ((syssig = XlatSignal(sig)) == -1) syssig = SIGKILL;
-  KillOtherThreads(m->system);
   FreeMachine(m);
 #ifdef HAVE_JIT
   ShutdownJit();
@@ -218,6 +221,9 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
     }
     ProgramLimit(m->system, RLIMIT_NOFILE, RLIMIT_NOFILE_LINUX);
   } else {
+#ifdef HAVE_JIT
+    DisableJit(&old->system->jit);  // unmapping exec pages is slow
+#endif
     unassert(!m->sysdepth);
     unassert(!m->pagelocks.i);
     unassert(!FreeVirtual(old->system, -0x800000000000, 0x1000000000000));

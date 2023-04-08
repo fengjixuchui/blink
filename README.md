@@ -1,7 +1,5 @@
 ![Screenshot of Blink running GCC 9.4.0](blink/blink-gcc.png)
 
-[![Test Status](https://github.com/jart/blink/actions/workflows/build.yml/badge.svg)](https://github.com/jart/blink/actions/workflows/build.yml)
-[![Cygwin Test Status](https://github.com/jart/blink/actions/workflows/cygwin.yml/badge.svg)](https://github.com/jart/blink/actions/workflows/cygwin.yml)
 # Blinkenlights
 
 This project contains two programs:
@@ -10,7 +8,7 @@ This project contains two programs:
 different operating systems and hardware architectures. It's designed to
 do the same thing as the `qemu-x86_64` command, except that
 
-1. Blink is 213kb in size (112kb with optional features disabled),
+1. Blink is 217kb in size (115kb with optional features disabled),
    whereas qemu-x86_64 is a 4mb binary.
 
 2. Blink will run your Linux binaries on any POSIX system, whereas
@@ -43,7 +41,7 @@ following platforms:
 
 Blink depends on the following libraries:
 
-- libc (POSIX.1-2017 baseline, XSI not required)
+- libc (POSIX.1-2017 with XSI extensions)
 
 Blink can be compiled on UNIX systems that have:
 
@@ -133,8 +131,7 @@ You can check Blink's compliance with the POSIX standard using the
 following configuration flags:
 
 ```sh
-./configure --posix  # only use c11 with baseline posix standard
-./configure --xopen  # same but also allow use of xsi extensions
+./configure --posix  # only use c11 with posix xopen standard
 ```
 
 ### Testing
@@ -729,33 +726,6 @@ JIT path formation be visualized. Blink currently only enables the JIT
 for programs running in long mode (64-bit) but we may support JITing
 16-bit programs in the future.
 
-Blink stores generated functions by virtual address in a multithreaded
-lockless hash table. The hottest operation in the codebase is reading
-from this hash table, using a function called `GetJitHook`. Since it'd
-slow Blink down by more than 33% if a mutex were used here, Blink will
-synchronize reads optimistically using only carefully ordered load
-instructions, three of which have acquire semantics. This hash table
-starts off at a reasonable size and grows gradually with the memory
-requirements. This design is the primary reason Blink usually uses 40%
-less peak resident memory than Qemu.
-
-The amount of JIT memory Blink can use is currently limited by the ISA
-displacement. On Aaarch64 that's roughly ~22mb of JIT memory. Blink is
-able to tell when JIT memory is running out (>90% usage) and reacts by
-forcing the oldest blocks of generated code to retire. Retired blocks
-have all their hash entrypoints removed, but they can't be unmapped
-since other threads might still be executing on them. Blink handles this
-using a circular queue that reuses the least-recently retired blocks.
-
-Blink doesn't use indirect branches in generated JIT code and instead
-favors the use of near branches. Since generated JIT code will usually
-call statically compiled functions, we need to ensure that that JIT
-memory and Blink's executable image both reside at a closeby location in
-the host virtual address space. Blink accomplishes that by defining a
-gigantic static array that's part of the executable's `.bss` section.
-This ensures Blink will always have access to JIT memory, and that it
-won't interfere with any system's dynamic linker.
-
 ### Virtualization
 
 Blink virtualizes memory using the same PML4T approach as the hardware
@@ -785,10 +755,63 @@ flag may be passed to disable the linear translation optimization, and
 instead use only the memory safe full virtualization approach of the
 PML4T and TLB.
 
+#### Lockless Hashing
+
+Blink stores generated functions by virtual address in a multithreaded
+lockless hash table. The hottest operation in the codebase is reading
+from this hash table, using a function called `GetJitHook`. Since it'd
+slow Blink down by more than 33% if a mutex were used here, Blink will
+synchronize reads optimistically using only carefully ordered load
+instructions, three of which have acquire semantics. This hash table
+starts off at a reasonable size and grows gradually with the memory
+requirements. This design is the primary reason Blink usually uses 40%
+less peak resident memory than Qemu.
+
+#### Acyclic Codegen
+
+Even though JIT paths will always end at branching instructions, Blink
+will generate code so that paths tail call into each other, in order to
+avoid dropping back into the main interpreter loop. The average length
+of a JIT path is about ~5 opcodes. Connecting paths causes the average
+path length to be ~13 opcodes.
+
+Since Blink only checks for asynchronous signal delivery and shutdown
+events from the main interpreter loop, Blink maintains a bidirectional
+map of edges between generated functions, so that path connections which
+would result in cycles are never introduced.
+
+An exception is made for tight conditional branches, i.e. jumps whose
+taken path jump backwards to the start of the JIT path. Such branches
+are allowed to be self-referencing so that whole loops of non-system
+operations may be run in purely native code.
+
+#### Reliable Memory
+
+Blink has a 22mb global static variable that's set aside for JIT code.
+This limit was chosen because that's roughly the maximum displacement
+permitted on Arm64 architecture. Having that memory near the program
+image helps make Blink simpler, since generated functions call normal
+functions, without needing relocations or procedure linkage tables.
+
+When Blink runs out of JIT memory, it simply clears all JIT hooks and
+lets the whole code generation process start again. Blink is very fast
+at generating code, and it wouldn't make sense during an OOM panic to
+arbitrarily choose a subset of pages to reset, since resetting pages
+requires tracing their dependencies and resetting those too. Starting
+over is much better. It's so much better in fact, that even if Blink
+only reserved less than a megabyte of memory for JIT, then the slowdown
+that'd be incurred running 40mb binaries like GCC CC1 would only be 3x.
+
+Blink triggers the OOM panic when only 10% of its JIT memory remains.
+That's because in multi-threaded programs, there's no way to guarantee
+nothing is still executing on the retired code blocks. Blink solves this
+by letting retired blocks cool off at the back of a freelist queue, so
+the acyclicity invariant has abundant time to ensure threads drop out.
+
 ### Self-Modifying Code
 
 Many CPU architectures require esoteric rituals for flushing CPU caches
-when code modifies itself. That's not the case with x86 archihtecture,
+when code modifies itself. That's not the case with x86 architecture,
 which takes care of this chore automatically. Blink is able to offer the
 same promises here as Intel and AMD, by abstracting fast and automatic
 invalidation of caches for programs using self-modifying code (SMC).

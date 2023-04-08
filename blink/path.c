@@ -54,7 +54,7 @@ static void StartPath(struct Machine *m, i64 pc) {
 
 static void DebugOp(struct Machine *m, i64 expected_ip) {
   if (m->ip != expected_ip) {
-    LOGF("IP was %" PRIx64 " but it should have been %" PRIx64, m->ip,
+    ERRF("IP was %" PRIx64 " but it should have been %" PRIx64, m->ip,
          expected_ip);
   }
   unassert(m->ip == expected_ip);
@@ -155,7 +155,7 @@ void(SetupCod)(struct Machine *m) {
   LoadDebugSymbols(m->system);
   DisLoadElf(&g_dis, &m->system->elf);
   g_cod = VfsOpen(AT_FDCWD_LINUX, "/tmp/blink.s",
-                    O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+                  O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
   g_cod = VfsFcntl(g_cod, F_DUPFD_CLOEXEC, kMinBlinkFd);
 #endif
 }
@@ -520,7 +520,7 @@ static bool MustUpdateIp(P) {
   u64 next;
   if (!IsPure(rde)) return true;
   next = m->ip + Oplength(rde);
-  if (GetJitHook(&m->system->jit, next, 0)) return true;
+  if (GetJitHook(&m->system->jit, next)) return true;
   return false;
 }
 
@@ -614,7 +614,6 @@ void FinishPath(struct Machine *m) {
 void AbandonPath(struct Machine *m) {
   WriteCod("/\tABANDONED\n");
   unassert(IsMakingPath(m));
-  STATISTIC(++path_abandoned);
   JIP_LOGF("abandoning path jit_pc:%" PRIxPTR " which started at pc:%" PRIx64,
            GetJitPc(m->path.jb), m->path.start);
   AbandonJit(&m->system->jit, m->path.jb);
